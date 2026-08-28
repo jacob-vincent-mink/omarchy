@@ -166,9 +166,56 @@ jobs:
             printf 'Expected one omarchy-dev archive, found %s\n' "${#packages[@]}" >&2
             exit 1
           }
-          sha256sum "${packages[0]}" | tee -a artifacts/provenance.log
-          target/native/plugin-runtime/packaging/verify-package.sh "${packages[0]}" 2>&1 | tee artifacts/package-verifier.log
-          target/native/plugin-runtime/packaging/verify-package-test.sh "${packages[0]}" 2>&1 | tee artifacts/package-verifier-negative.log
+          package=${packages[0]}
+          short_sha=${TARGET_SHA:0:7}
+          package_name=$(basename "$package")
+          [[ $package_name == *".g$short_sha-"* ]] || {
+            echo "local package name does not bind final target $short_sha: $package_name" >&2
+            exit 1
+          }
+          package_version=$(bsdtar -xOf "$package" .PKGINFO | sed -n 's/^pkgver = //p')
+          [[ $package_version == *".g$short_sha-"* ]] || {
+            echo "local package metadata does not bind final target $short_sha: $package_version" >&2
+            exit 1
+          }
+          sha256sum "$package" | tee -a artifacts/provenance.log
+          target/native/plugin-runtime/packaging/verify-package.sh "$package" 2>&1 | tee artifacts/package-verifier.log
+          target/native/plugin-runtime/packaging/verify-package-test.sh "$package" 2>&1 | tee artifacts/package-verifier-negative.log
+
+          package_root=$(mktemp -d)
+          trap 'rm -rf -- "$package_root"' EXIT
+          bsdtar -xf "$package" -C "$package_root"
+          host_hash=$(sha256sum "$package_root/usr/bin/omarchy-plugin-host" | awk '{ print $1 }')
+          worker_hash=$(sha256sum "$package_root/usr/lib/omarchy/plugin-runtime/omarchy-plugin-qml-worker" | awk '{ print $1 }')
+          bridge_hash=$(sha256sum "$package_root/usr/lib/qt6/qml/Omarchy/PluginHost/libomarchy-plugin-host-bridge.so" | awk '{ print $1 }')
+          identity_test=target/test/acceptance.d/zz-plugin-package-identity-test.sh
+          {
+            printf '%s\n' '#!/bin/bash' '' 'set -euo pipefail' 'source "$(dirname "$0")/base-test.sh"'
+            printf 'expected_package=%q\n' "omarchy-dev $package_version"
+            printf 'expected_host_hash=%q\n' "$host_hash"
+            printf 'expected_worker_hash=%q\n' "$worker_hash"
+            printf 'expected_bridge_hash=%q\n' "$bridge_hash"
+            printf '%s\n' \
+              'actual_package=$(pacman -Q omarchy-dev)' \
+              '[[ $actual_package == "$expected_package" ]] || fail "installed plugin package matches exact local build version" "expected $expected_package, got $actual_package"' \
+              '{' \
+              '  printf "%s  %s\\n" "$expected_host_hash" /usr/bin/omarchy-plugin-host' \
+              '  printf "%s  %s\\n" "$expected_worker_hash" /usr/lib/omarchy/plugin-runtime/omarchy-plugin-qml-worker' \
+              '  printf "%s  %s\\n" "$expected_bridge_hash" /usr/lib/qt6/qml/Omarchy/PluginHost/libomarchy-plugin-host-bridge.so' \
+              '} | sha256sum --check - >"$ARTIFACTS/plugin-package-identity.log" 2>&1 || fail "installed plugin payload matches exact local-source archive"' \
+              'printf "%s\\n" "$actual_package" >>"$ARTIFACTS/plugin-package-identity.log"' \
+              'pass "installed secure plugin payload matches exact local-source archive"'
+          } >"$identity_test"
+          chmod 755 "$identity_test"
+          {
+            echo "package_version=$package_version"
+            echo "host_sha256=$host_hash"
+            echo "worker_sha256=$worker_hash"
+            echo "bridge_sha256=$bridge_hash"
+            echo "acceptance_overlay=exact_package_identity_probe"
+          } | tee -a artifacts/provenance.log
+          rm -rf -- "$package_root"
+          trap - EXIT
 
       - name: Reclaim build cache before the 40 GiB sparse VM disk
         shell: bash
@@ -201,6 +248,28 @@ jobs:
                 --sync-omarchy "$OMARCHY_PATH" \
                 --no-preview
             ' 2>&1 | tee artifacts/iso-test.log
+          for proof in \
+            'ok - installed secure plugin payload matches exact local-source archive' \
+            'ok - direct secure plugin worker launch is denied' \
+            'ok - secure plugin host service remains disabled and inactive' \
+            'ok - secure plugin bridge module loads with packaged Qt under Wayland and remains feature-gated' \
+            'Acceptance suite passed. Artifacts:'; do
+            grep -F "$proof" artifacts/iso-test.log >/dev/null || {
+              echo "mandatory acceptance proof is absent from iso-test.log: $proof" >&2
+              exit 1
+            }
+          done
+          mapfile -t identity_logs < <(find omarchy-iso/test-runs -type f -name plugin-package-identity.log -print)
+          mapfile -t module_logs < <(find omarchy-iso/test-runs -type f -name plugin-host-module.log -print)
+          mapfile -t module_shots < <(find omarchy-iso/test-runs -type f -name success-secure-plugin-bridge-module.png -print)
+          (( ${#identity_logs[@]} == 1 && ${#module_logs[@]} == 1 && ${#module_shots[@]} == 1 )) || {
+            echo "expected exactly one identity log, module log, and module screenshot" >&2
+            exit 1
+          }
+          [[ -s ${identity_logs[0]} && -s ${module_shots[0]} ]] || {
+            echo "mandatory identity log or graphical screenshot is empty" >&2
+            exit 1
+          }
 
       - name: Collect logs and screenshots only
         if: always()
