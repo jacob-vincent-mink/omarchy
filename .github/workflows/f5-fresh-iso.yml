@@ -259,10 +259,32 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf -- "$HOME/.cache/omarchy"
+          cache_path="$HOME/.cache/omarchy"
+          [[ -n $HOME && $HOME == /home/runner ]] || {
+            printf 'Refusing cache cleanup for unexpected runner HOME: %q\n' "$HOME" >&2
+            exit 1
+          }
+          [[ -n $cache_path && $cache_path == "$HOME/.cache/omarchy" && $cache_path == "$HOME"/* ]] || {
+            printf 'Refusing unsafe cache cleanup path: %q\n' "$cache_path" >&2
+            exit 1
+          }
+          [[ -d $cache_path && ! -L $cache_path ]] || {
+            printf 'Expected a real cache directory at %q\n' "$cache_path" >&2
+            exit 1
+          }
+          {
+            echo 'Privileged ISO cache before exact-path cleanup:'
+            stat -c 'path=%n owner=%U:%G mode=%a' "$cache_path"
+            du -sh -- "$cache_path"
+          } | tee -a artifacts/preflight.log
+          sudo rm -rf -- "$cache_path"
+          [[ ! -e $cache_path && ! -L $cache_path ]] || {
+            printf 'Cache cleanup did not remove %q\n' "$cache_path" >&2
+            exit 1
+          }
           docker image rm archlinux/archlinux:latest "$ARCH_BUILD_IMAGE" || true
           docker image prune --all --force
-          df -h /
+          df -h / | tee -a artifacts/preflight.log
 
       - name: Run fresh headless install and graphical acceptance
         shell: bash
