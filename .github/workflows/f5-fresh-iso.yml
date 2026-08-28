@@ -130,10 +130,37 @@ jobs:
           }
           trap cleanup EXIT
           docker run --name f5-arch-build-seed "$ARCH_BUILD_IMAGE" \
-            pacman -Syu --noconfirm bubblewrap cmake libseccomp ninja qt6-base qt6-declarative
+            pacman -Syu --noconfirm base-devel bubblewrap cmake libseccomp ninja qt6-base qt6-declarative
           docker commit f5-arch-build-seed archlinux/archlinux:latest >/dev/null
           cleanup
           trap - EXIT
+
+      - name: Preflight pinned Arch package-verifier environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+            -w "$GITHUB_WORKSPACE" \
+            archlinux/archlinux:latest bash -lc '
+              set -euo pipefail
+              for command in awk basename bsdtar chmod cp file find gcc grep ldd mktemp mv objdump readelf rm sed sha256sum sort stat touch zstd; do
+                command -v "$command" >/dev/null || {
+                  echo "pinned Arch verifier environment lacks $command" >&2
+                  exit 1
+                }
+              done
+              [[ -x /usr/lib/qt6/bin/qml ]] || {
+                echo "pinned Arch verifier environment lacks /usr/lib/qt6/bin/qml" >&2
+                exit 1
+              }
+              [[ -x target/native/plugin-runtime/packaging/verify-package.sh &&
+                 -x target/native/plugin-runtime/packaging/verify-package-test.sh ]] || {
+                echo "exact candidate lacks executable package verifiers" >&2
+                exit 1
+              }
+              echo "pinned Arch package-verifier environment passed preflight"
+            '
 
       - name: Build fresh local-source ISO and package checks
         shell: bash
@@ -167,55 +194,66 @@ jobs:
             exit 1
           }
           package=${packages[0]}
-          short_sha=${TARGET_SHA:0:7}
-          package_name=$(basename "$package")
-          [[ $package_name == *".g$short_sha-"* ]] || {
-            echo "local package name does not bind final target $short_sha: $package_name" >&2
-            exit 1
-          }
-          package_version=$(bsdtar -xOf "$package" .PKGINFO | sed -n 's/^pkgver = //p')
-          [[ $package_version == *".g$short_sha-"* ]] || {
-            echo "local package metadata does not bind final target $short_sha: $package_version" >&2
-            exit 1
-          }
-          sha256sum "$package" | tee -a artifacts/provenance.log
-          target/native/plugin-runtime/packaging/verify-package.sh "$package" 2>&1 | tee artifacts/package-verifier.log
-          target/native/plugin-runtime/packaging/verify-package-test.sh "$package" 2>&1 | tee artifacts/package-verifier-negative.log
+          package=$(readlink -f "$package")
+          docker run --rm \
+            -e "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            -e "PACKAGE=$package" \
+            -e "TARGET_SHA=$TARGET_SHA" \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            -v "$HOME/.cache/omarchy:$HOME/.cache/omarchy:ro" \
+            -w "$GITHUB_WORKSPACE" \
+            archlinux/archlinux:latest bash -lc '
+              set -euo pipefail
+              set -o pipefail
+              short_sha=${TARGET_SHA:0:7}
+              package_name=$(basename "$PACKAGE")
+              [[ $package_name == *".g$short_sha-"* ]] || {
+                echo "local package name does not bind final target $short_sha: $package_name" >&2
+                exit 1
+              }
+              package_version=$(bsdtar -xOf "$PACKAGE" .PKGINFO | sed -n "s/^pkgver = //p")
+              [[ $package_version == *".g$short_sha-"* ]] || {
+                echo "local package metadata does not bind final target $short_sha: $package_version" >&2
+                exit 1
+              }
+              sha256sum "$PACKAGE" | tee -a artifacts/provenance.log
+              target/native/plugin-runtime/packaging/verify-package.sh "$PACKAGE" 2>&1 | tee artifacts/package-verifier.log
+              target/native/plugin-runtime/packaging/verify-package-test.sh "$PACKAGE" 2>&1 | tee artifacts/package-verifier-negative.log
 
-          package_root=$(mktemp -d)
-          trap 'rm -rf -- "$package_root"' EXIT
-          bsdtar -xf "$package" -C "$package_root"
-          host_hash=$(sha256sum "$package_root/usr/bin/omarchy-plugin-host" | awk '{ print $1 }')
-          worker_hash=$(sha256sum "$package_root/usr/lib/omarchy/plugin-runtime/omarchy-plugin-qml-worker" | awk '{ print $1 }')
-          bridge_hash=$(sha256sum "$package_root/usr/lib/qt6/qml/Omarchy/PluginHost/libomarchy-plugin-host-bridge.so" | awk '{ print $1 }')
-          identity_test=target/test/acceptance.d/zz-plugin-package-identity-test.sh
-          {
-            printf '%s\n' '#!/bin/bash' '' 'set -euo pipefail' 'source "$(dirname "$0")/base-test.sh"'
-            printf 'expected_package=%q\n' "omarchy-dev $package_version"
-            printf 'expected_host_hash=%q\n' "$host_hash"
-            printf 'expected_worker_hash=%q\n' "$worker_hash"
-            printf 'expected_bridge_hash=%q\n' "$bridge_hash"
-            printf '%s\n' \
-              'actual_package=$(pacman -Q omarchy-dev)' \
-              '[[ $actual_package == "$expected_package" ]] || fail "installed plugin package matches exact local build version" "expected $expected_package, got $actual_package"' \
-              '{' \
-              '  printf "%s  %s\\n" "$expected_host_hash" /usr/bin/omarchy-plugin-host' \
-              '  printf "%s  %s\\n" "$expected_worker_hash" /usr/lib/omarchy/plugin-runtime/omarchy-plugin-qml-worker' \
-              '  printf "%s  %s\\n" "$expected_bridge_hash" /usr/lib/qt6/qml/Omarchy/PluginHost/libomarchy-plugin-host-bridge.so' \
-              '} | sha256sum --check - >"$ARTIFACTS/plugin-package-identity.log" 2>&1 || fail "installed plugin payload matches exact local-source archive"' \
-              'printf "%s\\n" "$actual_package" >>"$ARTIFACTS/plugin-package-identity.log"' \
-              'pass "installed secure plugin payload matches exact local-source archive"'
-          } >"$identity_test"
-          chmod 755 "$identity_test"
-          {
-            echo "package_version=$package_version"
-            echo "host_sha256=$host_hash"
-            echo "worker_sha256=$worker_hash"
-            echo "bridge_sha256=$bridge_hash"
-            echo "acceptance_overlay=exact_package_identity_probe"
-          } | tee -a artifacts/provenance.log
-          rm -rf -- "$package_root"
-          trap - EXIT
+              package_root=$(mktemp -d)
+              trap '\''rm -rf -- "$package_root"'\'' EXIT
+              bsdtar -xf "$PACKAGE" -C "$package_root"
+              host_hash=$(sha256sum "$package_root/usr/bin/omarchy-plugin-host" | awk "{ print \$1 }")
+              worker_hash=$(sha256sum "$package_root/usr/lib/omarchy/plugin-runtime/omarchy-plugin-qml-worker" | awk "{ print \$1 }")
+              bridge_hash=$(sha256sum "$package_root/usr/lib/qt6/qml/Omarchy/PluginHost/libomarchy-plugin-host-bridge.so" | awk "{ print \$1 }")
+              identity_test=target/test/acceptance.d/zz-plugin-package-identity-test.sh
+              {
+                printf "%s\\n" "#!/bin/bash" "" "set -euo pipefail" "source \"\$(dirname \"\$0\")/base-test.sh\""
+                printf "expected_package=%q\\n" "omarchy-dev $package_version"
+                printf "expected_host_hash=%q\\n" "$host_hash"
+                printf "expected_worker_hash=%q\\n" "$worker_hash"
+                printf "expected_bridge_hash=%q\\n" "$bridge_hash"
+                printf "%s\\n" \
+                  "actual_package=\$(pacman -Q omarchy-dev)" \
+                  "[[ \$actual_package == \"\$expected_package\" ]] || fail \"installed plugin package matches exact local build version\" \"expected \$expected_package, got \$actual_package\"" \
+                  "{" \
+                  "  printf \"%s  %s\\\\n\" \"\$expected_host_hash\" /usr/bin/omarchy-plugin-host" \
+                  "  printf \"%s  %s\\\\n\" \"\$expected_worker_hash\" /usr/lib/omarchy/plugin-runtime/omarchy-plugin-qml-worker" \
+                  "  printf \"%s  %s\\\\n\" \"\$expected_bridge_hash\" /usr/lib/qt6/qml/Omarchy/PluginHost/libomarchy-plugin-host-bridge.so" \
+                  "} | sha256sum --check - >\"\$ARTIFACTS/plugin-package-identity.log\" 2>&1 || fail \"installed plugin payload matches exact local-source archive\"" \
+                  "printf \"%s\\\\n\" \"\$actual_package\" >>\"\$ARTIFACTS/plugin-package-identity.log\"" \
+                  "pass \"installed secure plugin payload matches exact local-source archive\""
+              } >"$identity_test"
+              chmod 755 "$identity_test"
+              bash -n "$identity_test"
+              {
+                echo "package_version=$package_version"
+                echo "host_sha256=$host_hash"
+                echo "worker_sha256=$worker_hash"
+                echo "bridge_sha256=$bridge_hash"
+                echo "acceptance_overlay=exact_package_identity_probe"
+              } | tee -a artifacts/provenance.log
+            '
 
       - name: Reclaim build cache before the 40 GiB sparse VM disk
         shell: bash
