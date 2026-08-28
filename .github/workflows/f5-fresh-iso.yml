@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 240
     env:
-      TARGET_SHA: b28f655f74ba35651797c143bdd907013fab13a7
+      TARGET_SHA: 3efa25b9732f82884e530b08098ed6140b907602
       ISO_SHA: 268bac16d351a21d867e37565738f458b11cb06c
       PKGS_SHA: a8c9e2982e965d140adcbe3138fa44c2d538d60b
       ARCH_BUILD_IMAGE: archlinux/archlinux@sha256:b7a2cf351dd0aebb189d366836047291bf0b4e0d2fc9bd35037a3a3bd719af9d
