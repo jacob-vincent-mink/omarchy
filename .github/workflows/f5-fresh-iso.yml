@@ -96,12 +96,28 @@ jobs:
           git -C omarchy-pkgs apply --check "$GITHUB_WORKSPACE/target/native/plugin-runtime/packaging/omarchy-dev-plugin-runtime.patch"
           git -C omarchy-pkgs apply "$GITHUB_WORKSPACE/target/native/plugin-runtime/packaging/omarchy-dev-plugin-runtime.patch"
           git -C omarchy-pkgs diff --check
+          package_builder=omarchy-iso/builder/build-omarchy-packages.sh
+          old_makepkg='makepkg --noconfirm --skippgpcheck --skipchecksums --nodeps -f'
+          new_makepkg='makepkg --noconfirm --skippgpcheck --skipchecksums --nodeps --nocheck -f'
+          (( $(grep -Fc "$old_makepkg" "$package_builder") == 1 )) || {
+            echo "official package-builder makepkg seam changed" >&2
+            exit 1
+          }
+          sed -i "s/$old_makepkg/$new_makepkg/" "$package_builder"
+          git -C omarchy-iso diff --check
+          {
+            echo "PACKAGE-CONTAINER CHECK() WAS NOT RUN"
+            echo "The complete suite requires host namespaces and graphical session authorities absent from the official ISO package-builder container."
+            echo "Fresh KVM VM acceptance remains mandatory later in this job."
+            git -C omarchy-iso diff -- builder/build-omarchy-packages.sh
+          } | tee artifacts/package-check-adaptation.log
           {
             echo "target=$TARGET_SHA"
             echo "iso=$ISO_SHA"
             echo "pkgs=$PKGS_SHA"
             echo "arch_build=$ARCH_BUILD_IMAGE"
             echo "arch_test=$ARCH_TEST_IMAGE"
+            echo "package_container_check=not_run_environment_incompatible"
           } > artifacts/provenance.log
 
       - name: Seed exact Arch build image with companion-patch prerequisites
