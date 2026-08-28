@@ -104,12 +104,20 @@ jobs:
             echo "arch_test=$ARCH_TEST_IMAGE"
           } > artifacts/provenance.log
 
-      - name: Seed the exact official Arch build image
+      - name: Seed exact Arch build image with companion-patch prerequisites
         shell: bash
         run: |
           set -euo pipefail
           docker pull "$ARCH_BUILD_IMAGE"
-          docker tag "$ARCH_BUILD_IMAGE" archlinux/archlinux:latest
+          cleanup() {
+            docker rm --force f5-arch-build-seed >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run --name f5-arch-build-seed "$ARCH_BUILD_IMAGE" \
+            pacman -Syu --noconfirm bubblewrap cmake libseccomp ninja qt6-base qt6-declarative
+          docker commit f5-arch-build-seed archlinux/archlinux:latest >/dev/null
+          cleanup
+          trap - EXIT
 
       - name: Build fresh local-source ISO and package checks
         shell: bash
