@@ -22,6 +22,7 @@ jobs:
       PKGS_SHA: a8c9e2982e965d140adcbe3138fa44c2d538d60b
       ARCH_BUILD_IMAGE: archlinux/archlinux@sha256:b7a2cf351dd0aebb189d366836047291bf0b4e0d2fc9bd35037a3a3bd719af9d
       ARCH_TEST_IMAGE: archlinux:base-devel@sha256:68bfc3b0d277b08a99101dc9b94aaa03e5ae70cf1b4fb965c03b2b87b915760d
+      ARCH_TEST_RUNTIME_IMAGE: omarchy-f5-test:exact
 
     steps:
       - name: Reclaim ephemeral runner disk and record capacity
@@ -162,6 +163,55 @@ jobs:
               echo "pinned Arch package-verifier environment passed preflight"
             '
 
+      - name: Seed and preflight exact Arch VM-test environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "$ARCH_TEST_IMAGE"
+          container_id=$(docker run -d \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+            "$ARCH_TEST_IMAGE" sleep infinity)
+          cleanup_test_seed() {
+            docker rm -f "$container_id" >/dev/null 2>&1 || true
+          }
+          trap cleanup_test_seed EXIT
+          docker exec "$container_id" pacman -Syu --noconfirm \
+            coreutils edk2-ovmf findutils grep imagemagick openssh python qemu-full sed socat tar tesseract tesseract-data-eng util-linux
+          docker exec \
+            -e "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            "$container_id" bash -lc '
+              set -euo pipefail
+              required=(
+                awk basename cat chmod cp date dirname du find grep kill magick mkdir mktemp nproc
+                python3 qemu-img qemu-system-x86_64 rm sed setsid sleep socat sort ssh ssh-keygen
+                stat tar tesseract timeout tr
+              )
+              for command_name in "${required[@]}"; do
+                command -v "$command_name" >/dev/null || {
+                  echo "missing VM-test harness command: $command_name" >&2
+                  exit 1
+                }
+              done
+              [[ -r /usr/share/edk2/x64/OVMF_CODE.4m.fd && -r /usr/share/edk2/x64/OVMF_VARS.4m.fd ]]
+              bash -n "$GITHUB_WORKSPACE/omarchy-iso/bin/omarchy-iso-test"
+              qemu-system-x86_64 --version
+              qemu-img --version
+              ssh -V
+              magick -version
+              tesseract --version
+              socat -V
+            '
+          docker commit "$container_id" "$ARCH_TEST_RUNTIME_IMAGE" >/dev/null
+          cleanup_test_seed
+          trap - EXIT
+          test_runtime_id=$(docker image inspect --format '{{.Id}}' "$ARCH_TEST_RUNTIME_IMAGE")
+          {
+            echo "arch_test_runtime_image=$ARCH_TEST_RUNTIME_IMAGE"
+            echo "arch_test_runtime_image_id=$test_runtime_id"
+            echo 'arch_test_runtime_packages=coreutils,edk2-ovmf,findutils,grep,imagemagick,openssh,python,qemu-full,sed,socat,tar,tesseract,tesseract-data-eng,util-linux'
+            echo 'arch_test_harness_preflight=all_host_commands_and_ovmf_present'
+          } | tee -a artifacts/provenance.log
+
       - name: Build fresh local-source ISO and package checks
         shell: bash
         run: |
@@ -282,25 +332,28 @@ jobs:
             printf 'Cache cleanup did not remove %q\n' "$cache_path" >&2
             exit 1
           }
-          docker image rm archlinux/archlinux:latest "$ARCH_BUILD_IMAGE" || true
-          docker image prune --all --force
+          docker image rm archlinux/archlinux:latest "$ARCH_BUILD_IMAGE" "$ARCH_TEST_IMAGE" || true
+          docker image prune --force
           df -h / | tee -a artifacts/preflight.log
+          available_kib=$(df -Pk / | awk 'NR == 2 { print $4 }')
+          (( available_kib >= 40 * 1024 * 1024 )) || {
+            echo "F5 requires at least 40 GiB free while retaining the preflighted VM-test image" >&2
+            exit 1
+          }
 
       - name: Run fresh headless install and graphical acceptance
         shell: bash
         run: |
           set -euo pipefail
           set -o pipefail
-          docker pull "$ARCH_TEST_IMAGE"
           docker run --rm \
             --device=/dev/kvm \
             -e "OMARCHY_PATH=$GITHUB_WORKSPACE/target" \
             -e "ISO_PATH=$ISO_PATH" \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             -w "$GITHUB_WORKSPACE/omarchy-iso" \
-            "$ARCH_TEST_IMAGE" bash -lc '
+            "$ARCH_TEST_RUNTIME_IMAGE" bash -lc '
               set -euo pipefail
-              pacman -Syu --noconfirm git sudo
               export PATH="$OMARCHY_PATH/bin:$PATH"
               ./bin/omarchy-iso-test "$ISO_PATH" \
                 --memory 7168 \
