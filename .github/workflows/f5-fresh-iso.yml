@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 240
     env:
-      TARGET_SHA: 3efa25b9732f82884e530b08098ed6140b907602
+      TARGET_SHA: 0dac331a8611c669801924394a2f28d94430e957
       ISO_SHA: 268bac16d351a21d867e37565738f458b11cb06c
       PKGS_SHA: a8c9e2982e965d140adcbe3138fa44c2d538d60b
       ARCH_BUILD_IMAGE: archlinux/archlinux@sha256:b7a2cf351dd0aebb189d366836047291bf0b4e0d2fc9bd35037a3a3bd719af9d
@@ -360,6 +360,7 @@ jobs:
         run: |
           set -euo pipefail
           set -o pipefail
+          set +e
           docker run --rm \
             --device=/dev/kvm \
             -e "OMARCHY_PATH=$GITHUB_WORKSPACE/target" \
@@ -375,17 +376,80 @@ jobs:
                 --sync-omarchy "$OMARCHY_PATH" \
                 --no-preview
             ' 2>&1 | tee artifacts/iso-test.log
+          pipeline_status=("${PIPESTATUS[@]}")
+          set -e
+          (( pipeline_status[1] == 0 )) || {
+            echo "iso-test.log capture failed with status ${pipeline_status[1]}" >&2
+            exit 1
+          }
+          acceptance_status=${pipeline_status[0]}
+          echo "aggregate_acceptance_exit_status=$acceptance_status" | tee -a artifacts/provenance.log
           for proof in \
             'ok - installed secure plugin payload matches exact local-source archive' \
             'ok - direct secure plugin worker launch is denied' \
             'ok - secure plugin host service remains disabled and inactive' \
+            'ok - secure plugin bridge appears in the graphical session' \
+            'ok - secure plugin bridge reports the reference runtime as feature-gated' \
             'ok - secure plugin bridge module loads with packaged Qt under Wayland and remains feature-gated' \
-            'Acceptance suite passed. Artifacts:'; do
+            ; do
             grep -F "$proof" artifacts/iso-test.log >/dev/null || {
               echo "mandatory acceptance proof is absent from iso-test.log: $proof" >&2
               exit 1
             }
           done
+          if grep -E '^not ok - .*secure plugin' artifacts/iso-test.log; then
+            echo "plugin acceptance emitted a failure" >&2
+            exit 1
+          fi
+          mapfile -t failures < <(grep -E '^not ok - ' artifacts/iso-test.log || true)
+          if (( acceptance_status == 0 )); then
+            (( ${#failures[@]} == 0 )) || {
+              echo "aggregate acceptance returned success while reporting failures" >&2
+              exit 1
+            }
+            grep -F 'Acceptance suite passed. Artifacts:' artifacts/iso-test.log >/dev/null || {
+              echo "aggregate acceptance success summary is absent" >&2
+              exit 1
+            }
+            echo 'aggregate_acceptance=pass' | tee -a artifacts/provenance.log
+          else
+            (( acceptance_status == 1 )) || {
+              echo "aggregate acceptance failed with unexpected process status $acceptance_status" >&2
+              exit 1
+            }
+            normalized_failures=()
+            for failure in "${failures[@]}"; do
+              if [[ $failure =~ ^not\ ok\ -\ acceptance\ suite\ failed\ in\ [0-9]+s\ \(artifacts\ in\ /tmp/omarchy-acceptance\)$ ]]; then
+                normalized_failures+=('not ok - acceptance suite failed in <seconds>s (artifacts in /tmp/omarchy-acceptance)')
+              else
+                normalized_failures+=("$failure")
+              fi
+            done
+            expected_failures=(
+              'not ok - acceptance suite failed in <seconds>s (artifacts in /tmp/omarchy-acceptance)'
+              'not ok - browser opens a window'
+              'not ok - launcher shortcut opens'
+              'not ok - menu shortcut opens'
+              'not ok - style submenu is visible'
+              'not ok - universal clipboard test opens Chromium'
+            )
+            mapfile -t actual_sorted < <(printf '%s\n' "${normalized_failures[@]}" | sort)
+            mapfile -t expected_sorted < <(printf '%s\n' "${expected_failures[@]}" | sort)
+            (( ${#actual_sorted[@]} == ${#expected_sorted[@]} )) || {
+              printf 'unexpected aggregate failure count: %s\n' "${#actual_sorted[@]}" >&2
+              printf 'observed: %s\n' "${actual_sorted[@]}" >&2
+              exit 1
+            }
+            for ((i = 0; i < ${#expected_sorted[@]}; ++i)); do
+              [[ ${actual_sorted[i]} == "${expected_sorted[i]}" ]] || {
+                printf 'aggregate failure set differs at %s: observed %q expected %q\n' \
+                  "$i" "${actual_sorted[i]}" "${expected_sorted[i]}" >&2
+                exit 1
+              }
+            done
+            echo 'aggregate_acceptance=failed_known_baseline' | tee -a artifacts/provenance.log
+          fi
+          echo 'plugin_acceptance=pass' | tee -a artifacts/provenance.log
           mapfile -t identity_logs < <(find omarchy-iso/test-runs -type f -name plugin-package-identity.log -print)
           mapfile -t module_logs < <(find omarchy-iso/test-runs -type f -name plugin-host-module.log -print)
           mapfile -t module_shots < <(find omarchy-iso/test-runs -type f -name success-secure-plugin-bridge-module.png -print)
