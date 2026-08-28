@@ -1,0 +1,189 @@
+name: Ephemeral F5 fresh ISO proof
+
+on:
+  push:
+    branches:
+      - f5-fresh-iso-proof
+
+permissions:
+  contents: read
+
+concurrency:
+  group: f5-fresh-iso-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fresh-iso:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      TARGET_SHA: 04f8776b77179bf1dc4b1ff084c674ae07b163c6
+      ISO_SHA: 268bac16d351a21d867e37565738f458b11cb06c
+      PKGS_SHA: a8c9e2982e965d140adcbe3138fa44c2d538d60b
+      ARCH_BUILD_IMAGE: archlinux/archlinux@sha256:b7a2cf351dd0aebb189d366836047291bf0b4e0d2fc9bd35037a3a3bd719af9d
+      ARCH_TEST_IMAGE: archlinux:base-devel@sha256:68bfc3b0d277b08a99101dc9b94aaa03e5ae70cf1b4fb965c03b2b87b915760d
+
+    steps:
+      - name: Reclaim ephemeral runner disk and record capacity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          df -h / | tee artifacts/preflight.log
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          sudo rm -rf -- /opt/hostedtoolcache /usr/share/swift
+          docker system prune --all --force
+          df -h / | tee -a artifacts/preflight.log
+          available_kib=$(df -Pk / | awk 'NR == 2 { print $4 }')
+          (( available_kib >= 40 * 1024 * 1024 )) || {
+            echo "F5 requires at least 40 GiB free after measured runner cleanup" >&2
+            exit 1
+          }
+
+      - name: Verify KVM and runner memory before downloading the mirror
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]] || {
+            ls -l /dev/kvm || true
+            echo "ubuntu-latest does not expose usable /dev/kvm" >&2
+            exit 1
+          }
+          available_kib=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
+          (( available_kib >= 12 * 1024 * 1024 )) || {
+            echo "F5 requires at least 12 GiB available before starting a 7 GiB VM" >&2
+            exit 1
+          }
+          { printf 'KVM: '; ls -l /dev/kvm; } | tee -a artifacts/preflight.log
+          grep -E '^(MemTotal|MemAvailable):' /proc/meminfo | tee -a artifacts/preflight.log
+
+      - name: Fetch exact candidate and official build inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ $TARGET_SHA =~ ^[0-9a-f]{40}$ ]] || {
+            echo "target_sha must be a lowercase full commit id" >&2
+            exit 1
+          }
+          fetch_exact() {
+            local url=$1 sha=$2 destination=$3
+            git init -q "$destination"
+            git -C "$destination" remote add origin "$url"
+            git -C "$destination" fetch --no-tags --depth=1 origin "$sha"
+            git -C "$destination" checkout -q --detach FETCH_HEAD
+            [[ $(git -C "$destination" rev-parse HEAD) == "$sha" ]]
+          }
+          fetch_exact https://github.com/jacob-vincent-mink/omarchy.git "$TARGET_SHA" target
+          fetch_exact https://github.com/omacom/omarchy-iso.git "$ISO_SHA" omarchy-iso
+          fetch_exact https://github.com/omacom/omarchy-pkgs.git "$PKGS_SHA" omarchy-pkgs
+          git -C omarchy-iso submodule update --init --recursive --jobs=8
+          git -C omarchy-pkgs apply --check "$GITHUB_WORKSPACE/target/native/plugin-runtime/packaging/omarchy-dev-plugin-runtime.patch"
+          git -C omarchy-pkgs apply "$GITHUB_WORKSPACE/target/native/plugin-runtime/packaging/omarchy-dev-plugin-runtime.patch"
+          git -C omarchy-pkgs diff --check
+          {
+            echo "target=$TARGET_SHA"
+            echo "iso=$ISO_SHA"
+            echo "pkgs=$PKGS_SHA"
+            echo "arch_build=$ARCH_BUILD_IMAGE"
+            echo "arch_test=$ARCH_TEST_IMAGE"
+          } > artifacts/provenance.log
+
+      - name: Seed the exact official Arch build image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "$ARCH_BUILD_IMAGE"
+          docker tag "$ARCH_BUILD_IMAGE" archlinux/archlinux:latest
+
+      - name: Build fresh local-source ISO and package checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          (
+            cd omarchy-iso
+            NO_BOOT_OFFER=1 ./bin/omarchy-iso-make \
+              --keep-pkg-cache \
+              --no-boot-offer \
+              --local-source "$GITHUB_WORKSPACE/target" "$GITHUB_WORKSPACE/omarchy-pkgs"
+          ) 2>&1 | tee artifacts/iso-build.log
+          mapfile -t isos < <(find omarchy-iso/release -maxdepth 1 -type f -name '*-local.iso' -print)
+          (( ${#isos[@]} == 1 )) || {
+            printf 'Expected one local ISO, found %s\n' "${#isos[@]}" >&2
+            exit 1
+          }
+          iso_path=$(readlink -f "${isos[0]}")
+          printf 'ISO_PATH=%s\n' "$iso_path" >> "$GITHUB_ENV"
+          sha256sum "$iso_path" | tee -a artifacts/provenance.log
+
+      - name: Verify exact locally built plugin package
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          mapfile -t packages < <(find "$HOME/.cache/omarchy/iso_edge" -type f -name 'omarchy-dev-*.pkg.tar.zst' -print)
+          (( ${#packages[@]} == 1 )) || {
+            printf 'Expected one omarchy-dev archive, found %s\n' "${#packages[@]}" >&2
+            exit 1
+          }
+          sha256sum "${packages[0]}" | tee -a artifacts/provenance.log
+          target/native/plugin-runtime/packaging/verify-package.sh "${packages[0]}" 2>&1 | tee artifacts/package-verifier.log
+          target/native/plugin-runtime/packaging/verify-package-test.sh "${packages[0]}" 2>&1 | tee artifacts/package-verifier-negative.log
+
+      - name: Reclaim build cache before the 40 GiB sparse VM disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf -- "$HOME/.cache/omarchy"
+          docker image rm archlinux/archlinux:latest "$ARCH_BUILD_IMAGE" || true
+          docker image prune --all --force
+          df -h /
+
+      - name: Run fresh headless install and graphical acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          docker pull "$ARCH_TEST_IMAGE"
+          docker run --rm \
+            --device=/dev/kvm \
+            -e "OMARCHY_PATH=$GITHUB_WORKSPACE/target" \
+            -e "ISO_PATH=$ISO_PATH" \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            -w "$GITHUB_WORKSPACE/omarchy-iso" \
+            "$ARCH_TEST_IMAGE" bash -lc '
+              set -euo pipefail
+              pacman -Syu --noconfirm git sudo
+              export PATH="$OMARCHY_PATH/bin:$PATH"
+              ./bin/omarchy-iso-test "$ISO_PATH" \
+                --memory 7168 \
+                --timeout 3600 \
+                --sync-omarchy "$OMARCHY_PATH" \
+                --no-preview
+            ' 2>&1 | tee artifacts/iso-test.log
+
+      - name: Collect logs and screenshots only
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/acceptance
+          if [[ -d omarchy-iso/test-runs ]]; then
+            while IFS= read -r -d '' file; do
+              relative=${file#omarchy-iso/test-runs/}
+              mkdir -p "artifacts/acceptance/$(dirname "$relative")"
+              cp -- "$file" "artifacts/acceptance/$relative"
+            done < <(find omarchy-iso/test-runs -type f \( -name '*.log' -o -name '*.png' \) -print0)
+          fi
+          find artifacts -type f ! -name '*.log' ! -name '*.png' -delete
+          find artifacts -type f -printf '%P\n' | sort
+
+      - name: Upload F5 evidence only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: f5-fresh-iso-${{ env.TARGET_SHA }}
+          path: artifacts
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
