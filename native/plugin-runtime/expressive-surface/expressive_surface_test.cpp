@@ -185,7 +185,8 @@ struct Harness {
     require(hosted->receive_render(encode(
                 worker_header(static_cast<std::uint16_t>(
                                   surface::RenderMessageType::profile_select),
-                              selection.size(), 1),
+                              selection.size(),
+                              sender.headers.at(0).correlation_id),
                 selection)) &&
                 sender.payloads.size() == 2,
             "D2 allocation was not issued");
@@ -204,14 +205,21 @@ struct Harness {
         hosted->receive_render(encode(
             worker_header(static_cast<std::uint16_t>(
                               surface::RenderMessageType::surface_allocated),
-                          acknowledged.size(), 2),
+                          acknowledged.size(),
+                          sender.headers.at(1).correlation_id),
             acknowledged)),
         "surface allocation acknowledgement failed");
   }
 
   bool render() {
     const auto frame = runtime.render();
-    require(frame.has_value(), "arbitrary QML did not render");
+    require(frame.has_value(),
+            std::string("arbitrary QML did not render: active=") +
+                (runtime.active() ? "true" : "false") +
+                " allocated=" + (runtime.allocated() ? "true" : "false") +
+                " requested=" +
+                (runtime.render_requested() ? "true" : "false") +
+                " detail=" + runtime.last_error());
     const auto payload = surface::encode_frame_ready(frame->ready);
     return hosted->receive_render(
         encode(worker_header(static_cast<std::uint16_t>(
@@ -347,6 +355,9 @@ void expressive_pet_composition() {
               harness.item.ownedImage() == first,
           "above-30-FPS frame consumed trusted compositing work");
   harness.clock.now += 33'333'334ULL;
+  // The production worker's 16 ms timer requests the next animation frame.
+  // This direct-runtime fixture must model that request explicitly.
+  harness.runtime.request_render();
   require(harness.render() && harness.hosted->inspection().frame_sequence == 3,
           "frame at the host-owned FPS boundary was not admitted");
 }

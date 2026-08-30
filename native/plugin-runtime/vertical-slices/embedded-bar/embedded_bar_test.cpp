@@ -556,7 +556,8 @@ void negotiate(host::HostSurface &hosted, RenderSender &sender,
   require(hosted.receive_render(encode(
               worker_header(static_cast<std::uint16_t>(
                                 surface::RenderMessageType::profile_select),
-                            selected.size(), generation, 1),
+                            selected.size(), generation,
+                            offer_packet.header.correlation_id),
               selected)),
           "host rejected worker profile selection");
 
@@ -574,7 +575,8 @@ void negotiate(host::HostSurface &hosted, RenderSender &sender,
   require(hosted.receive_render(encode(
               worker_header(static_cast<std::uint16_t>(
                                 surface::RenderMessageType::surface_allocated),
-                            acknowledged.size(), generation, 2),
+                            acknowledged.size(), generation,
+                            allocation_packet.header.correlation_id),
               acknowledged)) &&
               hosted.inspection().render_active,
           "bar allocation did not become active");

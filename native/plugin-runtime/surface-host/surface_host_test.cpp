@@ -186,7 +186,8 @@ struct Harness {
     require(hosted->receive_render(encode(
                 worker_header(static_cast<std::uint16_t>(
                                   surface::RenderMessageType::profile_select),
-                              selection_payload.size(), generation, 1),
+                              selection_payload.size(), generation,
+                              render_sender.headers.at(0).correlation_id),
                 selection_payload)) &&
                 render_sender.headers.size() == 2 &&
                 render_sender.descriptor_counts.at(1) == 1,
@@ -197,7 +198,8 @@ struct Harness {
         hosted->receive_render(encode(
             worker_header(static_cast<std::uint16_t>(
                               surface::RenderMessageType::surface_allocated),
-                          allocated.size(), generation, 2),
+                          allocated.size(), generation,
+                          render_sender.headers.at(1).correlation_id),
             allocated)) &&
             hosted->inspection().render_active,
         "named surface did not become active");
@@ -511,7 +513,9 @@ void lock_negotiation_races_and_atomic_failure() {
     require(!harness.hosted->receive_render(encode(
                 worker_header(static_cast<std::uint16_t>(
                                   surface::RenderMessageType::profile_select),
-                              payload.size(), harness.generation, 1),
+                              payload.size(), harness.generation,
+                              harness.render_sender.headers.at(0)
+                                  .correlation_id),
                 payload)) &&
                 harness.render_sender.headers.size() == 1 &&
                 harness.hosted->set_locked(false),
@@ -533,7 +537,9 @@ void lock_negotiation_races_and_atomic_failure() {
     require(harness.hosted->receive_render(encode(
                 worker_header(static_cast<std::uint16_t>(
                                   surface::RenderMessageType::profile_select),
-                              selected.size(), harness.generation, 1),
+                              selected.size(), harness.generation,
+                              harness.render_sender.headers.at(0)
+                                  .correlation_id),
                 selected)) &&
                 harness.hosted->set_locked(true),
             "lock did not latch while allocation awaited acknowledgement");
@@ -543,7 +549,8 @@ void lock_negotiation_races_and_atomic_failure() {
         !harness.hosted->receive_render(encode(
             worker_header(static_cast<std::uint16_t>(
                               surface::RenderMessageType::surface_allocated),
-                          allocated.size(), harness.generation, 2),
+                          allocated.size(), harness.generation,
+                          harness.render_sender.headers.at(1).correlation_id),
             allocated)) &&
             !harness.hosted->inspection().render_active &&
             harness.hosted->set_locked(false) &&
@@ -551,7 +558,8 @@ void lock_negotiation_races_and_atomic_failure() {
                 encode(worker_header(
                            static_cast<std::uint16_t>(
                                surface::RenderMessageType::surface_allocated),
-                           allocated.size(), harness.generation, 2),
+                           allocated.size(), harness.generation,
+                           harness.render_sender.headers.at(1).correlation_id),
                        allocated)),
         "allocation acknowledgement crossed the lock boundary");
 

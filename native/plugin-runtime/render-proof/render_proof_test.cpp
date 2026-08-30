@@ -153,6 +153,9 @@ public:
   }
 
   FrameSample frame() {
+    // The production worker requests animation frames on its 16 ms timer.
+    // This direct-runtime proof drives that same boundary explicitly.
+    runtime_.request_render();
     const auto render_started = Clock::now();
     const auto published = runtime_.render();
     const auto render_finished = Clock::now();
