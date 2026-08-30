@@ -261,6 +261,7 @@ SandboxPlan build_test_plan_for_worker(std::string worker_path) {
   plan.argv.push_back("/state");
   append(plan.argv, "--size", std::to_string(resources.scratch_max_bytes));
   append(plan.argv, "--tmpfs", "/tmp");
+  append(plan.argv, "--dir", "/tmp/cache");
   append(plan.argv, "--size", std::to_string(resources.runtime_max_bytes));
   append(plan.argv, "--tmpfs", "/run");
   append(plan.argv, "--dir", "/run/plugin");
@@ -360,6 +361,9 @@ SandboxPlan build_provider_plan(std::string trusted_executable_path) {
   plan.argv.push_back("/runtime/provider");
   append(plan.argv, "--size", std::to_string(resources.scratch_max_bytes));
   append(plan.argv, "--tmpfs", "/tmp");
+  append(plan.argv, "--dir", "/tmp/cache");
+  append(plan.argv, "--dir", "/tmp/config");
+  append(plan.argv, "--dir", "/tmp/data");
   append(plan.argv, "--size", std::to_string(resources.runtime_max_bytes));
   append(plan.argv, "--tmpfs", "/run");
   append(plan.argv, "--dir", "/run/provider");

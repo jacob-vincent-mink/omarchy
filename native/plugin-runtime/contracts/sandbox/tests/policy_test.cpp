@@ -82,6 +82,8 @@ void verify_mounts(const SandboxPlan &plan, std::string_view worker) {
           "private state is not mounted from a trusted fd");
   require(contains_argument_pair(plan, "--tmpfs", "/tmp"),
           "scratch is not private tmpfs");
+  require(contains_argument_pair(plan, "--dir", "/tmp/cache"),
+          "private cache directory is absent");
   require(contains_argument_pair(plan, "--tmpfs", "/run"),
           "runtime directory is not private tmpfs");
   require(contains_argument_pair(plan, "--tmpfs", "/home"),
@@ -232,11 +234,15 @@ int main() {
           "provider executable or fixed protocol descriptor changed");
   require(provider_plan.worker_descriptors == std::vector<int>{3} &&
               provider_plan.launcher_descriptors ==
-                  std::vector<int>({3, 4, 5, 6}),
+                  std::vector<int>({3, 4, 5, 6, 7}),
           "provider inherited an ambient descriptor");
-  require(contains_argument_pair(provider_plan, "--ro-bind", provider) &&
+  require(contains_argument_pair(provider_plan, "--ro-bind",
+                                 "/proc/self/fd/7") &&
               contains_argument_pair(provider_plan, "--tmpfs", "/home") &&
               contains_argument_pair(provider_plan, "--tmpfs", "/tmp") &&
+              contains_argument_pair(provider_plan, "--dir", "/tmp/cache") &&
+              contains_argument_pair(provider_plan, "--dir", "/tmp/config") &&
+              contains_argument_pair(provider_plan, "--dir", "/tmp/data") &&
               contains_argument_pair(provider_plan, "--tmpfs", "/run"),
           "provider mounts or executable binding changed");
   require(contains(provider_plan.argv, "--unshare-net") &&
