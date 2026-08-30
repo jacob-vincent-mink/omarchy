@@ -10,6 +10,8 @@ Item {
     property var statuses: []
     property bool undeclaredOpenDenied: false
 
+    function open() {}
+
     function refreshForTest() {
         statuses = runtime.invoke("fake_status_list", {resource: 1})
     }

@@ -21,6 +21,8 @@ Item {
         return capability && capability.send ? "GRANTED" : "DENIED"
     }
 
+    function open() {}
+
     Qml.Timer {
         interval: 0
         running: true

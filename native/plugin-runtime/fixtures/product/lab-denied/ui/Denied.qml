@@ -14,6 +14,8 @@ Item {
     property string phase: "ATTEMPTING"
     property string detail: "Invoking unrequested notifications.send/send"
 
+    function open() {}
+
     function finishAttempt() {
         if (deniedCall.ok) {
             phase = "ESCAPED"
