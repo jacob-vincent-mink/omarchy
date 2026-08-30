@@ -20,7 +20,7 @@
     "required": [
       {
         "capability": "service.fake-status",
-        "resources": [1],
+        "resourceIds": [1],
         "operations": ["list", "acknowledge"],
         "reason": "Show and acknowledge items from the registered fake service"
       }
