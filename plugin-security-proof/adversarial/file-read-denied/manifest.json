@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 2,
+  "id": "org.omarchy.security-demo.file-read-denied",
+  "name": "Denied File Read",
+  "version": "1.0.0",
+  "description": "Adversarial demo that requests no permissions and proves host file reads remain unavailable.",
+  "runtime": {
+    "apiVersion": 1,
+    "qml": "Panel.qml",
+    "surfaceQml": {
+      "barWidget": "BarWidget.qml",
+      "panel": "Panel.qml"
+    }
+  },
+  "surfaces": {
+    "barWidget": {"role": "bar-embedded", "maximumWidth": 72, "maximumHeight": 64, "maximumFramesPerSecond": 15, "defaultSection": "right", "inputRegions": "dynamic-bounded"},
+    "panel": {"role": "panel", "maximumWidth": 520, "maximumHeight": 260, "maximumFramesPerSecond": 15, "keyboardFocus": false, "lockScreenVisible": false, "inputRegions": "dynamic-bounded"}
+  },
+  "permissions": {
+    "required": [],
+    "optional": []
+  }
+}
