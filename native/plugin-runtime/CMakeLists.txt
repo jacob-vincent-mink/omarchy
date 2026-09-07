@@ -89,6 +89,8 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(QT_QML_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/qml")
 
+add_subdirectory(presentation)
+
 function(omarchy_plugin_target_defaults target)
   target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endfunction()
@@ -100,6 +102,7 @@ add_subdirectory(contracts/permissions)
 add_subdirectory(contracts/sandbox)
 add_subdirectory(contracts/capability-definitions)
 add_subdirectory(broker)
+add_subdirectory(worker)
 add_subdirectory(launcher)
 add_subdirectory(provider-host)
 add_subdirectory(providers)
