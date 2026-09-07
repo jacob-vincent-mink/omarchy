@@ -1,0 +1,35 @@
+set(runtime_root "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@OMARCHY_PLUGIN_INSTALL_ROOT@")
+set(profile_root "${runtime_root}/providers.d")
+file(MAKE_DIRECTORY "${profile_root}")
+file(CHMOD "${profile_root}"
+  PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+
+function(write_provider name adapter contract group program timeout)
+  file(SHA256 "${runtime_root}/bin/${program}" executable_digest)
+  string(JOIN "" extra ${ARGN})
+  file(WRITE "${profile_root}/${name}.profile"
+    "schema=1\n"
+    "adapter-class=${adapter}\n"
+    "contract-digest=${contract}\n"
+    "abi-version=1\n"
+    "group=${group}\n"
+    "executable=/usr/@OMARCHY_PLUGIN_INSTALL_ROOT@/bin/${program}\n"
+    "executable-sha256=${executable_digest}\n"
+    "${extra}"
+    "invocation-timeout-ms=${timeout}\n")
+  file(CHMOD "${profile_root}/${name}.profile"
+    PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ)
+endfunction()
+
+write_provider(bash-execute bounded-command-execute "@OMARCHY_COMMAND_CONTRACT_DIGEST@"
+  command.executor omarchy-plugin-command-executor 30000)
+write_provider(external-open-uri-https desktop-open-uri "@OMARCHY_DESKTOP_OPEN_CONTRACT_DIGEST@"
+  desktop.open-uri omarchy-plugin-desktop-opener 5000)
+write_provider(system-observe sanitized-system-observe "@OMARCHY_SYSTEM_OBSERVE_CONTRACT_DIGEST@"
+  system.observe omarchy-plugin-system-observer 30000
+  "inherit-environment=HYPRLAND_INSTANCE_SIGNATURE\n"
+  "inherit-environment=XDG_RUNTIME_DIR\n")
+write_provider(network-fetch bounded-network-fetch "@OMARCHY_NETWORK_FETCH_CONTRACT_DIGEST@"
+  network.media omarchy-plugin-network-media-provider 25000)
+write_provider(media-stream activation-media-stream "@OMARCHY_MEDIA_STREAM_CONTRACT_DIGEST@"
+  network.media omarchy-plugin-network-media-provider 25000)

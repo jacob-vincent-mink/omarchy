@@ -32,3 +32,4 @@ if(PLUGIN_SECURITY_BUILD_FUZZERS)
   add_custom_target(plugin-security-fuzzers DEPENDS ${plugin_security_fuzzers})
 endif()
 
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../launcher/tests" launcher-tests)
