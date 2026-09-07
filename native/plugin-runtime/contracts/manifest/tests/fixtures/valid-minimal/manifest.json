@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 2,
+  "id": "org.example.status",
+  "name": "Example Status",
+  "version": "2.0.0",
+  "runtime": {
+    "apiVersion": 1,
+    "qml": "ui/Status.qml"
+  },
+  "surfaces": {
+    "barWidget": {
+      "role": "bar-embedded",
+      "defaultSection": "right"
+    }
+  },
+  "permissions": {
+    "required": [
+      {
+        "capability": "storage.private",
+        "definitionGeneration": 1,
+        "definitionDigest": "8ced97a7d1cf93616946f20bf27fa47f0e79e2ee81903ab0b7b9d31aa23d3e66",
+        "operations": ["read", "remove", "write"],
+        "itemBytes": 4096,
+        "quotaBytes": 1048576,
+        "reason": "Save timer state"
+      }
+    ],
+    "optional": [
+      {
+        "capability": "notifications.send",
+        "definitionGeneration": 1,
+        "definitionDigest": "522f9db4a5e0d8978a0c1293c3ead01839ad882bb640d8fdb16c3011635e0872",
+        "operations": ["send"],
+        "categories": ["timer"],
+        "reason": "Notify when the timer finishes"
+      }
+    ]
+  }
+}
