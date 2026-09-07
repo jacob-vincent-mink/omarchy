@@ -11,7 +11,7 @@ target_include_directories(omarchy-plugin-surface-contract PUBLIC include)
 target_link_libraries(omarchy-plugin-surface-contract PUBLIC omarchy-plugin-wire PRIVATE Qt6::Core)
 
 if(BUILD_TESTING)
-  foreach(test_name IN ITEMS layout frame_region publication surface_state input profile)
+  foreach(test_name IN ITEMS layout frame_region boundary publication surface_state input profile)
     omarchy_plugin_test(plugin-surface-${test_name} COMMAND plugin-surface-${test_name}-test
       LABELS "unit;render"
       SOURCES tests/${test_name}_test.cpp
@@ -21,5 +21,6 @@ if(BUILD_TESTING)
   set_tests_properties(plugin-surface-frame_region PROPERTIES LABELS "adversarial;integration;render")
   set_tests_properties(plugin-surface-layout PROPERTIES LABELS "property;render")
   set_tests_properties(plugin-surface-input PROPERTIES LABELS "adversarial;render")
+  set_tests_properties(plugin-surface-boundary PROPERTIES LABELS "adversarial;integration;render;security")
   set_tests_properties(plugin-surface-profile PROPERTIES LABELS "integration;protocol;render")
 endif()

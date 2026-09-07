@@ -120,7 +120,19 @@ if(BUILD_TESTING)
     SKIP_RETURN_CODE 77
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORMTHEME=none;QSG_RHI_BACKEND=software"
     LABELS "integration;shell;bridge;security;sandbox;real-bwrap;fixtures")
+
+  # T07 gesture-provenance interactive lane. Requires a real display and a
+  # human gesture, so it is always skipped in the automated suite (needs
+  # OMARCHY_T07_LIVE=1 on a visible session; the test binary returns 77
+  # otherwise). It verifies a real compositor gesture ingresses as
+  # decision=accepted + trusted-physical=true on the host-input audit line.
+  omarchy_plugin_test(plugin-gesture-provenance-live
+    COMMAND omarchy-plugin-surface-service-test --t07-live-only
+    TIMEOUT 300
+    SKIP_RETURN_CODE 77
+    LABELS "manual;interactive;shell;bridge;security;gesture;real-display")
   set_tests_properties(plugin-surface-service plugin-permission-control-contract
-    plugin-public-permission-lifecycle plugin-neutral-surfaces-real-bwrap PROPERTIES
+    plugin-public-permission-lifecycle plugin-neutral-surfaces-real-bwrap
+    plugin-gesture-provenance-live PROPERTIES
     ENVIRONMENT_MODIFICATION "QT_IM_MODULE=set:compose")
 endif()

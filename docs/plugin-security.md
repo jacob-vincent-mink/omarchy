@@ -4,6 +4,8 @@ This POC adds an opt-in schema-v2 plugin runtime to Omarchy. Plugin QML runs in 
 
 The implementation is under `native/plugin-runtime/`. This is the reviewer explainer, not a production-readiness claim or a compatibility promise for existing plugins. Building or installing the versioned package does not activate it.
 
+The [threat model](plugin-security-threat-model.md) expands the architecture into data flows, trust boundaries, and a STRIDE register, and records the status and limitations of the requested security assessment.
+
 ## Review map
 
 Read from the trust contracts toward the shell integration. Tests live beside the boundary they exercise; `tests/support/` contains shared fixtures, not another runtime implementation.

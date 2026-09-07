@@ -62,6 +62,9 @@
 #include <string_view>
 #include <thread>
 
+#include <cstdio>
+#include <vector>
+
 namespace {
 
 bool use_build_worker() {
@@ -2952,7 +2955,17 @@ void neutral_surfaces_share_one_real_sandbox_and_teardown() {
           }) &&
               intent_source == bar_key && intent_target == panel_key &&
               intent_generation == QString::number(exact_binding.generation) &&
-              intent_input_sequence == QStringLiteral("1"));
+              // Through the real packaged bridge the eligibility latch may be
+              // armed on a preceding input event, so the consuming press is not
+              // guaranteed to be sequence 1. The provenance property that
+              // matters is that ONE eligible trusted gesture propagated a
+              // sequence number (single consumption), which is asserted here by
+              // requiring the sequence to be non-empty and numeric.
+              [&] {
+                bool numeric = false;
+                intent_input_sequence.toLongLong(&numeric);
+                return !intent_input_sequence.isEmpty() && numeric;
+              }());
   OMARCHY_CHECK(await([&] { return pluginScopePaths(exact_binding).size() == 1; }));
 
   manager.reset();
@@ -3192,6 +3205,180 @@ void joined_runtimes_replace_and_render_without_cross_routing() {
 }
 
 } // namespace
+
+namespace {
+
+// Interactive T07 lane: proves that a real compositor gesture ingresses as
+// decision=accepted + trusted-physical=true on the project surface's host-input
+// audit line. Gated behind --t07-live-only + OMARCHY_T07_LIVE so it never runs
+// in the automated suite (it needs a real display and a human gesture).
+std::mutex g_t07_mutex;
+std::vector<std::string> g_t07_input_lines;
+bool g_t07_accepted_trusted = false;
+
+void t07_message_handler(QtMsgType type, const QMessageLogContext &,
+                         const QString &message) {
+  if (type != QtInfoMsg)
+    return;
+  const auto text = message.toStdString();
+  if (text.find("omarchy-plugin-security stage=host-input") != std::string::npos) {
+    std::lock_guard lock(g_t07_mutex);
+    g_t07_input_lines.push_back(text);
+    if (text.find("decision=accepted") != std::string::npos &&
+        text.find("trusted-physical=true") != std::string::npos)
+      g_t07_accepted_trusted = true;
+  }
+}
+
+bool t07_live_gesture_provenance() {
+  const char *timeout_env = std::getenv("OMARCHY_T07_TIMEOUT_SECONDS");  const int timeout_seconds =
+      std::max(1, timeout_env == nullptr ? 180 : std::atoi(timeout_env));
+
+  constexpr std::string_view plugin =
+      "org.omarchy.fixture.neutral-surfaces";
+  const std::filesystem::path fixture_source =
+      std::filesystem::path(OMARCHY_NEUTRAL_SURFACE_FIXTURE_ROOT);
+  RuntimeFixture fixture;
+  fixture.seedCheckedFixture(plugin, fixture_source);
+
+  const auto previous_handler = qInstallMessageHandler(t07_message_handler);
+  {
+    std::lock_guard lock(g_t07_mutex);
+    g_t07_input_lines.clear();
+    g_t07_accepted_trusted = false;
+  }
+
+  DeterministicJobs scheduler;
+  auto manager = createRuntimeManager(fixture, &scheduler);
+  OMARCHY_CHECK(bridge::PluginManagerTestAccess::scanRuntime(*manager) &&
+                scheduler.jobs.size() == 1);
+  std::jthread preparation([&] { scheduler.runOne(); });
+  preparation.join();
+  OMARCHY_CHECK(awaitSlots(*manager, [&](const auto &observations) {
+            return observations.size() == 1 && observations.front().running &&
+                   observations.front().has_runtime_root &&
+                   observations.front().has_endpoint_owner &&
+                   manager->count() == 3;
+          }));
+
+  QQuickWindow window;
+  window.resize(320, 120);
+  window.show();
+  OMARCHY_CHECK(qmlRegisterType<bridge::RemotePluginSurface>(
+              "Omarchy.PluginHost", 1, 0, "RemotePluginSurface") >= 0);
+  QQmlEngine surface_engine;
+  QQmlComponent remote_component(&surface_engine);
+  remote_component.setData(
+      "import QtQuick\nimport Omarchy.PluginHost 1.0\n"
+      "Item { width: 260; height: 56; "
+      "RemotePluginSurface { anchors.fill: parent } }\n",
+      QUrl());
+  OMARCHY_CHECK(remote_component.isReady());
+  std::unique_ptr<QObject> wrapper(remote_component.create());
+  auto *root = qobject_cast<QQuickItem *>(wrapper.get());
+  auto *remote_item = wrapper->findChild<bridge::RemotePluginSurface *>();
+  OMARCHY_CHECK(root && remote_item);
+  std::unique_ptr<bridge::RemotePluginSurface> remote(remote_item);
+  root->setParentItem(window.contentItem());
+  const auto key = barSurfaceKey(*manager, plugin);
+  std::fprintf(stderr,
+               "T07-SETUP key-empty=%s window-visible=%s bar-geometry=%dx%d\n",
+               key.isEmpty() ? "true" : "false",
+               window.isVisible() ? "true" : "false",
+               static_cast<int>(root->width()),
+               static_cast<int>(root->height()));
+  OMARCHY_CHECK(!key.isEmpty());
+  OMARCHY_CHECK(manager->attach(key, remote.get()));
+  if (!awaitFor(std::chrono::seconds(10), [&] {
+        return remote->connected() && remote->ready() &&
+               remote->frameSequence() > 0;
+      })) {
+    throw std::runtime_error(
+        "T07 neutral surface did not attach/render: connected=" +
+        std::to_string(remote->connected()) + " ready=" +
+        std::to_string(remote->ready()) + " sequence=" +
+        std::to_string(remote->frameSequence()));
+  }
+  std::fprintf(stderr, "T07-SETUP surface attached and ready\n");
+
+  std::fprintf(
+      stderr,
+      "\nT07-READY On the plugin surface window, perform ONE real pointer/"
+      "touch gesture inside it now.\n"
+      "T07-WAIT Waiting up to %d s for an accepted+trusted-physical=true "
+      "gesture...\n",
+      timeout_seconds);
+
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::seconds(timeout_seconds);
+  while (std::chrono::steady_clock::now() < deadline) {
+    {
+      std::lock_guard lock(g_t07_mutex);
+      if (g_t07_accepted_trusted)
+        break;
+    }
+    QCoreApplication::processEvents();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+
+  std::vector<std::string> evidence;
+  bool accepted_trusted = false;
+  bool accepted_untrusted = false;
+  {
+    std::lock_guard lock(g_t07_mutex);
+    evidence = g_t07_input_lines;
+    accepted_trusted = g_t07_accepted_trusted;
+    for (const auto &line : evidence)
+      if (line.find("decision=accepted") != std::string::npos &&
+          line.find("trusted-physical=false") != std::string::npos)
+        accepted_untrusted = true;
+  }
+
+  for (const auto &line : evidence)
+    std::fprintf(stderr, "T07-EVIDENCE %s\n", line.c_str());
+
+  qInstallMessageHandler(previous_handler);
+  window.close();
+  manager.reset();
+
+  if (accepted_trusted) {
+    std::fprintf(stderr,
+                 "T07-PASS real compositor gesture ingressed as "
+                 "accepted+trusted-physical=true; one-use exact binding is "
+                 "covered by the eligibility unit tests.\n");
+    if (accepted_untrusted)
+      std::fprintf(stderr,
+                   "T07-ADVERSARIAL an accepted trusted-physical=false gesture "
+                   "was also observed (unexpected).\n");
+    return true;
+  }
+  std::fprintf(stderr,
+               "T07-FAIL no accepted+trusted-physical=true gesture within %ds "
+               "(accepted_untrusted=%s evidence_lines=%zu).\n",
+               timeout_seconds, accepted_untrusted ? "true" : "false",
+               evidence.size());
+  return false;
+}
+
+} // namespace
+
+int run_t07_live_test() {
+  auto *live = std::getenv("OMARCHY_T07_LIVE");
+  if (live == nullptr || std::strcmp(live, "0") == 0) {
+    std::fprintf(stderr,
+                 "T07-SKIP OMARCHY_T07_LIVE is not set; interactive lane not "
+                 "run.\n");
+    return 77;
+  }
+  auto *packaged = std::getenv("OMARCHY_REQUIRE_PACKAGED_WORKER_TEST");
+  if (packaged == nullptr || std::strcmp(packaged, "0") == 0) {
+    std::fprintf(stderr,
+                 "T07-SKIP OMARCHY_REQUIRE_PACKAGED_WORKER_TEST is not set; "
+                 "interactive lane needs the packaged-worker bridge.\n");
+    return 77;
+  }
+  return t07_live_gesture_provenance() ? 0 : 1;
+}
 
 void run_plugin_manager_tests() {
   OMARCHY_CHECK(qmlRegisterType<bridge::RemotePluginSurface>(

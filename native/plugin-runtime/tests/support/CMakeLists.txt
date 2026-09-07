@@ -33,3 +33,7 @@ if(PLUGIN_SECURITY_BUILD_FUZZERS)
 endif()
 
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../launcher/tests" launcher-tests)
+
+add_executable(omarchy-plugin-t11-harness t11_power_harness.cpp)
+target_link_libraries(omarchy-plugin-t11-harness PRIVATE omarchy-plugin-test-support omarchy-plugin-activation-snapshot)
+

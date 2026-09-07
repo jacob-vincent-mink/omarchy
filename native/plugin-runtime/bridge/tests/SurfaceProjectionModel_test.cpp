@@ -25,6 +25,7 @@ void run_surface_endpoint_owner_tests();
 void run_plugin_manager_tests();
 void run_public_permission_lifecycle_test();
 void run_neutral_surfaces_real_bwrap_test();
+int run_t07_live_test();
 
 namespace {
 
@@ -520,6 +521,8 @@ int main(int argc, char **argv) {
       run_neutral_surfaces_real_bwrap_test();
       return 0;
     }
+    if (argc == 2 && std::string_view(argv[1]) == "--t07-live-only")
+      return run_t07_live_test();
     run();
     run_plugin_manager_tests();
     run_surface_endpoint_tests();

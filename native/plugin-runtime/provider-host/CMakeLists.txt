@@ -71,6 +71,18 @@ if(BUILD_TESTING)
     OMARCHY_MEDIA_STREAM_CONTRACT_DIGEST="${OMARCHY_MEDIA_STREAM_CONTRACT_DIGEST}")
   target_link_libraries(omarchy-plugin-network-media-provider-test-peer PRIVATE
     PkgConfig::CURL Qt6::Core)
+  # End-to-end companion for the QEMU connection-time network policy lane
+  # (T08): the real network_media_provider with live curl/getaddrinfo and no
+  # OMARCHY_NETWORK_MEDIA_TESTING short-circuits, driven over stdin (fd 0) so the
+  # protocol peer scripts can drive it directly. Build artifact only, not a test.
+  add_executable(omarchy-plugin-network-media-provider-e2e-peer
+    src/network_media_provider.cpp)
+  target_compile_definitions(omarchy-plugin-network-media-provider-e2e-peer PRIVATE
+    OMARCHY_PROVIDER_CHANNEL_FD=0
+    OMARCHY_NETWORK_FETCH_CONTRACT_DIGEST="${OMARCHY_NETWORK_FETCH_CONTRACT_DIGEST}"
+    OMARCHY_MEDIA_STREAM_CONTRACT_DIGEST="${OMARCHY_MEDIA_STREAM_CONTRACT_DIGEST}")
+  target_link_libraries(omarchy-plugin-network-media-provider-e2e-peer PRIVATE
+    PkgConfig::CURL Qt6::Core)
   omarchy_plugin_test(plugin-network-media-provider
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/network_media_provider_test.py
