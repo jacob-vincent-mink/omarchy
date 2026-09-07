@@ -69,6 +69,9 @@ endif()
 configure_file(cmake/runtime_paths.hpp.in
   "${CMAKE_CURRENT_BINARY_DIR}/generated/omarchy/plugin_runtime/runtime_paths.hpp"
   @ONLY)
+configure_file(packaging/runtime-paths-v1.txt.in
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/runtime-paths-v1.txt"
+  @ONLY)
 add_library(omarchy-plugin-runtime-paths INTERFACE)
 add_library(Omarchy::PluginRuntimePaths ALIAS omarchy-plugin-runtime-paths)
 target_include_directories(omarchy-plugin-runtime-paths INTERFACE
@@ -82,6 +85,11 @@ else()
   qt_standard_project_setup()
 endif()
 
+install(FILES
+  packaging/runtime-dependencies-v1.txt
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/runtime-paths-v1.txt"
+  DESTINATION "${OMARCHY_PLUGIN_INSTALL_ROOT}/metadata")
+
 qt_policy(SET QTP0001 NEW)
 qt_policy(SET QTP0004 NEW)
 
@@ -94,6 +102,15 @@ add_subdirectory(presentation)
 function(omarchy_plugin_target_defaults target)
   target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endfunction()
+
+install(FILES
+  shell/SecurePluginHost.qml
+  shell/SecureSurfacePolicy.js
+  shell/SecureBarSurface.qml
+  shell/SecurePanelSurface.qml
+  shell/SecureOverlaySurface.qml
+  shell/TrustedSurfaceInputMask.qml
+  DESTINATION "${OMARCHY_PLUGIN_INSTALL_ROOT}/shell")
 
 add_subdirectory(contracts/manifest)
 add_subdirectory(contracts/wire)
