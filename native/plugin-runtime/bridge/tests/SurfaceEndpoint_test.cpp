@@ -1,0 +1,811 @@
+#include "../../tests/support/test_assert.hpp"
+
+#include "SurfaceEndpoint.h"
+
+#include "omarchy/plugin_runtime/surface/profile.hpp"
+#include "omarchy/plugin_runtime/surface/render_messages.hpp"
+#include "surface_host.hpp"
+
+#include <QCoreApplication>
+#include <QLoggingCategory>
+#include <QMouseEvent>
+
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <cerrno>
+#include <functional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace omarchy::plugin_runtime::bridge {
+
+class SurfaceEndpointTestAccess final {
+public:
+  [[nodiscard]] static std::unique_ptr<SurfaceEndpoint>
+  create(channel::SurfaceSessionPort &session,
+         TrustedInputAuthority &input_authority,
+         std::string declared_surface) {
+    return std::unique_ptr<SurfaceEndpoint>(
+        new SurfaceEndpoint(session, input_authority,
+                            std::move(declared_surface)));
+  }
+
+  [[nodiscard]] static bool
+  attach(SurfaceEndpoint &endpoint, RemotePluginSurface &surface,
+         std::uint32_t logical_width, std::uint32_t logical_height,
+         std::uint32_t dpr_numerator, std::uint32_t dpr_denominator,
+         surface_host::MonotonicClock &clock) {
+    return endpoint.attach(surface, logical_width, logical_height,
+                           dpr_numerator, dpr_denominator, clock);
+  }
+
+  [[nodiscard]] static bool route_input(SurfaceEndpoint &endpoint,
+                                        HostInputEvent event) {
+    return endpoint.route(std::move(event));
+  }
+
+  [[nodiscard]] static bool cancel_input(SurfaceEndpoint &endpoint,
+                                         std::uint64_t device) {
+    return endpoint.cancel(device);
+  }
+
+  static void close(SurfaceEndpoint &endpoint) noexcept { endpoint.close(); }
+
+  [[nodiscard]] static bool is_inert(const SurfaceEndpoint &endpoint) noexcept {
+    return endpoint.state() == SurfaceEndpoint::State::inert;
+  }
+
+  [[nodiscard]] static bool
+  is_active(const SurfaceEndpoint &endpoint) noexcept {
+    return endpoint.state() == SurfaceEndpoint::State::active;
+  }
+
+  [[nodiscard]] static bool
+  is_closing(const SurfaceEndpoint &endpoint) noexcept {
+    return endpoint.state() == SurfaceEndpoint::State::closing;
+  }
+
+  [[nodiscard]] static bool is_closed(const SurfaceEndpoint &endpoint) noexcept {
+    return endpoint.state() == SurfaceEndpoint::State::closed;
+  }
+
+  [[nodiscard]] static bool forward_render(
+      SurfaceEndpoint &endpoint, const plugin::wire::EnvelopeHeader &header,
+      std::span<const std::byte> payload) {
+    return endpoint.forward_render(header, payload, {});
+  }
+};
+
+} // namespace omarchy::plugin_runtime::bridge
+
+namespace {
+
+namespace bridge = omarchy::plugin_runtime::bridge;
+namespace channel = omarchy::plugin_runtime::channel;
+namespace host = omarchy::plugin_runtime::host_session;
+namespace permissions = omarchy::plugins::permissions;
+namespace render = omarchy::plugin_runtime::render_session;
+namespace surface = omarchy::plugin_runtime::surface;
+namespace surface_host = omarchy::plugin_runtime::surface_host;
+namespace wire = omarchy::plugin::wire;
+
+static_assert(
+    !std::is_constructible_v<bridge::SurfaceEndpoint,
+                             channel::SurfaceSessionPort &, std::string>,
+    "surface endpoint construction escaped its owner");
+
+using omarchy::plugin_runtime::test_support::require;
+
+std::vector<QString> diagnostic_messages;
+
+bridge::HostInputEvent physical_press(std::uint64_t device) {
+  return {.payload = surface::PointerButton{
+              .position = {1U << surface::kQ16FractionBits,
+                           1U << surface::kQ16FractionBits},
+              .button = static_cast<std::uint32_t>(Qt::LeftButton),
+              .state = surface::ButtonState::pressed,
+              .buttons = static_cast<std::uint32_t>(Qt::LeftButton)},
+          .device = device,
+          .trusted_physical = true};
+}
+
+void capture_diagnostic(QtMsgType, const QMessageLogContext &,
+                        const QString &message) {
+  diagnostic_messages.push_back(message);
+}
+
+class DiagnosticCapture final {
+public:
+  DiagnosticCapture() {
+    diagnostic_messages.clear();
+    previous_ = qInstallMessageHandler(capture_diagnostic);
+  }
+
+  ~DiagnosticCapture() { qInstallMessageHandler(previous_); }
+
+private:
+  QtMessageHandler previous_ = nullptr;
+};
+
+permissions::ActivationBinding binding(std::uint64_t generation = 7) {
+  return {.plugin = permissions::PluginId("org.example.endpoint"),
+          .revision = permissions::Digest(std::string(64, 'a')),
+          .policy_fingerprint = permissions::Digest(std::string(64, 'b')),
+          .generation = generation};
+}
+
+struct SharedEligibility {
+  std::optional<surface::SurfaceKey> source;
+};
+
+class Port final : public channel::SurfaceSessionPort {
+public:
+  explicit Port(std::string surface_name = "pet", std::uint64_t surface_id = 1,
+                SharedEligibility *shared_eligibility = nullptr)
+      : shared_eligibility(shared_eligibility) {
+    description = {
+        .binding = binding(),
+        .key = {.id = surface_id, .generation = 7},
+        .session_nonce = 41,
+        .plugin_id = "org.example.endpoint",
+        .surface_name = surface_name,
+        .canonical_surfaces = "{\"" + surface_name +
+                              "\":{\"keyboardFocus\":false,"
+                              "\"maximumFramesPerSecond\":60,"
+                              "\"maximumHeight\":32,\"maximumWidth\":64,"
+                              "\"role\":\"desktop-overlay\"}}",
+    };
+  }
+
+  std::optional<channel::SurfaceDescription>
+  describe(std::string_view name) const noexcept override {
+    if (fail_describe)
+      return {};
+    if (!running || name != description.surface_name)
+      return {};
+    return description;
+  }
+
+  bool attach(const channel::SurfaceDescription &expected,
+              host::SurfaceEndpoint &candidate) noexcept override {
+    if (!running || fail_attach || expected != description ||
+        endpoint != nullptr)
+      return false;
+    endpoint = &candidate;
+    attached_description = expected;
+    return true;
+  }
+
+  bool detach(const channel::SurfaceDescription &expected,
+              const host::SurfaceEndpoint &candidate) noexcept override {
+    ++detach_calls;
+    if (expected != description) {
+      ++stale_detach_calls;
+      return true;
+    }
+    if (endpoint != &candidate || !attached_description ||
+        expected != *attached_description)
+      return false;
+    if (remote_at_detach != nullptr)
+      remote_was_alive_at_detach = remote_at_detach->connected();
+    endpoint = nullptr;
+    attached_description.reset();
+    return true;
+  }
+
+  bool arm_surface_intent(
+      const channel::SurfaceDescription &expected,
+      std::uint64_t sequence) noexcept override {
+    ++arm_calls;
+    last_arm_sequence = sequence;
+    const bool accepted = running && expected == description;
+    if (accepted && shared_eligibility != nullptr)
+      shared_eligibility->source = expected.key;
+    return accepted;
+  }
+
+  void clear_surface_intent_eligibility(
+      const channel::SurfaceDescription &expected) noexcept override {
+    if (expected == description) {
+      ++clear_calls;
+      if (shared_eligibility != nullptr &&
+          shared_eligibility->source == expected.key)
+        shared_eligibility->source.reset();
+    } else {
+      ++stale_clear_calls;
+    }
+  }
+
+  bool deliver(std::uint16_t type, std::span<const std::byte> payload,
+               std::uint64_t correlation, std::uint64_t generation = 7,
+               std::vector<host::UniqueFd> descriptors = {}) {
+    if (endpoint == nullptr)
+      return false;
+    return endpoint->receive({.launch_generation = generation,
+                              .message_type = type,
+                              .correlation = correlation,
+                              .surface = std::nullopt,
+                              .payload = {payload.begin(), payload.end()},
+                              .descriptors = std::move(descriptors)});
+  }
+
+  void replace_session() {
+    endpoint = nullptr;
+    attached_description.reset();
+    description.binding.generation = 8;
+    description.key.generation = 8;
+    description.session_nonce = 42;
+  }
+
+  bool send_render_packet_impl(
+                               const channel::SurfaceDescription &expected,
+                               const wire::EnvelopeHeader &header,
+                               std::vector<std::byte> payload,
+                               std::vector<host::UniqueFd> descriptors) noexcept override {
+    if (expected != description)
+      return false;
+    ++send_calls;
+    last_header = header;
+    last_payload = std::move(payload);
+    message_types.push_back(header.message_type);
+    if (header.message_type == static_cast<std::uint16_t>(
+                                   surface::RenderMessageType::surface_release)) {
+      release_was_attached = endpoint != nullptr && attached_description &&
+                             *attached_description == expected;
+      if (reenter_on_release)
+        reenter_on_release();
+    }
+    surface::InputEvent input;
+    if (header.message_type == static_cast<std::uint16_t>(
+                                   surface::RenderMessageType::input) &&
+        surface::decode_input_event(last_payload, input)) {
+      const bool cancel = std::holds_alternative<surface::Cancel>(input.payload);
+      inputs.push_back(std::move(input));
+      if (cancel && reenter_on_cancel)
+        reenter_on_cancel();
+    }
+    last_descriptor = -1;
+    if (!descriptors.empty()) {
+      if (descriptors.size() != 1)
+        return false;
+      last_descriptor = descriptors.front().get();
+      descriptor_had_cloexec =
+          (::fcntl(last_descriptor, F_GETFD) & FD_CLOEXEC) != 0;
+    }
+    return !send_fails || header.message_type != fail_message_type;
+  }
+
+  channel::SurfaceDescription description;
+  std::optional<channel::SurfaceDescription> attached_description;
+  host::SurfaceEndpoint *endpoint = nullptr;
+  bridge::RemotePluginSurface *remote_at_detach = nullptr;
+  wire::EnvelopeHeader last_header{};
+  std::vector<std::byte> last_payload;
+  std::vector<std::uint16_t> message_types;
+  std::vector<surface::InputEvent> inputs;
+  int last_descriptor = -1;
+  std::uint64_t last_arm_sequence = 0;
+  std::size_t detach_calls = 0;
+  std::size_t stale_detach_calls = 0;
+  std::size_t send_calls = 0;
+  std::size_t arm_calls = 0;
+  std::size_t clear_calls = 0;
+  std::size_t stale_clear_calls = 0;
+  bool descriptor_had_cloexec = false;
+  bool remote_was_alive_at_detach = false;
+  bool release_was_attached = false;
+  std::function<void()> reenter_on_cancel;
+  std::function<void()> reenter_on_release;
+  bool running = true;
+  bool send_fails = false;
+  bool fail_attach = false;
+  bool fail_describe = false;
+  std::uint16_t fail_message_type = 0;
+  SharedEligibility *shared_eligibility = nullptr;
+};
+
+class Clock final : public surface_host::MonotonicClock {
+public:
+  std::uint64_t now_nanoseconds() const override { return now; }
+  std::uint64_t now = 1'000'000'000;
+};
+
+class RegionRouter final : public bridge::HostInputRegionRouter {
+public:
+  bool apply(const surface::InputRegionUpdate &) override { return true; }
+};
+
+class InputSink final : public bridge::RenderPacketSink {
+public:
+  bool send(const wire::EnvelopeHeader &,
+            std::span<const std::byte>) override {
+    return true;
+  }
+};
+
+void negotiate(Port &port) {
+  const auto selection = surface::encode_profile_selection(
+      {.version = surface::kSoftwareProfileVersion,
+       .pixel_format = surface::kRgba8888Premultiplied});
+  const auto correlations = surface::render_correlations(port.description.key);
+  OMARCHY_CHECK(port.deliver(static_cast<std::uint16_t>(
+                           surface::RenderMessageType::profile_select),
+                       selection, correlations[0]));
+  OMARCHY_CHECK(port.descriptor_had_cloexec);
+  errno = 0;
+  OMARCHY_CHECK(::fcntl(port.last_descriptor, F_GETFD) == -1 && errno == EBADF);
+  const auto allocated = surface::encode_surface_key(port.description.key);
+  OMARCHY_CHECK(port.deliver(static_cast<std::uint16_t>(
+                           surface::RenderMessageType::surface_allocated),
+                       allocated, correlations[1]));
+}
+
+struct Harness {
+  Harness()
+      : endpoint(bridge::SurfaceEndpointTestAccess::create(
+            port, input_authority, "pet")) {
+    port.remote_at_detach = &remote;
+  }
+
+  void attach() {
+    OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::attach(
+                *endpoint, remote, 64, 32, 1, 1, clock));
+    OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::is_active(*endpoint) &&
+                port.send_calls == 1);
+  }
+
+  void negotiate() { ::negotiate(port); }
+
+  Port port;
+  Clock clock;
+  bridge::TrustedInputAuthority input_authority;
+  bridge::RemotePluginSurface remote;
+  std::unique_ptr<bridge::SurfaceEndpoint> endpoint;
+};
+
+void lifecycle_and_descriptor_contract() {
+  Harness value;
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::is_inert(*value.endpoint));
+  value.attach();
+  OMARCHY_CHECK(!bridge::SurfaceEndpointTestAccess::attach(
+              *value.endpoint, value.remote, 64, 32, 1, 1, value.clock));
+  value.negotiate();
+
+  int descriptors[2] = {-1, -1};
+  OMARCHY_CHECK(::pipe2(descriptors, O_CLOEXEC) == 0);
+  const int rejected = descriptors[0];
+  std::vector<host::UniqueFd> owned;
+  owned.emplace_back(rejected);
+  OMARCHY_CHECK(!value.port.deliver(
+              static_cast<std::uint16_t>(surface::RenderMessageType::frame_ready),
+              {}, 0, 7, std::move(owned)));
+  errno = 0;
+  OMARCHY_CHECK(::fcntl(rejected, F_GETFD) == -1 && errno == EBADF);
+  ::close(descriptors[1]);
+
+  const auto sends_before_close = value.port.send_calls;
+  std::size_t cancel_reentries = 0;
+  bool wrong_release_rejected = false;
+  bool malformed_release_rejected = false;
+  value.port.reenter_on_cancel = [&] {
+    ++cancel_reentries;
+    OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::is_closing(*value.endpoint));
+    bridge::SurfaceEndpointTestAccess::close(*value.endpoint);
+  };
+  value.port.reenter_on_release = [&] {
+    bridge::SurfaceEndpointTestAccess::close(*value.endpoint);
+    const auto wrong = surface::encode_surface_key(
+        {.id = value.port.description.key.id + 1,
+         .generation = value.port.description.key.generation});
+    wrong_release_rejected =
+        !bridge::SurfaceEndpointTestAccess::forward_render(
+            *value.endpoint, value.port.last_header, wrong);
+    const std::array malformed{std::byte{0x01}};
+    malformed_release_rejected =
+        !bridge::SurfaceEndpointTestAccess::forward_render(
+            *value.endpoint, value.port.last_header, malformed);
+  };
+  bridge::SurfaceEndpointTestAccess::close(*value.endpoint);
+  bridge::SurfaceEndpointTestAccess::close(*value.endpoint);
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::is_closed(*value.endpoint) &&
+              value.port.detach_calls == 1 &&
+              cancel_reentries == 1 &&
+              wrong_release_rejected && malformed_release_rejected &&
+              !value.port.remote_was_alive_at_detach &&
+              value.port.release_was_attached &&
+              value.port.send_calls == sends_before_close + 2 &&
+              value.port.message_types.size() >= 2 &&
+              value.port.message_types[value.port.message_types.size() - 2] ==
+                  static_cast<std::uint16_t>(
+                      surface::RenderMessageType::input) &&
+              value.port.message_types.back() ==
+                  static_cast<std::uint16_t>(
+                      surface::RenderMessageType::surface_release) &&
+              !value.port.inputs.empty() &&
+              std::holds_alternative<surface::Cancel>(
+                  value.port.inputs.back().payload));
+  OMARCHY_CHECK(value.port.detach_calls == 1);
+  value.port.reenter_on_cancel = {};
+  value.port.reenter_on_release = {};
+
+  bridge::RemotePluginSurface replacement_remote;
+  auto replacement = bridge::SurfaceEndpointTestAccess::create(
+      value.port, value.input_authority, "pet");
+  value.port.remote_at_detach = &replacement_remote;
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::attach(
+              *replacement, replacement_remote, 64, 32, 1, 1, value.clock) &&
+              bridge::SurfaceEndpointTestAccess::is_active(*replacement));
+  bridge::SurfaceEndpointTestAccess::close(*replacement);
+}
+
+void terminal_paths_may_destroy_the_remote() {
+  enum class Trigger { cancel, release, input_regions, connection };
+  for (const auto trigger : {Trigger::cancel, Trigger::release,
+                             Trigger::input_regions, Trigger::connection}) {
+    Port port;
+    if (trigger == Trigger::input_regions)
+      port.description.canonical_surfaces =
+          R"({"pet":{"inputRegions":"dynamic-bounded","keyboardFocus":false,"maximumFramesPerSecond":60,"maximumHeight":32,"maximumWidth":64,"role":"desktop-overlay"}})";
+    Clock clock;
+    bridge::TrustedInputAuthority input_authority;
+    auto remote = std::make_unique<bridge::RemotePluginSurface>();
+    auto endpoint = bridge::SurfaceEndpointTestAccess::create(
+        port, input_authority, "pet");
+    OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::attach(
+                *endpoint, *remote, 64, 32, 1, 1, clock));
+    negotiate(port);
+    if (trigger == Trigger::cancel)
+      port.reenter_on_cancel = [&] { remote.reset(); };
+    else if (trigger == Trigger::release)
+      port.reenter_on_release = [&] { remote.reset(); };
+    else {
+      if (trigger == Trigger::input_regions) {
+        surface::InputRegionUpdate update{.surface = port.description.key,
+                                          .generation = 1,
+                                          .count = 1};
+        update.regions[0] = {.x = 0, .y = 0, .width = 8, .height = 8};
+        OMARCHY_CHECK(remote->updateInputRegions(update));
+      }
+      QObject::connect(remote.get(),
+          trigger == Trigger::input_regions
+              ? &bridge::RemotePluginSurface::inputRegionsChanged
+              : &bridge::RemotePluginSurface::connectionChanged,
+          [&] { remote.reset(); });
+    }
+    bridge::SurfaceEndpointTestAccess::close(*endpoint);
+    OMARCHY_CHECK(!remote &&
+                bridge::SurfaceEndpointTestAccess::is_closed(*endpoint) &&
+                port.detach_calls == 1);
+  }
+}
+
+void stale_and_malformed_messages_fail_closed() {
+  Harness stale;
+  stale.attach();
+  const auto selection = surface::encode_profile_selection(
+      {.version = surface::kSoftwareProfileVersion,
+       .pixel_format = surface::kRgba8888Premultiplied});
+  OMARCHY_CHECK(!stale.port.deliver(
+              static_cast<std::uint16_t>(surface::RenderMessageType::profile_select),
+              selection, surface::render_correlations(stale.port.description.key)[0],
+              8));
+
+  Harness correlation;
+  correlation.attach();
+  OMARCHY_CHECK(!correlation.port.deliver(
+              static_cast<std::uint16_t>(surface::RenderMessageType::profile_select),
+              selection, 999));
+
+  Harness type;
+  type.attach();
+  OMARCHY_CHECK(!type.port.deliver(0xffff, {}, 0));
+}
+
+void gesture_arming_is_exact_and_send_failure_clears() {
+  Harness accepted;
+  accepted.attach();
+  accepted.negotiate();
+  const auto accepted_press = physical_press(6);
+  {
+    DiagnosticCapture diagnostics;
+    OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::route_input(
+                *accepted.endpoint, accepted_press) &&
+                accepted.port.arm_calls == 1 &&
+                accepted.port.last_arm_sequence == 1 &&
+                accepted.input_authority.surface_has_physical_activation(
+                    accepted.port.description.key));
+  }
+  const auto host_input = std::ranges::find_if(
+      diagnostic_messages, [](const QString &message) {
+        return message.contains(QStringLiteral(
+            "stage=host-input decision=accepted reason=input-authority")) &&
+               message.contains(QStringLiteral(
+                   "surface-id=1 generation=7 input-sequence=1"));
+      });
+  const auto input_echo = std::ranges::find_if(
+      diagnostic_messages, [](const QString &message) {
+        return message.contains(QStringLiteral(
+            "stage=host-intent-eligibility decision=armed reason=trusted-input")) &&
+               message.contains(QStringLiteral(
+                   "surface-id=1 generation=7 input-sequence=1"));
+      });
+  OMARCHY_CHECK(host_input != diagnostic_messages.end() &&
+              input_echo != diagnostic_messages.end() &&
+              host_input < input_echo);
+  bridge::SurfaceEndpointTestAccess::close(*accepted.endpoint);
+  OMARCHY_CHECK(!accepted.input_authority.surface_has_physical_activation(
+              accepted.port.description.key) &&
+              !accepted.port.inputs.empty() &&
+              std::holds_alternative<surface::Cancel>(
+                  accepted.port.inputs.back().payload) &&
+              accepted.port.clear_calls >= 1);
+
+  Harness terminal_failure;
+  terminal_failure.attach();
+  terminal_failure.negotiate();
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::route_input(
+              *terminal_failure.endpoint, accepted_press) &&
+              terminal_failure.port.arm_calls == 1 &&
+              !terminal_failure.port.deliver(0xffff, {}, 0) &&
+              !terminal_failure.remote.connected() &&
+              !terminal_failure.input_authority
+                   .surface_has_physical_activation(
+                       terminal_failure.port.description.key) &&
+              terminal_failure.port.inputs.size() == 2 &&
+              std::holds_alternative<surface::Cancel>(
+                  terminal_failure.port.inputs.back().payload) &&
+              terminal_failure.port.clear_calls >= 1);
+
+  Harness value;
+  value.attach();
+  value.negotiate();
+  const bridge::HostInputEvent motion{
+      .payload = surface::PointerMotion{
+          .position = {1U << surface::kQ16FractionBits,
+                       1U << surface::kQ16FractionBits}},
+      .device = 7,
+      .trusted_physical = true};
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::route_input(
+              *value.endpoint, motion) &&
+              value.port.arm_calls == 0);
+
+  value.port.send_fails = true;
+  value.port.fail_message_type =
+      static_cast<std::uint16_t>(surface::RenderMessageType::input);
+  const auto press = physical_press(7);
+  OMARCHY_CHECK(!bridge::SurfaceEndpointTestAccess::route_input(
+              *value.endpoint, press) &&
+              value.port.arm_calls == 1 && value.port.last_arm_sequence == 2 &&
+              value.port.clear_calls == 1);
+
+  Harness touch;
+  touch.attach();
+  touch.negotiate();
+  const bridge::HostInputEvent start{
+      .payload = bridge::HostTouchFrame{
+          .phase = surface::TouchFramePhase::begin,
+          .points = {{{.id = 91,
+                       .state = surface::TouchPointState::pressed,
+                       .position = {1U << surface::kQ16FractionBits,
+                                    1U << surface::kQ16FractionBits}}}},
+          .count = 1},
+      .device = 8,
+      .trusted_physical = true};
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::route_input(
+              *touch.endpoint, start) && touch.port.arm_calls == 1);
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::cancel_input(*touch.endpoint, 8) &&
+              touch.port.clear_calls == 1);
+
+  Harness keyboard;
+  keyboard.port.description.canonical_surfaces =
+      R"({"pet":{"keyboardFocus":"after-gesture","maximumFramesPerSecond":60,"maximumHeight":32,"maximumWidth":64,"role":"panel"}})";
+  keyboard.attach();
+  keyboard.negotiate();
+  const auto focus_press = physical_press(9);
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::route_input(
+              *keyboard.endpoint, focus_press));
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::route_input(
+              *keyboard.endpoint,
+              {.payload = surface::FocusChanged{.focused = true}}));
+  const bridge::HostInputEvent key_press{
+      .payload = surface::Key{
+          .key = static_cast<std::uint32_t>(Qt::Key_Return),
+          .native_scan_code = 28,
+          .state = surface::ButtonState::pressed,
+          .auto_repeat = false,
+          .text = "\r"},
+      .device = 9,
+      .trusted_physical = true};
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::route_input(
+              *keyboard.endpoint, key_press) &&
+              keyboard.port.arm_calls == 2);
+  auto repeated_key = key_press;
+  std::get<surface::Key>(repeated_key.payload).auto_repeat = true;
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::route_input(
+              *keyboard.endpoint, repeated_key) &&
+              keyboard.port.arm_calls == 2);
+}
+
+void remote_destruction_closes_host_before_detach() {
+  Port port;
+  bridge::TrustedInputAuthority input_authority;
+  Clock clock;
+  std::size_t teardown_signals = 0;
+  auto endpoint = bridge::SurfaceEndpointTestAccess::create(
+      port, input_authority, "pet");
+  {
+    bridge::RemotePluginSurface remote;
+    OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::attach(
+                *endpoint, remote, 64, 32, 1, 1, clock));
+    QObject::connect(&remote, &bridge::RemotePluginSurface::connectionChanged,
+                     [&] { ++teardown_signals; });
+    QObject::connect(&remote, &bridge::RemotePluginSurface::focusChanged,
+                     [&] { ++teardown_signals; });
+    QObject::connect(&remote, &bridge::RemotePluginSurface::inspectionChanged,
+                     [&] { ++teardown_signals; });
+  }
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::is_closed(*endpoint) &&
+              port.detach_calls == 1 && teardown_signals == 0);
+}
+
+void attach_rolls_back_every_published_owner() {
+  Harness value;
+  value.port.fail_describe = true;
+  OMARCHY_CHECK(!bridge::SurfaceEndpointTestAccess::attach(
+              *value.endpoint, value.remote, 64, 32, 1, 1, value.clock));
+  value.port.fail_describe = false;
+  value.port.fail_attach = true;
+  OMARCHY_CHECK(!bridge::SurfaceEndpointTestAccess::attach(
+              *value.endpoint, value.remote, 64, 32, 1, 1, value.clock) &&
+              bridge::SurfaceEndpointTestAccess::is_inert(*value.endpoint));
+  value.port.fail_attach = false;
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::attach(
+              *value.endpoint, value.remote, 64, 32, 1, 1, value.clock));
+  bridge::SurfaceEndpointTestAccess::close(*value.endpoint);
+
+  Harness bounds;
+  OMARCHY_CHECK(!bridge::SurfaceEndpointTestAccess::attach(
+              *bounds.endpoint, bounds.remote, 65, 32, 1, 1, value.clock) &&
+              bounds.port.detach_calls == 1 && bounds.port.send_calls == 0 &&
+              bridge::SurfaceEndpointTestAccess::attach(
+                  *bounds.endpoint, bounds.remote, 64, 32, 1, 1, value.clock));
+  bridge::SurfaceEndpointTestAccess::close(*bounds.endpoint);
+
+  Harness router;
+  RegionRouter occupied;
+  OMARCHY_CHECK(router.remote.bindHostInputRegionRouter(occupied));
+  OMARCHY_CHECK(!bridge::SurfaceEndpointTestAccess::attach(
+              *router.endpoint, router.remote, 64, 32, 1, 1, value.clock) &&
+              router.port.detach_calls == 1 && router.port.send_calls == 0);
+  QMouseEvent rejected_press(
+      QEvent::MouseButtonPress, QPointF(1, 1), QPointF(1, 1), QPointF(1, 1),
+      Qt::LeftButton, Qt::LeftButton, Qt::NoModifier,
+      Qt::MouseEventNotSynthesized);
+  QCoreApplication::sendEvent(&router.remote, &rejected_press);
+  OMARCHY_CHECK(!rejected_press.isAccepted());
+  router.remote.unbindHostInputRegionRouter(occupied);
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::attach(
+              *router.endpoint, router.remote, 64, 32, 1, 1, value.clock));
+  bridge::SurfaceEndpointTestAccess::close(*router.endpoint);
+
+  Harness transport;
+  auto occupied_sink = std::make_shared<InputSink>();
+  auto occupied_transport =
+      std::make_shared<bridge::AuthenticatedInputTransport>(99,
+                                                            occupied_sink);
+  OMARCHY_CHECK(transport.remote.bindTransport(occupied_transport) &&
+              !bridge::SurfaceEndpointTestAccess::attach(
+                  *transport.endpoint, transport.remote, 64, 32, 1, 1,
+                  value.clock) &&
+              occupied_transport->connected() &&
+              transport.port.detach_calls == 1 &&
+              transport.port.send_calls == 0);
+  transport.remote.unbindTransport(occupied_transport);
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::attach(
+              *transport.endpoint, transport.remote, 64, 32, 1, 1, value.clock));
+  bridge::SurfaceEndpointTestAccess::close(*transport.endpoint);
+}
+
+void remote_pointer_events_reach_the_exact_input_path() {
+  Harness value;
+  value.attach();
+  value.negotiate();
+  const auto before = value.port.send_calls;
+  QMouseEvent press(QEvent::MouseButtonPress, QPointF(1.25, 2.5),
+                    QPointF(1.25, 2.5), QPointF(1.25, 2.5), Qt::LeftButton,
+                    Qt::LeftButton, Qt::NoModifier,
+                    Qt::MouseEventNotSynthesized);
+  QCoreApplication::sendEvent(&value.remote, &press);
+  QMouseEvent release(QEvent::MouseButtonRelease, QPointF(1.25, 2.5),
+                      QPointF(1.25, 2.5), QPointF(1.25, 2.5), Qt::LeftButton,
+                      Qt::NoButton, Qt::NoModifier,
+                      Qt::MouseEventNotSynthesized);
+  QCoreApplication::sendEvent(&value.remote, &release);
+  OMARCHY_CHECK(press.isAccepted() && release.isAccepted() &&
+              value.port.arm_calls == 0 &&
+              value.port.send_calls == before + 2);
+
+  const auto after_release = value.port.send_calls;
+  QMouseEvent outside(QEvent::MouseButtonPress, QPointF(64, 2),
+                      QPointF(64, 2), QPointF(64, 2), Qt::LeftButton,
+                      Qt::LeftButton, Qt::NoModifier,
+                      Qt::MouseEventNotSynthesized);
+  QCoreApplication::sendEvent(&value.remote, &outside);
+  QMouseEvent synthesized(
+      QEvent::MouseButtonPress, QPointF(2, 2), QPointF(2, 2), QPointF(2, 2),
+      Qt::LeftButton, Qt::LeftButton, Qt::NoModifier,
+      Qt::MouseEventSynthesizedByApplication);
+  QCoreApplication::sendEvent(&value.remote, &synthesized);
+  OMARCHY_CHECK(!outside.isAccepted() && synthesized.isAccepted() &&
+              value.port.send_calls == after_release + 1 &&
+              value.port.arm_calls == 0 &&
+              !value.input_authority.surface_has_physical_activation(
+                  value.port.description.key) &&
+              !value.remote.surfaceFocused());
+}
+
+void sibling_gesture_survives_unrelated_endpoint_teardown() {
+  SharedEligibility eligibility;
+  Port first_port("first", 11, &eligibility);
+  Port second_port("second", 12, &eligibility);
+  bridge::TrustedInputAuthority input_authority;
+  Clock clock;
+  bridge::RemotePluginSurface first_remote;
+  bridge::RemotePluginSurface second_remote;
+  auto first = bridge::SurfaceEndpointTestAccess::create(
+      first_port, input_authority, "first");
+  auto second = bridge::SurfaceEndpointTestAccess::create(
+      second_port, input_authority, "second");
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::attach(
+              *first, first_remote, 64, 32, 1, 1, clock) &&
+              bridge::SurfaceEndpointTestAccess::attach(
+                  *second, second_remote, 64, 32, 1, 1, clock));
+  negotiate(first_port);
+  negotiate(second_port);
+  const auto second_press = physical_press(55);
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::route_input(*second,
+                                                         second_press) &&
+              eligibility.source == second_port.description.key);
+  bridge::SurfaceEndpointTestAccess::close(*first);
+  OMARCHY_CHECK(eligibility.source == second_port.description.key &&
+              first_port.clear_calls >= 1 && second_port.clear_calls == 0);
+  bridge::SurfaceEndpointTestAccess::close(*second);
+  OMARCHY_CHECK(!eligibility.source && second_port.clear_calls >= 1);
+}
+
+void late_g1_remote_teardown_cannot_touch_g2() {
+  Port port;
+  bridge::TrustedInputAuthority input_authority;
+  Clock clock;
+  auto endpoint = bridge::SurfaceEndpointTestAccess::create(
+      port, input_authority, "pet");
+  {
+    bridge::RemotePluginSurface remote;
+    OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::attach(
+                *endpoint, remote, 64, 32, 1, 1, clock));
+    port.replace_session();
+  }
+  OMARCHY_CHECK(bridge::SurfaceEndpointTestAccess::is_closed(*endpoint) &&
+              port.stale_clear_calls >= 1 && port.clear_calls == 0 &&
+              port.stale_detach_calls == 1);
+}
+
+} // namespace
+
+void run_surface_endpoint_tests() {
+  lifecycle_and_descriptor_contract();
+  terminal_paths_may_destroy_the_remote();
+  stale_and_malformed_messages_fail_closed();
+  gesture_arming_is_exact_and_send_failure_clears();
+  remote_destruction_closes_host_before_detach();
+  attach_rolls_back_every_published_owner();
+  remote_pointer_events_reach_the_exact_input_path();
+  sibling_gesture_survives_unrelated_endpoint_teardown();
+  late_g1_remote_teardown_cannot_touch_g2();
+}
