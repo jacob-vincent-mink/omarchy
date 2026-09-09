@@ -75,6 +75,35 @@ fn exec_worker_child() {
     let (output, result) = cli(&["echo", "literal"]);
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(result, serde_json::json!({"version":1,"status":"failed"}));
+  } else if mode == "long" || mode == "abandon" {
+    let mut cli = Command::new("/grants/cli")
+      .args(["--json", "--exec", "fixture"])
+      .args(&hold)
+      .stdout(std::process::Stdio::piped())
+      .spawn()
+      .unwrap();
+    if mode == "long" {
+      thread::sleep(Duration::from_secs(13));
+      assert!(
+        cli.try_wait().unwrap().is_none(),
+        "long-running forwarder ended at the bounded deadline"
+      );
+      display.write_all(b"GATE").unwrap();
+      let output = cli.wait_with_output().unwrap();
+      let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+      assert!(output.status.success());
+      assert_eq!(result["status"], "completed");
+      assert_eq!(result["exitCode"], 17);
+    } else {
+      thread::sleep(Duration::from_millis(250));
+      cli.kill().unwrap();
+      cli.wait().unwrap();
+      thread::sleep(Duration::from_millis(250));
+      display.write_all(b"CANC").unwrap();
+      let mut ack = [0; 4];
+      display.read_exact(&mut ack).unwrap();
+      assert_eq!(&ack, b"OKAY");
+    }
   } else if mode == "allowed" {
     let (output, result) = cli(&["failure"]);
     assert_eq!(output.status.code(), Some(0));
@@ -205,6 +234,26 @@ fn exec_controller_child() {
       .as_mut()
       .is_some_and(|s| s.read(&mut bytes).is_ok_and(|n| n == 4))
     {
+      if &bytes == b"GATE" {
+        fs::write(root.join("never-exit"), "finish long job").unwrap();
+        continue;
+      }
+      if &bytes == b"CANC" {
+        let membership = fs::read_to_string("/proc/self/cgroup").unwrap();
+        let relative = membership.trim().strip_prefix("0::/").unwrap();
+        assert!(
+          !fs::read_dir(Path::new("/sys/fs/cgroup").join(relative))
+            .unwrap()
+            .any(|entry| entry
+              .unwrap()
+              .file_name()
+              .as_encoded_bytes()
+              .starts_with(b"job-")),
+          "forwarder cancellation left a job group alive"
+        );
+        display.as_mut().unwrap().write_all(b"OKAY").unwrap();
+        continue;
+      }
       assert_eq!(&bytes, b"PASS");
       fs::write(root.join("passed"), bytes).unwrap();
       break;
@@ -234,7 +283,16 @@ fn selected_exec_crosses_only_the_broker_and_revocation_stops_owned_jobs() {
   if std::env::var("OMARCHY_TEST_SYSTEMD").as_deref() != Ok("1") {
     return;
   }
-  for mode in ["denied", "allowed", "failed", "timeout", "revoke"] {
+  for mode in [
+    "denied",
+    "allowed",
+    "failed",
+    "timeout",
+    "revoke",
+    "long",
+    "abandon",
+    "revoke-long",
+  ] {
     let root = tempfile::Builder::new()
       .prefix("omarchy-exec-")
       .permissions(fs::Permissions::from_mode(0o700))
@@ -276,7 +334,8 @@ fn selected_exec_crosses_only_the_broker_and_revocation_stops_owned_jobs() {
       }
       tree["next"][0].clone()
     };
-    let ask: Ask = serde_json::from_value(serde_json::json!({"executable":fixture,"tree":{"next":[
+    let ask: Ask = serde_json::from_value(serde_json::json!({"executable":fixture,
+      "lifetime":if matches!(mode, "long" | "abandon" | "revoke-long") {"plugin"} else {"request"},"tree":{"next":[
       {"arg":{"kind":"exact","value":"echo"},"then":{"next":[{"arg":{"kind":"text","prefix":"","min":0,"max":8192},"then":{"end":"echo"}}]}},
       branch("hold", &hold), branch("flood", &["flood-out".into()]), branch("failure", &["failure".into()]), branch("unselected", &["unselected".into()])
     ]}})).unwrap();
@@ -372,7 +431,7 @@ fn selected_exec_crosses_only_the_broker_and_revocation_stops_owned_jobs() {
         let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, credentials.pid, 0) } as i32;
         assert!(pidfd >= 0);
         peers.push(unsafe { OwnedFd::from_raw_fd(pidfd) });
-        if mode == "revoke" {
+        if mode.starts_with("revoke") {
           store.revoke("test.exec").unwrap();
           break;
         }
@@ -400,7 +459,7 @@ fn selected_exec_crosses_only_the_broker_and_revocation_stops_owned_jobs() {
         _ => 1,
       }
     );
-    if mode == "revoke" {
+    if mode.starts_with("revoke") {
       assert!(!root.join("passed").exists());
       assert!(!store.read("test.exec").unwrap().enabled);
     } else {

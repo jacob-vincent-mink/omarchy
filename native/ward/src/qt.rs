@@ -16,6 +16,7 @@ mod ffi {
     Mask,
     PanelState,
     WidgetSize,
+    PanelSwitch,
     Failed,
   }
   struct NativeRegion {
@@ -41,6 +42,7 @@ mod ffi {
     slot: u32,
     panel_serial: u32,
     panel_open: bool,
+    switch_forward: bool,
     buffer: Box<NativeBuffer>,
     regions: Vec<NativeRegion>,
     error: String,
@@ -59,6 +61,7 @@ mod ffi {
     ) -> Result<Box<Session>>;
     fn next(session: &Session) -> Result<NativeEvent>;
     fn input(session: &Session, kind: u32, code: u32, x: i32, y: i32) -> Result<()>;
+    fn key(session: &Session, code: u32, symbol: u32, pressed: bool) -> Result<()>;
     fn scroll(
       session: &Session,
       source: u32,
@@ -135,6 +138,7 @@ fn next(session: &Session) -> io::Result<ffi::NativeEvent> {
     slot: 0,
     panel_serial: 0,
     panel_open: false,
+    switch_forward: false,
     buffer: Box::new(NativeBuffer(None)),
     regions: Vec::new(),
     error: String::new(),
@@ -151,6 +155,10 @@ fn next(session: &Session) -> io::Result<ffi::NativeEvent> {
       event.kind = ffi::EventKind::WidgetSize;
       event.width = width;
       event.height = height;
+    }
+    Some(Update::PanelSwitch { forward }) => {
+      event.kind = ffi::EventKind::PanelSwitch;
+      event.switch_forward = forward;
     }
     Some(Update::Presentation(presentation::Event::Configured {
       generation,
@@ -200,6 +208,13 @@ fn input(session: &Session, kind: u32, code: u32, x: i32, y: i32) -> io::Result<
 }
 fn presented(session: &Session, serial: u64) -> io::Result<()> {
   session.send(Control::Presented(serial))
+}
+fn key(session: &Session, code: u32, symbol: u32, pressed: bool) -> io::Result<()> {
+  session.send(Control::Key(crate::controller::Key {
+    code,
+    symbol,
+    pressed,
+  }))
 }
 fn scroll(
   session: &Session,

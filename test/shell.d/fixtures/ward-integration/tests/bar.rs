@@ -75,6 +75,8 @@ fn native_slots_share_real_and_replacement_bars_without_loading_plugin_qml() {
     .unwrap();
     fs::write(plugin.join("Widget.qml"), format!(r##"
 import QtQuick
+import Quickshell
+import Quickshell.Io
 import qs.Ui
 Panel {{
   id: root
@@ -82,10 +84,45 @@ Panel {{
   implicitWidth: 40; implicitHeight: bar ? bar.barSize : 26
   Rectangle {{ anchors.centerIn: parent; width: 40; height: 20; color: "{color}" }}
   MouseArea {{ anchors.fill: parent; onClicked: root.toggle() }}
+  property bool forgedDone: false
+  property bool requestAccepted: false
+  property int negativeMode: 0
+  Process {{
+    id: forged
+    command: ["/bootstrap", "--switch-panel", "1"]
+    onExited: (exitCode, exitStatus) => {{ root.requestAccepted = exitCode === 0; settled.start() }}
+  }}
+  Timer {{ id: settled; interval: 300; onTriggered: {{ root.forgedDone = root.requestAccepted; root.negativeMode = 0 }} }}
+  Timer {{ id: delayed; interval: 1400; onTriggered: forged.running = true }}
   KeyboardPanel {{
+    id: panel
     anchorItem: root; bar: root.bar; owner: root; open: root.opened
     contentWidth: 160; contentHeight: 100
-    Rectangle {{ anchors.fill: parent; color: "{panel_color}"; focus: true; Keys.onEscapePressed: root.close() }}
+    // Deliberately omit private outside-click coverage: programmatic opening
+    // must retain keyboard focus and the host must own outside dismissal.
+    mask: Region {{ x: panel.cardOrigin.x; y: panel.cardOrigin.y; width: panel.contentWidth; height: panel.contentHeight }}
+    Rectangle {{
+      anchors.fill: parent; color: "{panel_color}"; focus: true
+      Rectangle {{ width: 10; height: 10; color: root.forgedDone ? "#ffee11" : root.negativeMode === 1 ? "#aa1177" : root.negativeMode === 2 ? "#11ccee" : "{panel_color}" }}
+      Keys.onEscapePressed: root.close()
+      Keys.onPressed: event => {{
+        if (event.key === Qt.Key_A) {{ forged.running = true; event.accepted = true }}
+        else if (event.key === Qt.Key_W || event.key === Qt.Key_L) {{
+          root.forgedDone = false
+          root.negativeMode = event.key === Qt.Key_W ? 1 : 2
+          event.accepted = true
+        }}
+        else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {{
+          const direction = event.key === Qt.Key_Backtab || (event.modifiers & Qt.ShiftModifier) ? -1 : 1
+          if (root.negativeMode) {{
+            forged.command = ["/bootstrap", "--switch-panel", String(root.negativeMode === 1 ? -direction : direction)]
+            if (root.negativeMode === 2) delayed.start()
+            else forged.running = true
+          }} else root.switchPanel(direction)
+          event.accepted = true
+        }}
+      }}
+    }}
   }}
 }}
 "##)).unwrap();
@@ -177,7 +214,15 @@ Panel {{
     );
     stage("two-slots");
     stage("click-first");
+    stage("forged-switch");
+    stage("arm-wrong-direction");
+    stage("wrong-direction");
+    stage("arm-expired-switch");
+    stage("expired-switch");
+    stage("tab-second");
+    stage("backtab-first");
     stage("click-second");
+    stage("click-first");
     stage("escape");
     assert_eq!(
       run("omarchy-shell", &["shell", "togglePanelAt", "right", "1"]).trim(),
@@ -185,6 +230,12 @@ Panel {{
     );
     stage("summoned-first");
     stage("escape");
+    assert_eq!(
+      run("omarchy-shell", &["shell", "summon", "test.slot-one", ""]).trim(),
+      "ok"
+    );
+    stage("reopened-first");
+    stage("outside");
     run("omarchy-plugin-enable", &["test.bar"]);
     stage("replacement-bar");
     run(
@@ -197,6 +248,8 @@ Panel {{
       ],
     );
     stage("moved-slot");
+    stage("click-first");
+    stage("click-second");
     stage("click-first");
     stage("escape");
     run("omarchy-toggle-bar", &["on"]);
@@ -250,11 +303,55 @@ Panel {{
           .graphics
           .input(1, 0x110, x, y, start.elapsed().as_millis() as u32)
           .unwrap();
-      } else if next == "escape" {
-        for kind in [3, 4] {
+      } else if matches!(
+        next,
+        "forged-switch"
+          | "arm-wrong-direction"
+          | "wrong-direction"
+          | "arm-expired-switch"
+          | "expired-switch"
+          | "tab-second"
+          | "backtab-first"
+      ) {
+        let (code, symbol) = match next {
+          "forged-switch" => (38, u32::from('a')),
+          "arm-wrong-direction" => (25, u32::from('w')),
+          "arm-expired-switch" => (46, u32::from('l')),
+          "backtab-first" => (23, 0xfe20),
+          _ => (23, 0xff09),
+        };
+        for pressed in [true, false] {
           display
             .graphics
-            .input(kind, 9, 0, 0, start.elapsed().as_millis() as u32)
+            .key(
+              omarchy_ward::controller::Key {
+                code,
+                symbol,
+                pressed,
+              },
+              start.elapsed().as_millis() as u32,
+            )
+            .unwrap();
+        }
+      } else if next == "outside" {
+        for kind in [0, 1] {
+          display
+            .graphics
+            .input(kind, 0x110, 400, 400, start.elapsed().as_millis() as u32)
+            .unwrap();
+        }
+      } else if next == "escape" {
+        for pressed in [true, false] {
+          display
+            .graphics
+            .key(
+              omarchy_ward::controller::Key {
+                code: 9,
+                symbol: 0xff1b,
+                pressed,
+              },
+              start.elapsed().as_millis() as u32,
+            )
             .unwrap();
         }
       }
@@ -267,8 +364,19 @@ Panel {{
         let second_panel = frame.count([0xcc, 0x44, 0xee]);
         let ready = frame.count([0xaa, 0xbb, 0xcc]) == if name == "hidden-bar" { 0 } else { 800 }
           && match name {
-            "click-first" | "summoned-first" => first_panel > 5000 && second_panel == 0,
-            "click-second" => second_panel > 5000 && first_panel == 0,
+            "click-first" | "summoned-first" | "reopened-first" | "backtab-first" => {
+              first_panel > 5000 && second_panel == 0
+            }
+            "click-second" | "tab-second" => second_panel > 5000 && first_panel == 0,
+            "forged-switch" | "wrong-direction" | "expired-switch" => {
+              first_panel > 5000 && second_panel == 0 && frame.count([0xff, 0xee, 0x11]) == 100
+            }
+            "arm-wrong-direction" => {
+              first_panel > 5000 && second_panel == 0 && frame.count([0xaa, 0x11, 0x77]) == 100
+            }
+            "arm-expired-switch" => {
+              first_panel > 5000 && second_panel == 0 && frame.count([0x11, 0xcc, 0xee]) == 100
+            }
             "disabled" | "hidden-bar" => {
               one == 0 && two == 0 && first_panel == 0 && second_panel == 0
             }

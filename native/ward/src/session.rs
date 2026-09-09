@@ -20,6 +20,7 @@ pub enum Update {
   Presentation(Event),
   PanelState { serial: u32, open: bool },
   WidgetSize { width: u32, height: u32 },
+  PanelSwitch { forward: bool },
   Failed(String),
 }
 
@@ -80,6 +81,7 @@ impl Session {
       command,
       Control::Input { .. }
         | Control::Scroll(_)
+        | Control::Key(_)
         | Control::Presented(_)
         | Control::Configure(_)
         | Control::Context(_)
@@ -92,6 +94,9 @@ impl Session {
     }
     if let Control::Scroll(scroll) = command {
       scroll.validate()?;
+    }
+    if let Control::Key(key) = command {
+      key.validate()?;
     }
     self
       .commands
@@ -249,6 +254,9 @@ fn dispatch(
           }
           Control::WidgetSize { width, height } if ready => {
             emit(updates, Update::WidgetSize { width, height })?;
+          }
+          Control::PanelSwitch { forward } if ready => {
+            emit(updates, Update::PanelSwitch { forward })?;
           }
           _ => return Err(io::Error::other("unexpected controller control record")),
         }

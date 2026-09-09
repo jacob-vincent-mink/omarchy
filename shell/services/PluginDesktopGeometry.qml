@@ -9,7 +9,9 @@ QtObject {
   id: root
   property bool active: false
   property var snapshot: null
-  property var identities: new WeakMap()
+  // Qt's WeakMap can retain invalid QObject keys after model removal and GC.
+  // Keep strong keys only while their objects are present in the live models.
+  property var identities: new Map()
   property int nextIdentity: 0
   property int tick: 0
 
@@ -40,7 +42,13 @@ QtObject {
       Hyprland.refreshWorkspaces()
     }
     const outputs = Quickshell.screens.map(screen => ({screen: screen, monitor: Hyprland.monitorFor(screen)}))
-    const next = Geometry.snapshot(outputs, Hyprland.workspaces.values, Hyprland.toplevels.values, identity)
+    const workspaces = Hyprland.workspaces.values
+    const windows = Hyprland.toplevels.values
+    const live = outputs.map(output => output.monitor).concat(workspaces, windows)
+    for (const object of identities.keys()) {
+      if (live.indexOf(object) === -1) identities.delete(object)
+    }
+    const next = Geometry.snapshot(outputs, workspaces, windows, identity)
     if (JSON.stringify(next) !== JSON.stringify(snapshot)) snapshot = next
   }
 

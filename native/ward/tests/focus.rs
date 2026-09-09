@@ -167,3 +167,94 @@ fn private_layer_focus_obeys_activation_mode_and_unmapping() {
     fs::read_to_string(&log).unwrap()
   );
 }
+
+#[test]
+fn clicked_layer_may_enable_on_demand_focus_after_handling_the_click() {
+  if std::env::var("OMARCHY_TEST_GRAPHICS").as_deref() != Ok("1") {
+    return;
+  }
+  for canceled in [false, true] {
+    let root = desktop::runtime();
+    let qml = root.path().join("demand.qml");
+    fs::write(&qml, r##"
+import QtQuick
+import Quickshell
+import Quickshell.Wayland
+ShellRoot {
+  PanelWindow {
+    id: panel
+    anchors { top: true; left: true }
+    implicitWidth: 400; implicitHeight: 200
+    property bool ready: false
+    property bool received: false
+    property int beat: 0
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: ready ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
+    color: "#304050"
+    Timer { id: admit; interval: 150; onTriggered: panel.ready = true }
+    Timer { interval: 75; repeat: true; running: true; onTriggered: panel.beat++ }
+    MouseArea { anchors.fill: parent; onClicked: admit.restart() }
+    Item { id: editor; focus: true; Keys.onPressed: event => { panel.received = true; event.accepted = true } }
+    Rectangle { x: 10; y: 10; width: 20; height: 20; color: editor.Window.active ? "#aaffcc" : "#111122" }
+    Rectangle { x: 40; y: 10; width: 20; height: 20; color: panel.received ? "#44ee22" : "#ee4422" }
+    Rectangle { x: 70; y: 10; width: 20; height: 20; color: panel.ready ? "#22ccdd" : "#111122" }
+    Rectangle { x: 100; y: 10; width: 20; height: 20; color: panel.beat % 2 ? "#667788" : "#8899aa" }
+  }
+}
+"##).unwrap();
+    let mut display = Desktop::new(
+      root.path(),
+      Viewport {
+        width: 400,
+        height: 200,
+        scale: 1,
+      },
+    );
+    let _client = Host(
+      desktop::command(root.path(), &qml, OsStr::new(""))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap(),
+    );
+    let start = Instant::now();
+    wait_frame(&mut display, start, "inert layer", |frame| {
+      has(frame, [0xee, 0x44, 0x22]) && !focused(frame)
+    });
+    for kind in [0, 1] {
+      display
+        .graphics
+        .input(kind, 0x110, 200, 100, start.elapsed().as_millis() as u32)
+        .unwrap();
+    }
+    if canceled {
+      display
+        .graphics
+        .input(5, 0, 0, 0, start.elapsed().as_millis() as u32)
+        .unwrap();
+      wait_frame(
+        &mut display,
+        start,
+        "late on-demand request after dismissal",
+        |frame| has(frame, [0x22, 0xcc, 0xdd]),
+      );
+      stays_unfocused(&mut display, start, [0xee, 0x44, 0x22]);
+    } else {
+      wait_frame(
+        &mut display,
+        start,
+        "delayed on-demand focus from one click",
+        focused,
+      );
+      for kind in [3, 4] {
+        display
+          .graphics
+          .input(kind, 26, 0, 0, start.elapsed().as_millis() as u32)
+          .unwrap();
+      }
+      wait_frame(&mut display, start, "key after one click", |frame| {
+        has(frame, [0x44, 0xee, 0x22])
+      });
+    }
+  }
+}

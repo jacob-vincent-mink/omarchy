@@ -22,7 +22,7 @@ QtObject {
       return "text " + arg.min + "…" + arg.max + " bytes, prefix " + JSON.stringify(arg.prefix)
     }
     function walk(name, ask, tree, args) {
-      if (tree.end) rows.push({name: name, leaf: tree.end, executable: ask.executable,
+      if (tree.end) rows.push({name: name, leaf: tree.end, executable: ask.executable, lifetime: ask.lifetime || "request",
         required: ask.required.indexOf(tree.end) !== -1, command: args.join("\n") || "(no arguments)"})
       for (var step of tree.next) walk(name, ask, step.then, args.concat([argument(step.arg)]))
     }

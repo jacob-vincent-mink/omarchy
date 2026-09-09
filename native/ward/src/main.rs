@@ -177,6 +177,9 @@ fn run_internal(args: &[OsString]) -> io::Result<()> {
     [mode, settings] if mode == "--settings" => omarchy_ward::requests::save_settings(
       settings.to_str().ok_or_else(|| Status::Invalid.error())?,
     ),
+    [mode, direction] if mode == "--switch-panel" => omarchy_ward::requests::switch_panel(
+      direction.to_str().ok_or_else(|| Status::Invalid.error())?,
+    ),
     [mode, browser, url] if mode == "--open-url" => omarchy_ward::requests::open_url(
       browser.to_str().ok_or_else(|| Status::Invalid.error())?,
       url.to_str().ok_or_else(|| Status::Invalid.error())?,

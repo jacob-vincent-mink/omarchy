@@ -167,6 +167,7 @@ void PluginView::stop() {
   m_panelOpen = false;
   m_panelSerial = 0;
   m_widgetSize = QSize(0, 0);
+  m_panelSwitchDirection = 0;
   m_resizing = true;
   setFocus(false);
   update();
@@ -193,6 +194,15 @@ void PluginView::poll() {
           m_widgetSize = QSize(event.width, event.height);
           emit widgetSizeChanged();
           break;
+        case omarchy::EventKind::PanelSwitch: {
+          const int direction = event.switch_forward ? 1 : -1;
+          if (hasActiveFocus() && m_panelSwitchDirection == direction
+              && m_panelSwitchAge.isValid() && m_panelSwitchAge.elapsed() <= 1000) {
+            m_panelSwitchDirection = 0;
+            emit panelSwitchRequested(direction);
+          }
+          break;
+        }
         case omarchy::EventKind::Configured:
           m_generation = event.generation;
           m_viewport = QSize(event.width, event.height);
@@ -268,7 +278,7 @@ void PluginView::input(uint32_t kind, uint32_t code, QPointF point) {
   try { omarchy::input(**m_session, kind, code, int(x), int(y)); }
   catch (const rust::Error &error) { fail(QString::fromUtf8(error.what())); }
 }
-void PluginView::mousePressEvent(QMouseEvent *event) { emit focusRequested(); forceActiveFocus(); input(0, buttonCode(event->button()), event->position()); event->accept(); }
+void PluginView::mousePressEvent(QMouseEvent *event) { m_panelSwitchDirection = 0; emit focusRequested(); forceActiveFocus(); input(0, buttonCode(event->button()), event->position()); event->accept(); }
 void PluginView::mouseReleaseEvent(QMouseEvent *event) { input(1, buttonCode(event->button()), event->position()); event->accept(); }
 void PluginView::mouseMoveEvent(QMouseEvent *event) { input(2, 0, event->position()); event->accept(); }
 void PluginView::hoverEnterEvent(QHoverEvent *event) { input(2, 0, event->position()); event->accept(); }
@@ -295,16 +305,26 @@ void PluginView::wheelEvent(QWheelEvent *event) {
   } catch (const rust::Error &error) { fail(QString::fromUtf8(error.what())); }
   event->accept();
 }
+void PluginView::key(QKeyEvent *event, bool pressed) {
+  if (m_ready && !m_resizing && m_session && !event->isAutoRepeat()
+      && event->nativeScanCode() >= 8 && (!pressed || event->nativeVirtualKey() != 0)) {
+    try { omarchy::key(**m_session, event->nativeScanCode(), event->nativeVirtualKey(), pressed); }
+    catch (const rust::Error &error) { fail(QString::fromUtf8(error.what())); }
+  }
+  event->accept();
+}
 void PluginView::keyPressEvent(QKeyEvent *event) {
-  if (!event->isAutoRepeat() && event->nativeScanCode() >= 8) input(3, event->nativeScanCode());
-  event->accept();
+  m_panelSwitchDirection = 0;
+  if (!event->isAutoRepeat() && (event->key() == Qt::Key_Tab || event->key() == Qt::Key_Backtab)
+      && !(event->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier))) {
+    m_panelSwitchDirection = event->key() == Qt::Key_Backtab || (event->modifiers() & Qt::ShiftModifier) ? -1 : 1;
+    m_panelSwitchAge.start();
+  }
+  key(event, true);
 }
-void PluginView::keyReleaseEvent(QKeyEvent *event) {
-  if (!event->isAutoRepeat() && event->nativeScanCode() >= 8) input(4, event->nativeScanCode());
-  event->accept();
-}
-void PluginView::dismiss() { input(5, 0); setFocus(false); }
-void PluginView::focusOutEvent(QFocusEvent *event) { input(5, 0); QQuickItem::focusOutEvent(event); }
+void PluginView::keyReleaseEvent(QKeyEvent *event) { key(event, false); }
+void PluginView::dismiss() { m_panelSwitchDirection = 0; input(5, 0); setFocus(false); }
+void PluginView::focusOutEvent(QFocusEvent *event) { m_panelSwitchDirection = 0; input(5, 0); QQuickItem::focusOutEvent(event); }
 
 QSGNode *PluginView::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
   if (!m_ready) { delete old; return nullptr; }

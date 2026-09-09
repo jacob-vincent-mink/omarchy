@@ -4,7 +4,7 @@ use crate::{
   channel::{Channel, Packet},
   exec_policy::{Tree, validate_argv},
   grants::{invalid, validate_id},
-  host_job::{Environment, Executable, Job, MAX_OUTPUT, TIMEOUT},
+  host_job::{Environment, Executable, Job, Lifetime, MAX_OUTPUT, TIMEOUT},
   operation::Status,
   payload,
 };
@@ -31,6 +31,8 @@ pub struct Ask {
   /// Independently required terminal names, never implicit selection.
   #[serde(default)]
   pub required: BTreeSet<String>,
+  #[serde(default, skip_serializing_if = "Lifetime::is_request")]
+  pub lifetime: Lifetime,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -39,6 +41,8 @@ pub struct Grant {
   pub executable: Executable,
   pub tree: Tree,
   pub selected: BTreeSet<String>,
+  #[serde(default, skip_serializing_if = "Lifetime::is_request")]
+  pub lifetime: Lifetime,
 }
 
 impl Ask {
@@ -66,6 +70,7 @@ impl Grant {
       executable: Executable::select(&ask.executable)?,
       tree: ask.tree.clone(),
       selected,
+      lifetime: ask.lifetime,
     };
     grant.validate(ask)?;
     Ok(grant)
@@ -81,6 +86,7 @@ impl Grant {
         .bytes()
         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
       || self.tree != ask.tree
+      || self.lifetime != ask.lifetime
       || self.selected.is_empty()
       || !self.selected.is_subset(&ask.tree.leaves()?)
     {
@@ -141,6 +147,7 @@ impl Request {
       &self.argv,
       env,
       paths,
+      grant.lifetime,
     )
   }
 }
@@ -193,11 +200,18 @@ fn decode_response(mut packet: Packet) -> io::Result<Output> {
 }
 
 pub fn receive(channel: &Channel) -> io::Result<Output> {
+  receive_for(channel, Lifetime::Request)
+}
+
+fn receive_for(channel: &Channel, lifetime: Lifetime) -> io::Result<Output> {
   let deadline = Instant::now() + TIMEOUT + Duration::from_secs(2);
   loop {
     match channel.receive() {
       Ok(packet) => return decode_response(packet),
-      Err(e) if e.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+      Err(e)
+        if e.kind() == io::ErrorKind::WouldBlock
+          && (!lifetime.is_request() || Instant::now() < deadline) =>
+      {
         std::thread::sleep(Duration::from_millis(5));
       }
       Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -216,6 +230,11 @@ pub fn receive(channel: &Channel) -> io::Result<Output> {
 pub fn request(name: String, argv: Vec<String>) -> io::Result<Output> {
   let request = Request { name, argv };
   request.validate().map_err(|_| Status::Invalid.error())?;
+  let lifetime = crate::operation::grants()?
+    .exec
+    .get(&request.name)
+    .map(|grant| grant.lifetime)
+    .unwrap_or_default();
   let deadline = Instant::now() + Duration::from_secs(120);
   let backoff = Duration::from_millis(500 + u64::from(std::process::id() % 251));
   let output = loop {
@@ -229,7 +248,7 @@ pub fn request(name: String, argv: Vec<String>) -> io::Result<Output> {
       Err(e) => return Err(e),
     };
     request.send(&channel)?;
-    match receive(&channel) {
+    match receive_for(&channel, lifetime) {
       Ok(output) => break output,
       // These replies explicitly mean no job started. Never retry a failed
       // job or lost reply: it could duplicate an already accepted mutation.
@@ -248,6 +267,37 @@ mod tests {
   use crate::grants::{Grants, Requests};
   use serde_json::json;
   use std::os::unix::fs::PermissionsExt;
+
+  #[test]
+  fn plugin_lifetime_is_explicit_and_bound_to_the_review() {
+    let value = json!({"executable":"/usr/bin/sleep","tree":{"end":"run"}});
+    let bounded: Ask = serde_json::from_value(value.clone()).unwrap();
+    let selected = Grant::select(&bounded, ["run".into()].into()).unwrap();
+    assert!(
+      serde_json::to_value(&selected)
+        .unwrap()
+        .get("lifetime")
+        .is_none()
+    );
+    let mut long = value;
+    long["lifetime"] = json!("plugin");
+    let plugin: Ask = serde_json::from_value(long.clone()).unwrap();
+    let selected = Grant::select(&plugin, ["run".into()].into()).unwrap();
+    assert_eq!(
+      serde_json::to_value(&selected).unwrap()["lifetime"],
+      "plugin"
+    );
+    selected.validate(&plugin).unwrap();
+    assert!(selected.validate(&bounded).is_err());
+    assert!(
+      Grant::select(&bounded, ["run".into()].into())
+        .unwrap()
+        .validate(&plugin)
+        .is_err()
+    );
+    long["lifetime"] = json!("detached");
+    assert!(serde_json::from_value::<Ask>(long).is_err());
+  }
 
   #[test]
   fn selections_bind_requested_tree_executable_and_individual_required_leaves() {

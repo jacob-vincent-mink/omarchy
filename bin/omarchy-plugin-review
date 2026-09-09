@@ -51,6 +51,7 @@ else
       "    Query: \(.value.scope.query | tojson)", "    JSON body: \(.value.scope.body | tojson)"),
     (($requests.exec // {}) | to_entries[] |
       "  Host executable \(.key): \(.value.executable)",
+      "    Lifetime: \(if .value.lifetime == "plugin" then "long-running; stops with its caller or plugin, no ten-second deadline" else "ten-second deadline" end)",
       "    Required leaves: \(.value.required | tojson)",
       "    Command tree: \(.value.tree | tojson)",
       "    Uses existing host accounts, files and network; completed effects cannot be undone by revocation."),

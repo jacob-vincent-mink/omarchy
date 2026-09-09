@@ -183,7 +183,9 @@ Item {
                   width: parent.width
                   objectName: "review-exec-" + modelData.name + "-" + modelData.leaf
                   label: modelData.name + ": " + modelData.leaf + (modelData.required ? " · required" : "")
-                  description: modelData.executable
+                  description: modelData.executable + (modelData.lifetime === "plugin"
+                    ? " · Long-running; stops with its caller or plugin. No ten-second deadline."
+                    : " · Ten-second deadline.")
                   checked: Object.prototype.hasOwnProperty.call(review.exec, modelData.name)
                     && review.exec[modelData.name].indexOf(modelData.leaf) !== -1
                   onClicked: review.toggleExec(modelData.name, modelData.leaf)

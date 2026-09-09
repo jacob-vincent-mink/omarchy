@@ -87,9 +87,9 @@ impl Request {
         {
           Ok(Self::Settings(context))
         }
-        state @ (Control::PanelState { .. } | Control::WidgetSize { .. }) => {
-          Ok(Self::UiMetadata(state))
-        }
+        state @ (Control::PanelState { .. }
+        | Control::WidgetSize { .. }
+        | Control::PanelSwitch { .. }) => Ok(Self::UiMetadata(state)),
         _ => Err(invalid("invalid worker UI request")),
       }
     } else {
@@ -174,6 +174,7 @@ pub struct Broker {
   // it within the existing authenticated, rate-limited request boundary.
   pub(crate) panel_state: Option<Control>,
   pub(crate) widget_size: Option<Control>,
+  pub(crate) panel_switch: Option<Control>,
   listener: Listener,
   socket: File,
   directory: PathBuf,
@@ -241,6 +242,7 @@ impl Broker {
     Ok(Self {
       panel_state: None,
       widget_size: None,
+      panel_switch: None,
       listener,
       socket,
       directory,
@@ -269,6 +271,13 @@ impl Broker {
   pub fn dispatch(&mut self, approval: &crate::controller::Approval) -> io::Result<()> {
     let now = Instant::now();
     for slot in &mut self.jobs {
+      // One invocation per connection; a canceled forwarder also cancels its job.
+      if slot.as_ref().is_some_and(|(_, channel)| {
+        !matches!(channel.receive(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+      }) {
+        *slot = None;
+        continue;
+      }
       if let Some((job, _)) = slot {
         let result = job.poll();
         if !matches!(result, Ok(None)) {
@@ -365,6 +374,8 @@ impl Broker {
           approval.check()?;
           if matches!(state, Control::WidgetSize { .. }) {
             self.widget_size = Some(state);
+          } else if matches!(state, Control::PanelSwitch { .. }) {
+            self.panel_switch = Some(state);
           } else {
             self.panel_state = Some(state);
           }
@@ -470,6 +481,19 @@ pub fn report_widget_size(width: &str, height: &str) -> io::Result<()> {
   crate::operation::await_reply(&channel)
 }
 
+// This is a navigation intent, not authority. The trusted host consumes at most
+// one matching request after a real Tab gesture in the focused plugin panel.
+pub fn switch_panel(direction: &str) -> io::Result<()> {
+  let forward = match direction {
+    "1" => true,
+    "-1" => false,
+    _ => return Err(Status::Invalid.error()),
+  };
+  let channel = Channel::connect(Path::new("/run/plugin/ui"))?;
+  Control::PanelSwitch { forward }.send(&channel)?;
+  crate::operation::await_reply(&channel)
+}
+
 pub fn save_settings(json: &str) -> io::Result<()> {
   if json.len() > 65_000 {
     return Err(Status::Invalid.error());
@@ -545,6 +569,16 @@ mod tests {
     assert!(Request::decode(receiver.receive().unwrap()).is_err());
     Control::Hello.send(&sender).unwrap();
     assert!(Request::decode(receiver.receive().unwrap()).is_err());
+    Control::PanelSwitch { forward: true }
+      .send(&sender)
+      .unwrap();
+    let request = Request::decode(receiver.receive().unwrap()).unwrap();
+    assert!(request.kind().is_none());
+    assert!(
+      request
+        .command(Path::new("/trusted/bin"), "test.widget")
+        .is_err()
+    );
   }
 
   #[test]
