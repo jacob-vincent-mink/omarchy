@@ -13,7 +13,7 @@ use smithay::backend::{
     dmabuf::{Dmabuf, DmabufFlags},
   },
   egl::{EGLContext, EGLDevice, EGLDisplay},
-  renderer::{ExportMem, ImportDma, gles::GlesRenderer},
+  renderer::{ExportMem, ImportDma, Renderer, gles::GlesRenderer},
 };
 use std::{
   fs,
@@ -193,6 +193,9 @@ fn private_layers_preserve_focus_and_constrain_committed_popups() {
             file.write_all(&pixel[..3]).unwrap();
           }
         }
+        drop(mapping);
+        drop(texture);
+        renderer.cleanup_texture_cache().unwrap();
         session.send(Control::Presented(serial)).unwrap();
       }
       _ => (),

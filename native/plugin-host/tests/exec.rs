@@ -1,0 +1,356 @@
+use omarchy_plugin_host::{
+  channel::Channel,
+  controller::Approval,
+  exec::{Ask, Grant, Request, receive},
+  grants::Grants,
+  requests::Broker,
+  revision::Revision,
+  store::Store,
+  supervisor::{self, Limits},
+  worker,
+};
+use std::{
+  ffi::OsStr,
+  fs::{self, OpenOptions},
+  io::{Read, Write},
+  os::{
+    fd::{AsRawFd, FromRawFd, OwnedFd},
+    unix::{
+      fs::{OpenOptionsExt, PermissionsExt},
+      net::{UnixListener, UnixStream},
+    },
+  },
+  path::Path,
+  process::Command,
+  thread,
+  time::{Duration, Instant},
+};
+
+fn send(path: &str, argv: Vec<String>) -> Channel {
+  let channel = Channel::connect(Path::new(path)).unwrap();
+  Request {
+    name: "fixture".into(),
+    argv,
+  }
+  .send(&channel)
+  .unwrap();
+  channel
+}
+
+#[test]
+fn exec_worker_child() {
+  if !Path::new("/bootstrap").exists() {
+    return;
+  }
+  worker::restrict_bootstrap().unwrap();
+  let mut display = UnixStream::connect("/run/plugin/wayland").unwrap();
+  let mode = fs::read_to_string("/plugin/mode").unwrap();
+  let home = fs::read_to_string("/plugin/home").unwrap();
+  let hold: Vec<String> = serde_json::from_slice(&fs::read("/plugin/hold.json").unwrap()).unwrap();
+  assert!(fs::read(Path::new(&home).join("host-only")).is_err());
+  if mode == "denied" {
+    assert!(!Path::new("/run/plugin/exec").exists());
+    assert!(
+      receive(&send(
+        "/run/plugin/notify",
+        vec!["echo".into(), "literal".into()]
+      ))
+      .is_err()
+    );
+  } else if mode == "allowed" {
+    let literal = "a b; $(touch /must-not-exist)\n--literal";
+    let output = receive(&send(
+      "/run/plugin/exec",
+      vec!["echo".into(), literal.into()],
+    ))
+    .unwrap();
+    assert_eq!(
+      output.status.code(),
+      Some(7),
+      "{}",
+      String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+      output.stdout,
+      format!("{literal}\0cwd=/\0HOME={home}\0PATH=/usr/bin\0UNSELECTED=unset\0NOTIFY=unset\0")
+        .as_bytes()
+    );
+    assert_eq!(output.stderr, b"fixture stderr\0\xff");
+    assert!(
+      receive(&send(
+        "/run/plugin/exec",
+        vec!["echo".into(), "literal".into(), "extra".into()]
+      ))
+      .is_err()
+    );
+    assert!(receive(&send("/run/plugin/exec", vec!["flood-out".into()])).is_err());
+    assert!(receive(&send("/run/plugin/exec", vec!["unselected".into()])).is_err());
+    // Two live jobs fill the fixed memory budget; a third is explicitly not started.
+    let _a = send("/run/plugin/exec", hold.clone());
+    thread::sleep(Duration::from_millis(150));
+    let _b = send("/run/plugin/exec", hold.clone());
+    thread::sleep(Duration::from_millis(150));
+    let busy = send("/run/plugin/exec", hold);
+    assert_eq!(
+      receive(&busy).unwrap_err().kind(),
+      std::io::ErrorKind::WouldBlock
+    );
+  } else {
+    let started = Instant::now();
+    assert!(receive(&send("/run/plugin/exec", hold)).is_err());
+    assert!(started.elapsed() < Duration::from_secs(12));
+    assert_ne!(mode, "revoke", "revocation left the worker alive");
+  }
+  display.write_all(b"PASS").unwrap();
+}
+
+#[test]
+fn exec_controller_child() {
+  let Some(root) = std::env::var_os("OMARCHY_EXEC_TEST_ROOT") else {
+    return;
+  };
+  let root = Path::new(&root);
+  let store = Store::open(&root.join("state")).unwrap();
+  let epoch = std::env::var("OMARCHY_EXEC_TEST_EPOCH")
+    .unwrap()
+    .parse()
+    .unwrap();
+  let approval = Approval::open(&root.join("state"), "test.exec", epoch).unwrap();
+  let record = store.read("test.exec").unwrap();
+  let mut broker = Broker::start(
+    root,
+    Path::new(env!("CARGO_BIN_EXE_omarchy-plugin-host")),
+    vec![],
+  )
+  .unwrap();
+  let listener = UnixListener::bind(root.join("wayland")).unwrap();
+  listener.set_nonblocking(true).unwrap();
+  let fd = |path: &Path| {
+    OpenOptions::new()
+      .read(true)
+      .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
+      .open(path)
+      .unwrap()
+  };
+  let mut child = worker::spawn(
+    &fd(&std::env::current_exe().unwrap()),
+    &fd(&store.revisions().join(record.revision)),
+    &fd(&root.join("wayland")),
+    &[
+      OsStr::new("--exact"),
+      OsStr::new("exec_worker_child"),
+      OsStr::new("--nocapture"),
+    ],
+    Limits::default(),
+    &record.grants,
+    worker::Resources {
+      requests: Some(&broker),
+      ..Default::default()
+    },
+  )
+  .unwrap();
+  let mut display = None;
+  let deadline = Instant::now() + Duration::from_secs(18);
+  loop {
+    broker.dispatch(&approval).unwrap();
+    if display.is_none()
+      && let Ok((stream, _)) = listener.accept()
+    {
+      stream.set_nonblocking(true).unwrap();
+      display = Some(stream);
+    }
+    let mut bytes = [0; 4];
+    if display
+      .as_mut()
+      .is_some_and(|s| s.read(&mut bytes).is_ok_and(|n| n == 4))
+    {
+      assert_eq!(&bytes, b"PASS");
+      fs::write(root.join("passed"), bytes).unwrap();
+      break;
+    }
+    if let Some(status) = child.try_wait().unwrap() {
+      let mut log = String::new();
+      child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut log)
+        .unwrap();
+      panic!("exec worker exited {status}: {log}");
+    }
+    assert!(Instant::now() < deadline, "exec fixture timed out");
+    supervisor::watchdog().unwrap();
+    thread::sleep(Duration::from_millis(5));
+  }
+}
+
+fn quote(value: &Path) -> String {
+  format!("'{}'", value.to_str().unwrap().replace('\'', "'\\''"))
+}
+
+#[test]
+fn selected_exec_crosses_only_the_broker_and_revocation_stops_owned_jobs() {
+  if std::env::var("OMARCHY_TEST_SYSTEMD").as_deref() != Ok("1") {
+    return;
+  }
+  for mode in ["denied", "allowed", "timeout", "revoke"] {
+    let root = tempfile::Builder::new()
+      .prefix("omarchy-exec-")
+      .permissions(fs::Permissions::from_mode(0o700))
+      .tempdir()
+      .unwrap();
+    let root = root.path();
+    for dir in ["source", "home", "bin"] {
+      fs::create_dir(root.join(dir)).unwrap();
+    }
+    fs::write(root.join("home/host-only"), "private fixture").unwrap();
+    let fixture = root.join("fixture");
+    assert!(
+      Command::new("/usr/bin/rustc")
+        .args([
+          "--edition=2024",
+          "-Copt-level=2",
+          "-Cstrip=debuginfo",
+          "-Dwarnings"
+        ])
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/host-job.rs"))
+        .arg("-o")
+        .arg(&fixture)
+        .status()
+        .unwrap()
+        .success()
+    );
+    let socket = root.join("owned.socket");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let hold = vec![
+      "tree".to_owned(),
+      socket.to_str().unwrap().into(),
+      root.join("never-exit").to_str().unwrap().into(),
+    ];
+    let branch = |name: &str, argv: &[String]| {
+      let mut tree = serde_json::json!({"end":name});
+      for value in argv.iter().rev() {
+        tree = serde_json::json!({"next":[{"arg":{"kind":"exact","value":value},"then":tree}]});
+      }
+      tree["next"][0].clone()
+    };
+    let ask: Ask = serde_json::from_value(serde_json::json!({"executable":fixture,"tree":{"next":[
+      {"arg":{"kind":"exact","value":"echo"},"then":{"next":[{"arg":{"kind":"text","prefix":"","min":0,"max":8192},"then":{"end":"echo"}}]}},
+      branch("hold", &hold), branch("flood", &["flood-out".into()]), branch("unselected", &["unselected".into()])
+    ]}})).unwrap();
+    fs::write(root.join("source/manifest.json"), serde_json::to_vec(&serde_json::json!({
+      "schemaVersion":1,"id":"test.exec","name":"Exec fixture","version":"1","kinds":["panel"],"entryPoints":{"panel":"worker.qml"},
+      "sandbox":{"version":1,"entryPoint":"worker.qml","requests":{"exec":{"fixture":ask},"notifications":true}}
+    })).unwrap()).unwrap();
+    fs::write(
+      root.join("source/worker.qml"),
+      "import Quickshell\nShellRoot {}\n",
+    )
+    .unwrap();
+    fs::write(root.join("source/mode"), mode).unwrap();
+    fs::write(
+      root.join("source/home"),
+      root.join("home").to_str().unwrap(),
+    )
+    .unwrap();
+    fs::write(
+      root.join("source/hold.json"),
+      serde_json::to_vec(&hold).unwrap(),
+    )
+    .unwrap();
+    let store = Store::initialize(&root.join("state")).unwrap();
+    let revision = Revision::import(&root.join("source"), &store.revisions()).unwrap();
+    let exec = if mode == "denied" {
+      Default::default()
+    } else {
+      [(
+        "fixture".into(),
+        Grant::select(&ask, ["echo".into(), "hold".into(), "flood".into()].into()).unwrap(),
+      )]
+      .into()
+    };
+    store
+      .approve(
+        &revision.digest,
+        Grants {
+          exec,
+          notifications: mode == "denied",
+          ..Default::default()
+        },
+      )
+      .unwrap();
+    let controller = root.join("controller");
+    fs::write(&controller, format!("#!/bin/bash\nexport OMARCHY_PATH={}\nexport OMARCHY_EXEC_TEST_ROOT={}\nexport OMARCHY_EXEC_TEST_EPOCH=\"$5\"\nexport HOME={}\nexport XDG_CONFIG_HOME={}\nexport XDG_RUNTIME_DIR={}\nexport DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent-exec-test-bus\nexec {} --exact exec_controller_child --nocapture\n",
+      quote(root), quote(root), quote(&root.join("home")), quote(&root.join("home")), quote(root), quote(&std::env::current_exe().unwrap()))).unwrap();
+    fs::set_permissions(&controller, fs::Permissions::from_mode(0o700)).unwrap();
+    let (mut unit, _) = store
+      .launch("test.exec", &controller, &root.join("unused"))
+      .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut peers = Vec::new();
+    while unit.running().unwrap() && Instant::now() < deadline {
+      if let Ok((stream, _)) = listener.accept() {
+        let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut length = std::mem::size_of_val(&credentials) as libc::socklen_t;
+        assert_eq!(
+          unsafe {
+            libc::getsockopt(
+              stream.as_raw_fd(),
+              libc::SOL_SOCKET,
+              libc::SO_PEERCRED,
+              (&mut credentials as *mut libc::ucred).cast(),
+              &mut length,
+            )
+          },
+          0
+        );
+        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, credentials.pid, 0) } as i32;
+        assert!(pidfd >= 0);
+        peers.push(unsafe { OwnedFd::from_raw_fd(pidfd) });
+        if mode == "revoke" {
+          store.revoke("test.exec").unwrap();
+          break;
+        }
+      }
+      thread::sleep(Duration::from_millis(5));
+    }
+    unit.stop().unwrap();
+    for peer in &peers {
+      let mut poll = libc::pollfd {
+        fd: peer.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+      };
+      assert_eq!(
+        unsafe { libc::poll(&mut poll, 1, 1000) },
+        1,
+        "revocation left a host descendant alive"
+      );
+    }
+    assert_eq!(
+      peers.len(),
+      match mode {
+        "allowed" => 2,
+        "denied" => 0,
+        _ => 1,
+      }
+    );
+    if mode == "revoke" {
+      assert!(!root.join("passed").exists());
+      assert!(!store.read("test.exec").unwrap().enabled);
+    } else {
+      assert!(
+        root.join("passed").exists(),
+        "exec mode {mode} failed: {}",
+        String::from_utf8_lossy(
+          &Command::new("journalctl")
+            .args(["--user", "--no-pager", "-n", "45", "-u", unit.name()])
+            .output()
+            .unwrap()
+            .stdout
+        )
+      );
+    }
+  }
+}

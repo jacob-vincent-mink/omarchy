@@ -7,6 +7,23 @@ use std::{
 fn main() -> io::Result<()> {
   let args = std::env::args_os().skip(1).collect::<Vec<_>>();
   match args.as_slice() {
+    [mode, name, argv @ ..] if mode == "--exec" => {
+      let text = |value: &std::ffi::OsString| {
+        value
+          .to_str()
+          .map(str::to_owned)
+          .ok_or_else(|| io::Error::other("exec requires UTF-8 arguments"))
+      };
+      omarchy_plugin_host::exec::request(
+        text(name)?,
+        argv.iter().map(text).collect::<io::Result<_>>()?,
+      )
+    }
+    [mode] if mode == "--http-execute" => omarchy_plugin_host::http::execute(),
+    [mode] if mode == "--http" => omarchy_plugin_host::http::request(None),
+    [mode, metadata] if mode == "--http" => {
+      omarchy_plugin_host::http::request(Some(std::path::Path::new(metadata)))
+    }
     [mode, root] if mode == "--manage" => {
       omarchy_plugin_host::management::run(std::path::Path::new(root))
     }
@@ -19,10 +36,28 @@ fn main() -> io::Result<()> {
       };
       omarchy_plugin_host::notification::request(text(title)?, text(body)?)
     }
+    [mode, serial, open] if mode == "--panel-state" => {
+      omarchy_plugin_host::requests::report_panel_state(
+        serial
+          .to_str()
+          .ok_or_else(|| io::Error::other("invalid panel serial"))?,
+        open
+          .to_str()
+          .ok_or_else(|| io::Error::other("invalid panel state"))?,
+      )
+    }
     [mode, settings] if mode == "--settings" => omarchy_plugin_host::requests::save_settings(
       settings
         .to_str()
         .ok_or_else(|| io::Error::other("settings require UTF-8 JSON"))?,
+    ),
+    [mode, browser, url] if mode == "--open-url" => omarchy_plugin_host::requests::open_url(
+      browser
+        .to_str()
+        .ok_or_else(|| io::Error::other("browser mode requires UTF-8"))?,
+      url
+        .to_str()
+        .ok_or_else(|| io::Error::other("URL requires UTF-8"))?,
     ),
     [mode] if mode == "--worker" || mode == "--omarchy-worker" => {
       omarchy_plugin_host::worker::restrict_bootstrap()?;

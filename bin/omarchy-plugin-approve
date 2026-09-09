@@ -1,22 +1,26 @@
 #!/bin/bash
 
 # omarchy:summary=Approve an exact sandbox plugin revision and explicitly selected access
-# omarchy:args=<id> --revision <sha256> [--read <slot=folder>] [--media <service>] [--allow-network] [--allow-notifications] [--allow-settings] [--yes]
+# omarchy:args=<id> --revision <sha256> [--read <slot=folder>] [--write <slot=folder>] [--read-setting <key>] [--write-setting <key>] [--http <scope>] [--exec <name:leaf>] [--media <service>] [--allow-network] [--allow-notifications] [--allow-open-urls] [--allow-storage] [--yes]
 # omarchy:examples=omarchy plugin approve acme.weather --revision <sha256> --allow-network
 
 set -euo pipefail
 
 fail() { echo "omarchy-plugin-approve: $*" >&2; exit 1; }
 if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
-  echo "Usage: omarchy plugin approve <id> --revision <sha256> [--read <slot=folder>] [--media <service>] [--allow-network] [--allow-notifications] [--allow-settings] [--yes]"
+  echo "Usage: omarchy plugin approve <id> --revision <sha256> [--read <slot=folder>] [--write <slot=folder>] [--read-setting <key>] [--write-setting <key>] [--http <scope>] [--exec <name:leaf>] [--media <service>] [--allow-network] [--allow-notifications] [--allow-open-urls] [--allow-storage] [--yes]"
   echo "All access defaults to denied. Approval does not start the plugin."
+  echo "--write allows reading and changing real host files. Revocation cannot undo completed writes."
+  echo "--http selects one reviewed HTTP scope. It cannot be combined with unrestricted --allow-network."
+  echo "--exec selects one command-tree leaf for a host executable, including its existing account and file access."
+  echo "--allow-storage permits private plugin data to persist across restarts. Revocation retains saved data."
   exit 0
 fi
 id="${1:-}"
 [[ -n $id ]] || fail "plugin id is required"
 shift
 revision=""
-selections='{"read":{},"network":false,"media":null,"notifications":false,"settings":false}'
+selections='{"read":{},"write":{},"network":false,"http":[],"media":null,"notifications":false,"settings":{"read":[],"write":[]},"openUrls":false,"storage":false}'
 assume_yes=0
 while (( $# > 0 )); do
   case "$1" in
@@ -25,11 +29,26 @@ while (( $# > 0 )); do
       revision="$2"
       shift 2
       ;;
-    --read)
-      [[ ${2:-} == *=/* ]] || fail "--read requires slot=/absolute/folder"
+    --read | --write)
+      [[ ${2:-} == *=/* ]] || fail "$1 requires slot=/absolute/folder"
+      if [[ $1 == "--write" ]]; then
+        access="write"
+      else
+        access="read"
+      fi
       slot="${2%%=*}"
       folder="${2#*=}"
-      selections=$(jq -c --arg slot "$slot" --arg folder "$folder" '.read[$slot] = $folder' <<<"$selections")
+      selections=$(jq -c --arg access "$access" --arg slot "$slot" --arg folder "$folder" '.[$access][$slot] = $folder' <<<"$selections")
+      shift 2
+      ;;
+    --http)
+      [[ -n ${2:-} ]] || fail "--http requires one reviewed scope name"
+      selections=$(jq -c --arg name "$2" '.http += [$name] | .http |= unique' <<<"$selections")
+      shift 2
+      ;;
+    --exec)
+      [[ ${2:-} == *:* && -n ${2%%:*} && -n ${2#*:} ]] || fail "--exec requires name:leaf"
+      selections=$(jq -c --arg name "${2%%:*}" --arg leaf "${2#*:}" '.exec[$name] = ((.exec[$name] // []) + [$leaf] | unique)' <<<"$selections")
       shift 2
       ;;
     --media)
@@ -45,8 +64,22 @@ while (( $# > 0 )); do
       selections=$(jq -c '.notifications = true' <<<"$selections")
       shift
       ;;
-    --allow-settings)
-      selections=$(jq -c '.settings = true' <<<"$selections")
+    --read-setting | --write-setting)
+      [[ -n ${2:-} ]] || fail "$1 requires one exact own-setting key"
+      if [[ $1 == "--read-setting" ]]; then
+        access="read"
+      else
+        access="write"
+      fi
+      selections=$(jq -c --arg access "$access" --arg key "$2" '.settings[$access] += [$key] | .settings[$access] |= unique' <<<"$selections")
+      shift 2
+      ;;
+    --allow-open-urls)
+      selections=$(jq -c '.openUrls = true' <<<"$selections")
+      shift
+      ;;
+    --allow-storage)
+      selections=$(jq -c '.storage = true' <<<"$selections")
       shift
       ;;
     --yes | -y)
@@ -61,6 +94,12 @@ if (( ! assume_yes )); then
   [[ -t 0 && -t 1 ]] || fail "refusing approval without confirmation; pass --yes with explicit grants"
   printf 'Plugin: %s\nRevision: %s\nSelected access:\n' "$id" "$revision"
   jq . <<<"$selections"
+  if jq -e '.write | length > 0' <<<"$selections" >/dev/null; then
+    echo "Writable folders expose real host data for reading and changes. Revocation cannot undo completed writes."
+  fi
+  if jq -e '.exec // {} | length > 0' <<<"$selections" >/dev/null; then
+    echo "Selected commands run with host files, network and existing account access. Revocation cannot undo completed actions."
+  fi
   gum confirm "Approve this revision and only this access?" || fail "aborted"
 fi
 jq -cn --arg id "$id" --arg revision "$revision" --argjson selections "$selections" \

@@ -1,5 +1,5 @@
 use crate::{
-  grants::{Grants, Manifest, invalid, read_json, validate_id},
+  grants::{Grants, MAX_PERSISTED_BYTES, Manifest, invalid, read_json, validate_id},
   revision::{Revision, require_private_directory},
   supervisor::{Limits, Unit, validate_name},
 };
@@ -78,7 +78,7 @@ impl Store {
     Revision::verify(&self.revisions(), revision)?;
     let manifest = Manifest::read(&self.revisions().join(revision))?;
     grants.validate(&manifest.sandbox.requests)?;
-    for directory in grants.read.values() {
+    for directory in grants.filesystem.values() {
       directory.open()?;
     }
     let _lock = self.lock(&manifest.id)?;
@@ -105,6 +105,10 @@ impl Store {
       grants,
       active_unit: None,
     };
+    // publish() preflights the serialized size below, before it creates the
+    // durable pending marker, so no publish transition (approve, launch,
+    // revoke, recover) can poison a prior usable record with an over-limit
+    // approval.
     self.publish(&record, None, |_| Ok(()))?;
     Ok(record)
   }
@@ -215,7 +219,18 @@ impl Store {
     if manifest.id != record.id {
       return Err(invalid("revision identity mismatch"));
     }
-    record.grants.validate(&manifest.sandbox.requests)
+    record.grants.validate(&manifest.sandbox.requests)?;
+    // A required grant that the approval did not cover must block activation
+    // with an actionable explanation; it is never implied by the request. A
+    // declined *optional* request does not block startup.
+    let missing = record.grants.required_gap(&manifest.sandbox.requests);
+    if !missing.is_empty() {
+      return Err(invalid(&format!(
+        "plugin requires the following access before it can start; approve each one first: {}",
+        missing.join(", ")
+      )));
+    }
+    Ok(())
   }
 
   fn record(&self, id: &str) -> io::Result<Record> {
@@ -243,6 +258,12 @@ impl Store {
     previous_unit: Option<&str>,
     mut checkpoint: impl FnMut(u8) -> io::Result<()>,
   ) -> io::Result<()> {
+    // Preflight the serialized size before the pending marker exists. A
+    // record may be exactly at the budget at approve() and still grow past it
+    // once launch() attaches an active unit and bumps the epoch, so every
+    // publish transition must be sized before committing any durable state.
+    // Rejecting here leaves the prior usable record untouched.
+    Self::check_record_size(record)?;
     let marker = OpenOptions::new()
       .write(true)
       .create_new(true)
@@ -263,10 +284,8 @@ impl Store {
     record: &Record,
     checkpoint: &mut impl FnMut(u8) -> io::Result<()>,
   ) -> io::Result<()> {
+    Self::check_record_size(record)?;
     let bytes = serde_json::to_vec(record).map_err(|_| invalid("could not encode grant record"))?;
-    if bytes.len() > 65536 {
-      return Err(invalid("grant record exceeds size limit"));
-    }
     let mut temporary = tempfile::NamedTempFile::new_in(&self.root)?;
     temporary.write_all(&bytes)?;
     temporary.as_file().sync_all()?;
@@ -281,6 +300,17 @@ impl Store {
     checkpoint(6)?;
     File::open(&self.root)?.sync_all()?;
     checkpoint(7)
+  }
+
+  fn check_record_size(record: &Record) -> io::Result<()> {
+    let bytes = serde_json::to_vec(record).map_err(|_| invalid("could not encode grant record"))?;
+    if bytes.len() > MAX_PERSISTED_BYTES {
+      return Err(invalid(&format!(
+        "approved grant record is too large ({} bytes); reduce the number or length of selected directories",
+        bytes.len()
+      )));
+    }
+    Ok(())
   }
 
   fn lock(&self, id: &str) -> io::Result<File> {
@@ -360,11 +390,195 @@ mod tests {
     fs::write(source.join("manifest.json"), serde_json::to_vec(&serde_json::json!({
       "schemaVersion": 1, "id": "test.widget", "name": "Test", "version": "1", "kinds": ["barWidget"],
       "entryPoints": {"barWidget": "worker.qml"}, "sandbox": {"version": 1, "entryPoint": "worker.qml",
-        "requests": {"network": true, "storage": true, "read": ["files"]}}
+        "requests": {"network": true, "storage": true, "filesystem": [{"name": "files"}]}}
     })).unwrap()).unwrap();
     let store = Store::initialize(&root.path().join("state")).unwrap();
     let revision = Revision::import(&source, &store.revisions()).unwrap();
     (root, store, revision)
+  }
+
+  /// Build a store + revision whose manifest declares `count` optional
+  /// filesystem slots (each with the maximum legal 96-character name) and
+  /// returns them along with a data root holding a selected directory for
+  /// every slot.
+  fn filesystem_fixture(
+    count: usize,
+    deep: bool,
+  ) -> (
+    tempfile::TempDir,
+    Store,
+    Revision,
+    Vec<String>,
+    std::path::PathBuf,
+  ) {
+    let root = tempfile::Builder::new()
+      .permissions(fs::Permissions::from_mode(0o700))
+      .tempdir()
+      .unwrap();
+    let source = root.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(
+      source.join("worker.qml"),
+      "import Quickshell\nShellRoot {}\n",
+    )
+    .unwrap();
+    let names: Vec<String> = (0..count)
+      .map(|i| format!("grant-{i:04}-{}", "n".repeat(85)))
+      .collect();
+    let data = if deep {
+      root.path().join(format!("deep-{}", "y".repeat(140)))
+    } else {
+      root.path().join("data")
+    };
+    fs::create_dir(&data).unwrap();
+    for i in 0..count {
+      fs::create_dir(data.join(format!("d{i}"))).unwrap();
+    }
+    fs::write(
+      source.join("manifest.json"),
+      serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 1, "id": "size.widget", "name": "S", "version": "1", "kinds": ["barWidget"],
+        "entryPoints": {"barWidget": "worker.qml"}, "sandbox": {"version": 1, "entryPoint": "worker.qml",
+          "requests": {"filesystem": names.iter().map(crate::grants::FileSystemRequest::optional).collect::<Vec<_>>()}}
+      }))
+      .unwrap(),
+    )
+    .unwrap();
+    let store = Store::initialize(&root.path().join("state")).unwrap();
+    let revision = Revision::import(&source, &store.revisions()).unwrap();
+    (root, store, revision, names, data)
+  }
+
+  fn select_all<P: AsRef<Path>>(data: &P, names: &[String]) -> Grants {
+    use crate::grants::{Access, FileSystemGrant, Target};
+    let mut grants = Grants::default();
+    for (i, name) in names.iter().enumerate() {
+      grants.filesystem.insert(
+        name.clone(),
+        FileSystemGrant::select(
+          &data.as_ref().join(format!("d{i}")),
+          Access::Read,
+          Target::Directory,
+        )
+        .unwrap(),
+      );
+    }
+    grants
+  }
+
+  #[test]
+  fn max_count_filesystem_grants_round_trip_within_the_persisted_budget() {
+    use crate::grants::MAX_GRANTED_DIRS;
+    let (_root, store, revision, names, data) = filesystem_fixture(MAX_GRANTED_DIRS, false);
+    let grants = select_all(&data, &names);
+    let record = store.approve(&revision.digest, grants).unwrap();
+    assert_eq!(record.grants.filesystem.len(), MAX_GRANTED_DIRS);
+    let persisted = serde_json::to_vec(&record).unwrap();
+    assert!(
+      persisted.len() <= MAX_PERSISTED_BYTES,
+      "max-count record exceeds the persisted budget: {} bytes",
+      persisted.len()
+    );
+    // The persisted file is smaller than the in-memory JSON (no pretty format)
+    // and reopens through the capped read path without truncation.
+    let reopened = store.read("size.widget").unwrap();
+    assert_eq!(reopened.grants.filesystem.len(), MAX_GRANTED_DIRS);
+    assert_eq!(reopened.revision, revision.digest);
+  }
+
+  #[test]
+  fn oversize_approval_is_rejected_before_publishing_or_poisoning() {
+    use crate::grants::MAX_GRANTED_DIRS;
+    // A realistic shorter-path record first, so there is a prior usable
+    // approval to guarantee is left untouched by a rejected oversize attempt.
+    let (_root, store, revision, all_names, _data) = filesystem_fixture(MAX_GRANTED_DIRS, false);
+    let tiny = store
+      .approve(&revision.digest, select_all(&_data, &all_names[0..1]))
+      .unwrap();
+    assert!(!store.pending("size.widget").unwrap());
+    // The oversize attempt mounts the same slots under a very deep path so the
+    // persisted record would exceed the 64 KiB cap while still validating and
+    // opening every selected directory.
+    let deep = _root.path().join(format!("deep-{}", "y".repeat(140)));
+    fs::create_dir(&deep).unwrap();
+    for i in 0..all_names.len() {
+      fs::create_dir(deep.join(format!("d{i}"))).unwrap();
+    }
+    let oversize = select_all(&deep, &all_names);
+    let error = store.approve(&revision.digest, oversize).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("too large"), "unexpected error: {message}");
+    // No pending marker was created, and the prior usable approval is intact.
+    assert!(!store.pending("size.widget").unwrap());
+    let current = store.read("size.widget").unwrap();
+    assert_eq!(current.grants.filesystem.len(), 1);
+    assert_eq!(current.epoch, tiny.epoch);
+  }
+
+  #[test]
+  fn launch_growth_oversize_is_rejected_before_pending_preserving_prior_approval() {
+    use crate::grants::{Access as GrantAccess, FileSystemGrant, Target};
+    let root = tempfile::Builder::new()
+      .permissions(fs::Permissions::from_mode(0o700))
+      .tempdir()
+      .unwrap();
+    let store = Store::initialize(&root.path().join("state")).unwrap();
+    // The active-unit string below is long only to widen the "growth band"
+    // (its serialized contribution) past the per-grant step, so the boundary
+    // count is hit deterministically; the mechanism is identical for a real
+    // short unit name that pushes an already-near-limit record over the cap.
+    let unit: String = format!("unit-{}", "x".repeat(2000));
+    let mut count = 0usize;
+    loop {
+      let mut grants = Grants::default();
+      for i in 0..=count {
+        grants.filesystem.insert(
+          format!("g{i}"),
+          FileSystemGrant {
+            path: format!("/data/d{i:04}/{}", "y".repeat(520)).into(),
+            device: 1,
+            inode: i as u64 + 1,
+            access: GrantAccess::Read,
+            target: Target::Directory,
+          },
+        );
+      }
+      let base = Record {
+        version: 1,
+        id: "size.widget".into(),
+        revision: "ab".repeat(32),
+        epoch: 1,
+        enabled: true,
+        grants,
+        active_unit: None,
+      };
+      let grown = Record {
+        active_unit: Some(unit.clone()),
+        ..base.clone()
+      };
+      let base_size = serde_json::to_vec(&base).unwrap().len();
+      let grown_size = serde_json::to_vec(&grown).unwrap().len();
+      if base_size <= MAX_PERSISTED_BYTES && grown_size > MAX_PERSISTED_BYTES {
+        // Commit the bare approval as the usable prior state.
+        store.publish(&base, None, |_| Ok(())).unwrap();
+        assert!(!store.pending("size.widget").unwrap());
+        // launch()'s growth (active unit + epoch bump) must be rejected before
+        // publish() creates a pending marker, so the prior approval is kept.
+        let error = store.publish(&grown, None, |_| Ok(())).unwrap_err();
+        assert!(error.to_string().contains("too large"));
+        assert!(!store.pending("size.widget").unwrap());
+        let current = store.read("size.widget").unwrap();
+        assert!(current.enabled);
+        assert_eq!(current.epoch, 1);
+        assert_eq!(current.active_unit, None);
+        assert_eq!(current.grants.filesystem.len(), count + 1);
+        return;
+      }
+      if count > crate::grants::MAX_GRANTED_DIRS * 2 {
+        panic!("could not construct a budget-boundary grant set");
+      }
+      count += 1;
+    }
   }
 
   #[test]

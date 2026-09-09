@@ -25,6 +25,10 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/Omarchy/PluginHost/qmldir
 install(PROGRAMS "${RUST_TARGET_DIR}/${RUST_PROFILE}/omarchy-plugin-host" DESTINATION lib)
 get_filename_component(OMARCHY_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
 install(FILES ../runtime/worker.qml DESTINATION lib/plugin-runtime/shell)
+install(PROGRAMS ../runtime/open-url DESTINATION lib/plugin-runtime/bin RENAME omarchy-launch-browser)
+install(PROGRAMS ../runtime/open-url DESTINATION lib/plugin-runtime/bin RENAME omarchy-launch-webapp)
+install(PROGRAMS ../runtime/http DESTINATION lib/plugin-runtime/bin RENAME omarchy-plugin-http)
+install(PROGRAMS ../runtime/exec DESTINATION lib/plugin-runtime/bin RENAME omarchy-plugin-exec)
 install(DIRECTORY "${OMARCHY_SOURCE}/shell/Commons" "${OMARCHY_SOURCE}/shell/Ui"
   DESTINATION lib/plugin-runtime/shell)
 install(FILES "${OMARCHY_SOURCE}/shell/services/PluginShellApi.qml"

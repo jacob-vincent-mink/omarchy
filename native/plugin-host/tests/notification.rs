@@ -59,10 +59,89 @@ fn notification_worker_child() {
   if mode == "denied" {
     assert!(!Path::new("/run/plugin/notify").exists());
     assert!(!Path::new("/run/plugin/settings").exists());
+    assert!(!Path::new("/run/plugin/open-url").exists());
     assert!(omarchy_plugin_host::notification::request("test".into(), "body".into()).is_err());
     assert!(omarchy_plugin_host::requests::save_settings("{}").is_err());
+    assert!(omarchy_plugin_host::requests::open_url("browser", "https://example.test").is_err());
+  } else if mode.starts_with("url") {
+    let all = mode == "url-all";
+    assert_eq!(Path::new("/run/plugin/notify").exists(), all);
+    assert_eq!(Path::new("/run/plugin/settings").exists(), all);
+    let request = |bytes: &[u8]| {
+      let channel = Channel::connect(Path::new("/run/plugin/open-url")).unwrap();
+      channel.send(bytes, &[]).unwrap();
+      channel
+    };
+    if mode == "url" || all {
+      if !all {
+        assert_eq!(
+          receive(&request(
+            br#"{"version":1,"title":"wrong grant","body":""}"#
+          )),
+          "denied"
+        );
+        let channel = Channel::connect(Path::new("/run/plugin/open-url")).unwrap();
+        Control::Context(UiContext::default())
+          .send(&channel)
+          .unwrap();
+        assert_eq!(receive(&channel), "denied");
+      }
+      for bytes in [
+        br#"{"version":1,"mode":"shell","url":"https://example.test"}"#.as_slice(),
+        br#"{"version":1,"mode":"browser","url":"file:///secret"}"#,
+        br#"{"version":1,"mode":"browser","url":"https://example.test","exec":"sh"}"#,
+      ] {
+        assert_eq!(receive(&request(bytes)), "invalid");
+      }
+      let channel = Channel::connect(Path::new("/run/plugin/open-url")).unwrap();
+      channel
+        .send(
+          br#"{"version":1,"mode":"browser","url":"https://example.test"}"#,
+          &[File::open("/dev/null").unwrap().as_fd()],
+        )
+        .unwrap();
+      assert_eq!(receive(&channel), "invalid");
+      let first = request(br#"{"version":1,"mode":"browser","url":"https://example.test/--private?next=$(touch%20/secret)&q='quoted'"}"#);
+      std::thread::sleep(Duration::from_millis(50));
+      assert_eq!(
+        receive(&request(
+          br#"{"version":1,"mode":"webapp","url":"https://example.test/busy"}"#
+        )),
+        "busy"
+      );
+      assert_eq!(receive(&first), "delivered");
+      omarchy_plugin_host::requests::open_url("webapp", "https://example.test/second").unwrap();
+      assert_eq!(
+        receive(&request(
+          br#"{"version":1,"mode":"browser","url":"https://example.test/rate"}"#
+        )),
+        "rate_limited"
+      );
+    } else {
+      let started = Instant::now();
+      assert!(
+        omarchy_plugin_host::requests::open_url("browser", "https://example.test/blocked").is_err()
+      );
+      assert!(started.elapsed() < Duration::from_secs(2));
+      assert_ne!(
+        mode, "url-revoke",
+        "revocation allowed the worker to continue"
+      );
+    }
   } else if mode.starts_with("settings") {
     assert!(!Path::new("/run/plugin/notify").exists());
+    let channel = Channel::connect(Path::new("/run/plugin/settings")).unwrap();
+    channel
+      .send(
+        br#"{"version":1,"mode":"browser","url":"https://example.test"}"#,
+        &[],
+      )
+      .unwrap();
+    assert_eq!(
+      receive(&channel),
+      "denied",
+      "settings alias bypassed the URL grant"
+    );
     let channel = Channel::connect(Path::new("/run/plugin/settings")).unwrap();
     channel
       .send(br#"{"version":1,"title":"wrong grant","body":""}"#, &[])
@@ -79,6 +158,7 @@ fn notification_worker_child() {
       omarchy_plugin_host::requests::save_settings(r#"{"id":"test.notification","width":80}"#)
         .unwrap();
       omarchy_plugin_host::requests::save_settings(r#"{"width":100}"#).unwrap();
+      assert!(omarchy_plugin_host::requests::save_settings(r#"{"unselected":123}"#).is_err());
     } else {
       let started = Instant::now();
       assert!(omarchy_plugin_host::requests::save_settings("{}").is_err());
@@ -103,6 +183,18 @@ fn notification_worker_child() {
     panic!("revocation should terminate the worker before it continues");
   } else {
     assert!(!Path::new("/run/plugin/settings").exists());
+    let channel = Channel::connect(Path::new("/run/plugin/notify")).unwrap();
+    channel
+      .send(
+        br#"{"version":1,"mode":"browser","url":"https://example.test"}"#,
+        &[],
+      )
+      .unwrap();
+    assert_eq!(
+      receive(&channel),
+      "denied",
+      "notification alias bypassed the URL grant"
+    );
     let channel = Channel::connect(Path::new("/run/plugin/notify")).unwrap();
     Control::Context(UiContext::default())
       .send(&channel)
@@ -162,11 +254,13 @@ fn notification_controller_child() {
     .unwrap()
     .read("test.notification")
     .unwrap();
-  let mut broker = if record.grants.notifications || record.grants.settings {
-    Some(Broker::start(root).unwrap())
-  } else {
-    None
-  };
+  let mut broker =
+    if record.grants.notifications || record.grants.settings.can_write() || record.grants.open_urls
+    {
+      Some(Broker::start(root, &std::env::current_exe().unwrap(), vec![]).unwrap())
+    } else {
+      None
+    };
   let listener = UnixListener::bind(root.join("wayland")).unwrap();
   listener.set_nonblocking(true).unwrap();
   let path_fd = |path: &Path| {
@@ -252,6 +346,10 @@ fn notification_authority_is_bounded_and_revocation_stops_inflight_delivery() {
     "settings",
     "settings-timeout",
     "settings-revoke",
+    "url",
+    "url-all",
+    "url-timeout",
+    "url-revoke",
   ] {
     let root = tempfile::Builder::new()
       .permissions(fs::Permissions::from_mode(0o700))
@@ -267,7 +365,7 @@ fn notification_authority_is_bounded_and_revocation_stops_inflight_delivery() {
     fs::write(source.join("mode"), mode).unwrap();
     fs::write(source.join("manifest.json"), serde_json::to_vec(&serde_json::json!({
       "schemaVersion": 1, "id": "test.notification", "name": "Test", "version": "1", "kinds": ["panel"],
-      "entryPoints": {"panel": "worker.qml"}, "sandbox": {"version": 1, "entryPoint": "worker.qml", "requests": {"notifications": true, "settings": true}}
+      "entryPoints": {"panel": "worker.qml"}, "sandbox": {"version": 1, "entryPoint": "worker.qml", "requests": {"notifications": true, "settings": {"write": ["width"]}, "openUrls": true}}
     })).unwrap()).unwrap();
     let store = Store::initialize(&root.path().join("state")).unwrap();
     let revision = Revision::import(&source, &store.revisions()).unwrap();
@@ -275,8 +373,17 @@ fn notification_authority_is_bounded_and_revocation_stops_inflight_delivery() {
       .approve(
         &revision.digest,
         Grants {
-          notifications: mode != "denied" && !mode.starts_with("settings"),
-          settings: mode.starts_with("settings"),
+          notifications: mode == "url-all"
+            || mode != "denied" && !mode.starts_with("settings") && !mode.starts_with("url"),
+          settings: omarchy_plugin_host::settings::Grant {
+            write: if mode.starts_with("settings") || mode == "url-all" {
+              ["width".into()].into()
+            } else {
+              Default::default()
+            },
+            ..Default::default()
+          },
+          open_urls: mode.starts_with("url"),
           ..Default::default()
         },
       )
@@ -291,6 +398,11 @@ fn notification_authority_is_bounded_and_revocation_stops_inflight_delivery() {
       "#!/bin/bash\nprintf '%s\\0' \"$@\" >> {}\nif [[ {} != 'settings' ]]; then\n  touch {}\n  sleep 30\nfi\n",
       quote(root.path().join("record").to_str().unwrap()), quote(mode), quote(root.path().join("inflight").to_str().unwrap()))).unwrap();
     fs::set_permissions(&settings_helper, fs::Permissions::from_mode(0o700)).unwrap();
+    let url_helper = root.path().join("bin/omarchy-plugin-url-open");
+    fs::write(&url_helper, format!(
+      "#!/bin/bash\nprintf '%s\\0' \"$@\" >> {}\nif [[ {} == 'url-timeout' || {} == 'url-revoke' ]]; then\n  touch {}\n  sleep 30\nelse\n  sleep 0.2\nfi\n",
+      quote(root.path().join("record").to_str().unwrap()), quote(mode), quote(mode), quote(root.path().join("inflight").to_str().unwrap()))).unwrap();
+    fs::set_permissions(&url_helper, fs::Permissions::from_mode(0o700)).unwrap();
     let controller = root.path().join("controller");
     fs::write(&controller, format!("#!/bin/bash\nexport OMARCHY_PATH={}\nexport OMARCHY_NOTIFICATION_TEST_ROOT={}\nexport OMARCHY_NOTIFICATION_TEST_EPOCH=\"$5\"\nexec {} --exact notification_controller_child --nocapture\n",
       quote(root.path().to_str().unwrap()), quote(root.path().to_str().unwrap()), quote(std::env::current_exe().unwrap().to_str().unwrap()))).unwrap();
@@ -380,6 +492,25 @@ fn notification_authority_is_bounded_and_revocation_stops_inflight_delivery() {
         ]
       ),
       "settings-revoke" | "settings-timeout" => assert_eq!(args, ["test.notification", "{}"]),
+      "url" | "url-all" => assert_eq!(
+        args,
+        [
+          "test.notification",
+          "browser",
+          "https://example.test/--private?next=$(touch%20/secret)&q='quoted'",
+          "test.notification",
+          "webapp",
+          "https://example.test/second"
+        ]
+      ),
+      "url-revoke" | "url-timeout" => assert_eq!(
+        args,
+        [
+          "test.notification",
+          "browser",
+          "https://example.test/blocked"
+        ]
+      ),
       _ => unreachable!(),
     }
   }

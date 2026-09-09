@@ -20,6 +20,7 @@ ShellRoot {
   property BarWidgetRegistry barWidgetRegistry: BarWidgetRegistry { }
   property AppLibrary appLibrary: AppLibrary { }
   property SandboxedPlugins sandboxedPlugins: SandboxedPlugins {
+    bar: shell.bar
     onChanged: shell.pluginRegistry.pluginsChanged()
   }
 
@@ -1145,7 +1146,7 @@ ShellRoot {
   function summon(pluginId, payloadJson) {
     var id = shell.pluginRegistry.resolveEnabledId(pluginId)
     if (!id) return false
-    if (shell.pluginRegistry.isSandboxed(id)) return shell.sandboxedPlugins.show(id)
+    if (shell.pluginRegistry.isSandboxed(id)) return shell.sandboxedPlugins.show(id, payloadJson)
     var plugins = shell.pluginRegistry.installedPlugins
     if (!plugins[id]) {
       console.warn("summon: unknown plugin", id)
@@ -1165,6 +1166,7 @@ ShellRoot {
       if (!summoned) console.warn("summon: no live bar widget for:", id)
       return summoned === true
     }
+    shell.sandboxedPlugins.dismissAll()
     var next = ({})
     for (var k in openPanelIds) next[k] = openPanelIds[k]
     next[id] = true
@@ -1661,7 +1663,7 @@ ShellRoot {
         // The preview owns a top-level sandbox entry, never a legacy bar
         // command/QML entry that happens to have the same id.
         var copy = JSON.parse(JSON.stringify(shell.shellConfig))
-        copy.plugins[index] = Object.assign({ id: id, sandbox: true }, settings)
+        copy.plugins[index] = Object.assign({}, copy.plugins[index], settings)
         if (JSON.stringify(copy) !== JSON.stringify(shell.shellConfig)) shell.persistShellConfig(copy)
         return "ok"
       } catch (e) {

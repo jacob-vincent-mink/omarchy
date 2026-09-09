@@ -98,7 +98,10 @@ impl Unit {
       "--property=SendSIGKILL=yes",
       "--property=Restart=no",
       "--property=OOMPolicy=kill",
+      "--property=Delegate=yes",
       "--property=MemorySwapMax=0",
+      "--property=RuntimeDirectoryMode=0700",
+      "--property=RuntimeDirectoryPreserve=no",
       "--property=LimitCORE=0",
       "--property=LimitNOFILE=512",
       "--property=NoNewPrivileges=yes",
@@ -109,6 +112,12 @@ impl Unit {
       "--property=LogRateLimitBurst=20",
     ]);
     command.arg(format!("--unit={}", self.name));
+    // The service manager owns cleanup, including OOM/watchdog/SIGKILL exits
+    // where neither the controller nor its TempDirs can run destructors.
+    command.arg(format!(
+      "--property=RuntimeDirectory={}",
+      self.name.strip_suffix(".service").unwrap()
+    ));
     command.arg(format!("--property=MemoryMax={}", limits.memory_bytes));
     command.arg(format!("--property=TasksMax={}", limits.tasks));
     command.arg(format!("--property=CPUQuota={}%", limits.cpu_percent));
@@ -243,15 +252,7 @@ impl Unit {
     let Some(group) = &self.cgroup else {
       return Ok(false);
     };
-    match fs::read_to_string(group.join("cgroup.events")) {
-      Ok(events) => match events.lines().find(|line| line.starts_with("populated ")) {
-        Some("populated 0") => Ok(false),
-        Some("populated 1") => Ok(true),
-        _ => Err(io::Error::other("invalid cgroup population state")),
-      },
-      Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-      Err(error) => Err(error),
-    }
+    population(|| fs::read_to_string(group.join("cgroup.events")))
   }
 
   fn verify_limits(&self, limits: Limits) -> io::Result<()> {
@@ -278,6 +279,28 @@ impl Unit {
     }
     self.stopped = true;
     Ok(())
+  }
+}
+
+fn population(mut read: impl FnMut() -> io::Result<String>) -> io::Result<bool> {
+  let mut events = read();
+  // kernfs can deactivate this node between open and read during cgroup
+  // removal (kernfs_seq_start returns ENODEV). Reopen once for fresh evidence;
+  // an observation error alone never establishes that the worker has stopped.
+  if events
+    .as_ref()
+    .is_err_and(|error| error.raw_os_error() == Some(libc::ENODEV))
+  {
+    events = read();
+  }
+  match events {
+    Ok(events) => match events.lines().find(|line| line.starts_with("populated ")) {
+      Some("populated 0") => Ok(false),
+      Some("populated 1") => Ok(true),
+      _ => Err(io::Error::other("invalid cgroup population state")),
+    },
+    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+    Err(error) => Err(error),
   }
 }
 
@@ -332,7 +355,7 @@ pub(crate) fn authenticate_member(peer: &crate::channel::Channel) -> io::Result<
   Unit::authenticate_peer(peer, &controller_group()?)
 }
 
-fn controller_group() -> io::Result<PathBuf> {
+pub(crate) fn controller_group() -> io::Result<PathBuf> {
   let membership = fs::read_to_string("/proc/self/cgroup")?;
   let group = membership
     .lines()
@@ -414,6 +437,38 @@ pub fn watchdog() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn cgroup_removal_race_requires_a_fresh_observation() {
+    for (next, expected) in [
+      (Ok("populated 1\n".into()), true),
+      (Ok("populated 0\n".into()), false),
+      (Err(io::Error::from_raw_os_error(libc::ENOENT)), false),
+    ] {
+      let mut reads = [Err(io::Error::from_raw_os_error(libc::ENODEV)), next].into_iter();
+      assert_eq!(population(|| reads.next().unwrap()).unwrap(), expected);
+      assert!(reads.next().is_none());
+    }
+    let mut calls = 0;
+    assert!(
+      population(|| {
+        calls += 1;
+        Err(io::Error::from_raw_os_error(libc::ENODEV))
+      })
+      .is_err()
+    );
+    assert_eq!(calls, 2);
+    let mut calls = 0;
+    assert!(
+      population(|| {
+        calls += 1;
+        Err(io::Error::from_raw_os_error(libc::EACCES))
+      })
+      .is_err()
+    );
+    assert_eq!(calls, 1);
+    assert!(population(|| Ok("populated unknown\n".into())).is_err());
+  }
 
   #[test]
   fn limits_cannot_remove_resource_ceilings() {

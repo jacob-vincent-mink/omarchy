@@ -40,14 +40,36 @@ if [[ ${1:-} == "--json" ]]; then
   printf '%s\n' "$review"
 else
   jq -r '
+    def requirement: if type == "object" and .required == true then "required" else "optional" end;
+    .requests as $requests |
     "\(.name) (\(.id)) — \(.version)",
     "Revision: \(.revision)", "", "Requested access:",
-    (.requests.read[] | "  Read-only folder: \(.) (you select the folder)"),
-    (if .requests.network then "  Network, including local services" else empty end),
-    (if .requests.media then "  One selected media player" else empty end),
-    (if .requests.notifications then "  Text-only notifications" else empty end),
-    (if .requests.storage then "  Private storage (not available in this preview)" else empty end),
-    (if (.requests.read | length) == 0 and ([.requests.network, .requests.media, .requests.notifications, .requests.storage] | any) == false then "  None" else empty end),
+    (($requests.filesystem // [])[] |
+      "  Folder \(.name): \(if .access == "readwrite" then "read-write" else "read-only" end), \(requirement) (you select the folder)"),
+    (($requests.http // {}) | to_entries[] |
+      "  HTTP \(.key): \(.value.scope.method) \(.value.scope.origin)\(.value.scope.path)\(if .value.scope.subtree then " (subtree)" else "" end), \(.value | requirement)",
+      "    Query: \(.value.scope.query | tojson)", "    JSON body: \(.value.scope.body | tojson)"),
+    (($requests.exec // {}) | to_entries[] |
+      "  Host executable \(.key): \(.value.executable)",
+      "    Required leaves: \(.value.required | tojson)",
+      "    Command tree: \(.value.tree | tojson)",
+      "    Uses existing host accounts, files and network; completed effects cannot be undone by revocation."),
+    ([
+      {key: "network", label: "Network, including local services"},
+      {key: "media", label: "One selected media player"},
+      {key: "notifications", label: "Text-only notifications"},
+      {key: "openUrls", label: "Open HTTP(S) links in browser sessions"},
+      {key: "storage", label: "Private persistent storage; saved data remains after revocation"}
+    ][] | . as $capability | $requests[$capability.key] | select(. != null and . != false) |
+      "  \($capability.label) (\(requirement))"),
+    ($requests.settings as $settings | ["read", "write"][] as $operation |
+      ($settings[$operation] // [])[] | "  Own setting \(.): \($operation), \($settings | requirement)"),
+    (if (($requests.filesystem // []) | length) == 0
+      and (($requests.http // {}) | length) == 0
+      and (($requests.exec // {}) | length) == 0
+      and (($requests.settings.read // []) | length) == 0 and (($requests.settings.write // []) | length) == 0
+      and ([$requests.network, $requests.media, $requests.notifications, $requests.openUrls, $requests.storage] | any(. != null and . != false) | not)
+      then "  None" else empty end),
     "", "No plugin code was run. Requests are not grants.",
     "Approve this exact revision with:",
     "  omarchy plugin approve \(.id) --revision \(.revision)"

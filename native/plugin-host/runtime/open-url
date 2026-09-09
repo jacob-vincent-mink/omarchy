@@ -1,0 +1,16 @@
+#!/bin/bash
+
+if (( $# != 1 )); then
+  exit 1
+fi
+case ${0##*/} in
+  omarchy-launch-browser) mode=browser ;;
+  omarchy-launch-webapp) mode=webapp ;;
+  *) exit 1 ;;
+esac
+if /bootstrap --open-url "$mode" "$1"; then
+  exit 0
+else
+  timeout 1s qs ipc -n -p /runtime/shell/worker.qml call -- plugin-runtime linkFailed >/dev/null 2>&1
+  exit 1
+fi

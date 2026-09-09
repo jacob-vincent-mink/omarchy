@@ -1,6 +1,11 @@
-use serde::{Deserialize, Serialize};
+use serde::{
+  Deserialize, Deserializer, Serialize, Serializer,
+  de::{Error, MapAccess, Visitor},
+  ser::SerializeStruct,
+};
 use std::{
   collections::{BTreeMap, BTreeSet},
+  fmt,
   fs::{File, OpenOptions},
   io::{self, Read},
   os::{
@@ -10,57 +15,318 @@ use std::{
   path::{Component, Path, PathBuf},
 };
 
+/// Upper bound on granted host directories. Two independent constraints bound
+/// the count, and the *lower* one wins:
+///
+/// - **Descriptors**: bubblewrap consumes one descriptor per granted directory
+///   while passing mounts, and the controller unit inheriting them runs under
+///   `LimitNOFILE=512` ([`crate::supervisor::Unit::launch`]) plus a small base
+///   footprint (stdio, control channel, bundle/bootstrap/wayland/runtime/
+///   context, mediated sockets). That alone would allow hundreds.
+/// - **Persisted record**: the approval record (grant details, named
+///   dev+inode pins) is written to disk and later re-read through [`read_json`],
+///   which caps a file at [`MAX_PERSISTED_BYTES`] (64 KiB) to keep reviving
+///   hostile on-disk data bounded. With maximum legal slot names (96 chars) and
+///   a realistic path, each grant serializes to roughly 220 bytes, so 256
+///   grants stay under 64 KiB including record overhead (measured ~57 KiB in
+///   [`tests`]). The transport budget is not binding: each grant is two short
+///   bubblewrap arguments (`--ro-bind-fd <fd> /grants/<name>`, ~40 bytes), so
+///   256 grants are a few KiB of argv, far below `MAX_ARG_STRLEN`/`ARG_MAX`.
+///
+/// The persisted-record size is the concrete binding constraint, and it is
+/// imposed twice: the approval is preflighted (serialized and capped) in
+/// [`crate::store::Store::approve`] *before* any durable pending marker is
+/// created, and again in `finish`, so an over-limit approval is rejected
+/// without touching or poisoning the prior usable approval.
+pub const MAX_GRANTED_DIRS: usize = 256;
+
+/// Persisted configuration files (manifests and approval records) are bounded
+/// so reviving hostile on-disk data stays cheap and never exhausts memory or
+/// a single bounded read.
+pub const MAX_PERSISTED_BYTES: usize = 65536;
+
+/// One atomic capability ask in a plugin manifest. A boolean (for example
+/// `storage: true`) means **optional**: if the approving user declines it the
+/// plugin still starts with reduced access, matching how the original plugins
+/// are staged with deliberately-declined access. Mandatory access must be
+/// declared explicitly, for example `storage: { "required": true }`; a bare
+/// `true` never becomes a required grant and `false` means not requested.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Request {
+  pub asked: bool,
+  pub required: bool,
+}
+
+impl Request {
+  pub fn asked(self) -> bool {
+    self.asked
+  }
+}
+
+impl<'de> Deserialize<'de> for Request {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    struct RequestVisitor;
+    impl<'de> Visitor<'de> for RequestVisitor {
+      type Value = Request;
+      fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a boolean, or an object with a required flag")
+      }
+      fn visit_bool<E>(self, value: bool) -> Result<Request, E> {
+        Ok(Request {
+          asked: value,
+          required: false,
+        })
+      }
+      fn visit_map<A>(self, mut map: A) -> Result<Request, A::Error>
+      where
+        A: MapAccess<'de>,
+      {
+        let mut required: Option<bool> = None;
+        while let Some(key) = map.next_key::<String>()? {
+          match key.as_str() {
+            "required" => {
+              if required.replace(map.next_value()?).is_some() {
+                return Err(A::Error::duplicate_field("required"));
+              }
+            }
+            _ => return Err(A::Error::unknown_field(&key, &["required"])),
+          }
+        }
+        Ok(Request {
+          asked: true,
+          required: required.unwrap_or(false),
+        })
+      }
+    }
+    deserializer.deserialize_any(RequestVisitor)
+  }
+}
+
+impl Serialize for Request {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    match (self.asked, self.required) {
+      // Booleans express optional atomic access; requiredness is explicit.
+      (false, _) => serializer.serialize_bool(false),
+      (true, false) => serializer.serialize_bool(true),
+      (true, true) => {
+        let mut state = serializer.serialize_struct("Request", 1)?;
+        state.serialize_field("required", &self.required)?;
+        state.end()
+      }
+    }
+  }
+}
+
+/// One named filesystem request with explicit access and requiredness.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileSystemRequest {
+  pub name: String,
+  #[serde(default)]
+  pub access: Access,
+  #[serde(default)]
+  pub required: bool,
+}
+
+impl FileSystemRequest {
+  pub fn optional(name: impl Into<String>) -> Self {
+    Self {
+      name: name.into(),
+      access: Access::Read,
+      required: false,
+    }
+  }
+  pub fn required(name: impl Into<String>) -> Self {
+    Self {
+      name: name.into(),
+      access: Access::Read,
+      required: true,
+    }
+  }
+  pub fn write(name: impl Into<String>, required: bool) -> Self {
+    Self {
+      name: name.into(),
+      access: Access::ReadWrite,
+      required,
+    }
+  }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Requests {
-  pub read: Vec<String>,
-  pub network: bool,
-  pub media: bool,
-  pub notifications: bool,
-  pub settings: bool,
-  pub storage: bool,
+  pub filesystem: Vec<FileSystemRequest>,
+  pub network: Request,
+  pub http: BTreeMap<String, crate::http::Ask>,
+  pub exec: BTreeMap<String, crate::exec::Ask>,
+  pub media: Request,
+  pub notifications: Request,
+  pub settings: crate::settings::Ask,
+  #[serde(rename = "openUrls")]
+  pub open_urls: Request,
+  pub storage: Request,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Grants {
-  pub read: BTreeMap<String, ReadDirectory>,
+  pub filesystem: BTreeMap<String, FileSystemGrant>,
   pub network: bool,
+  pub http: BTreeMap<String, crate::http::Scope>,
+  pub exec: BTreeMap<String, crate::exec::Grant>,
   pub media: Option<String>,
   pub notifications: bool,
-  pub settings: bool,
+  pub settings: crate::settings::Grant,
+  #[serde(rename = "openUrls")]
+  pub open_urls: bool,
   pub storage: bool,
 }
 
+/// How much of the selected host directory the plugin may change. A filesystem
+/// bind exposes reads as well, so a writable grant is inherently **read-write**;
+/// a write-only, read-excluded grant is not enforceable with a bind and is
+/// rejected at admission as `Unsupported` rather than silently over-broadened.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+#[allow(clippy::upper_case_acronyms)]
+pub enum Access {
+  #[default]
+  Read,
+  Write,
+  ReadWrite,
+}
+
+impl Access {
+  /// A bind exposes the subtree with the requested write permission; there is
+  /// no write-only subset.
+  pub fn writable(self) -> bool {
+    matches!(self, Access::ReadWrite)
+  }
+}
+
+/// What the grant points at. A **file** is an exact single-file target and is
+/// bind-mounted as a file (`--ro-bind-fd`/`--bind-fd`), exposing precisely that
+/// file and nothing beside it. A **directory** is the whole subtree and is
+/// bind-mounted recursively; a bind always exposes the tree, so there is no
+/// non-recursive directory target that is enforceable, and exactness for
+/// directories is not claimed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Target {
+  #[default]
+  File,
+  Directory,
+}
+
+/// One user-selected host entry: pinned identity plus the typed access and
+/// target kind. This selection comes from the approving user, never from the
+/// plugin manifest.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ReadDirectory {
+pub struct FileSystemGrant {
   pub path: PathBuf,
   pub device: u64,
   pub inode: u64,
+  pub access: Access,
+  pub target: Target,
 }
 
-impl ReadDirectory {
-  /// This selection comes from the approving user, not the plugin manifest.
-  pub fn select(path: &Path) -> io::Result<Self> {
+impl FileSystemGrant {
+  pub fn select(path: &Path, access: Access, target: Target) -> io::Result<Self> {
+    if access == Access::Write {
+      return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "write-only host entries are unsupported: a bind also exposes reads",
+      ));
+    }
     let path = path.canonicalize()?;
-    let file = open_directory(&path)?;
+    reject_unsafe_roots(&path)?;
+    let file = match target {
+      // A single file is bound exactly; confirm the canonicalized path is a
+      // regular file so the bind is a file bind, not a directory bind.
+      Target::File => {
+        let metadata = std::fs::metadata(&path)?;
+        if !metadata.is_file() {
+          return Err(invalid("file target is not a regular file"));
+        }
+        File::open(&path)?
+      }
+      Target::Directory => open_directory(&path)?,
+    };
     let metadata = file.metadata()?;
     Ok(Self {
       path,
       device: metadata.dev(),
       inode: metadata.ino(),
+      access,
+      target,
     })
   }
 
   pub fn open(&self) -> io::Result<File> {
-    let file = open_directory(&self.path)?;
+    // Admission is authorization-independent: a grant that was constructed or
+    // deserialized with an unsupported write-only access must be refused here,
+    // not only at select(), because open() runs again at approval and at
+    // activation where the record is read back from disk.
+    if self.access == Access::Write {
+      return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "write-only host entries are unsupported: a bind also exposes reads",
+      ));
+    }
+    reject_unsafe_roots(&self.path)?;
+    let file = match self.target {
+      Target::File => {
+        let metadata = std::fs::metadata(&self.path)?;
+        if !metadata.is_file() {
+          return Err(invalid("file target is not a regular file"));
+        }
+        File::open(&self.path)?
+      }
+      Target::Directory => open_directory(&self.path)?,
+    };
     let metadata = file.metadata()?;
     if metadata.dev() != self.device || metadata.ino() != self.inode {
-      return Err(invalid("approved directory was replaced"));
+      return Err(invalid("approved grant was replaced"));
     }
     Ok(file)
   }
+}
+
+/// Refuse device, IPC, pseudo-filesystem and whole-tree roots that a directory
+/// bind would otherwise expose or that would break isolation regardless of the
+/// approving user's intent. Specific directories under these roots (for example
+/// a selected `~/Music` under `/home`) remain valid because the grant names a
+/// concrete non-special directory.
+fn reject_unsafe_roots(path: &Path) -> io::Result<()> {
+  // The grant path is already canonicalized and absolute; refuse device and
+  // kernel pseudo-filesystem roots that a bind would expose and that would
+  // break isolation (a render-device grant is the coercive exception, always
+  // via a DRM render node, never a whole /dev). A concrete directory under
+  // these roots such as a selected `~/Music` is unaffected because it does not
+  // start with a special root. `/run` and `/tmp` are deliberately *not* denied
+  // here: the selected-directory mount lands at `/grants/<name>` (never
+  // colliding with the sandbox's own /run//tmp mounts), and approving them is
+  // an explicit user choice the reviewer describes as affecting real host data.
+  if path == Path::new("/") || path.parent().is_none() {
+    return Err(invalid(
+      "directory grant must name a specific host directory",
+    ));
+  }
+  for special in ["/dev", "/proc", "/sys"] {
+    if path == Path::new(special) || path.starts_with(Path::new(special)) {
+      return Err(invalid(
+        "directory grant would expose a device or kernel tree; choose a specific data directory",
+      ));
+    }
+  }
+  Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -140,34 +406,81 @@ impl Manifest {
         ));
       }
     }
-    let requests = &manifest.sandbox.requests;
-    if requests.read.len() > 8
-      || requests.read.iter().collect::<BTreeSet<_>>().len() != requests.read.len()
-    {
-      return Err(invalid("invalid requested directory slots"));
-    }
-    for name in &requests.read {
-      validate_id(name)?;
-    }
+    validate_requests(&manifest.sandbox.requests)?;
     Ok(manifest)
   }
 }
 
 impl Grants {
   pub fn validate(&self, requests: &Requests) -> io::Result<()> {
-    if self.read.len() > 8
-      || self.network && !requests.network
-      || self.notifications && !requests.notifications
-      || self.settings && !requests.settings
-      || self.storage && !requests.storage
-      || self.media.is_some() && !requests.media
+    validate_requests(requests)?;
+    if self.network && !self.http.is_empty() {
+      return Err(invalid(
+        "raw network access cannot be combined with scoped HTTP grants",
+      ));
+    }
+    for (name, scope) in &self.http {
+      if requests
+        .http
+        .get(name)
+        .is_none_or(|ask| ask.scope != *scope)
+      {
+        return Err(invalid("HTTP grant differs from the reviewed request"));
+      }
+    }
+    self.settings.validate()?;
+    for (name, grant) in &self.exec {
+      let ask = requests
+        .exec
+        .get(name)
+        .ok_or_else(|| invalid("host executable was not requested"))?;
+      grant.validate(ask)?;
+    }
+    requests.settings.access().validate()?;
+    if self.filesystem.len() > MAX_GRANTED_DIRS
+      || self.network && !requests.network.asked()
+      || self.notifications && !requests.notifications.asked()
+      || !requests.settings.access().covers(&self.settings)
+      || self.open_urls && !requests.open_urls.asked()
+      || self.storage && !requests.storage.asked()
+      || self.media.is_some() && !requests.media.asked()
     {
       return Err(invalid("grants exceed the reviewed request"));
     }
-    for (name, directory) in &self.read {
+    for (name, directory) in &self.filesystem {
       validate_id(name)?;
-      if !requests.read.contains(name) || !safe_absolute(&directory.path) {
-        return Err(invalid("invalid read-only directory grant"));
+      // A write-only grant is not enforceable (a bind exposes reads) and is
+      // rejected rather than silently widened to read-write, whether it was
+      // built by select() or reached this validation path from a constructed
+      // or deserialized record.
+      if directory.access == Access::Write {
+        return Err(io::Error::new(
+          io::ErrorKind::Unsupported,
+          "write-only host entries are unsupported: a bind also exposes reads",
+        ));
+      }
+      let asked = requests
+        .filesystem
+        .iter()
+        .any(|ask| ask.name == *name && ask.access != Access::Write);
+      if !asked || !safe_absolute(&directory.path) {
+        return Err(invalid(
+          "directory grant exceeds or diverges from the reviewed request",
+        ));
+      }
+      // The grant must never exceed the requested access: a recursive bind
+      // exposes reads, so a writable grant is read-write and is only allowed
+      // when the request asked for writable access; a read-only grant for a
+      // read-only request is the plain case.
+      if directory.access == Access::ReadWrite
+        && !requests
+          .filesystem
+          .iter()
+          .any(|ask| ask.name == *name && ask.access == Access::ReadWrite)
+      {
+        return Err(invalid(
+          "writable grant exceeds the reviewed request; approve a read-only grant instead",
+        ));
       }
     }
     if let Some(name) = &self.media {
@@ -175,6 +488,103 @@ impl Grants {
     }
     Ok(())
   }
+
+  /// Capabilities the plugin declared mandatory but that are not granted (or
+  /// not granted to the requested access). Activation must refuse when this is
+  /// non-empty, with an actionable explanation, and never treat a missing
+  /// required grant as implicit approval.
+  pub fn required_gap(&self, requests: &Requests) -> Vec<String> {
+    let mut missing = Vec::new();
+    for (name, ask) in &requests.exec {
+      for leaf in &ask.required {
+        if self
+          .exec
+          .get(name)
+          .is_none_or(|grant| !grant.selected.contains(leaf))
+        {
+          missing.push(format!("exec:{name}:{leaf}"));
+        }
+      }
+    }
+    for (name, ask) in &requests.http {
+      if ask.required && self.http.get(name) != Some(&ask.scope) {
+        missing.push(format!("http:{name}"));
+      }
+    }
+    for (label, required, granted) in [
+      ("network", requests.network.required, self.network),
+      ("media", requests.media.required, self.media.is_some()),
+      (
+        "notifications",
+        requests.notifications.required,
+        self.notifications,
+      ),
+      (
+        "settings",
+        requests.settings.required,
+        self.settings.covers(&requests.settings.access()),
+      ),
+      ("openUrls", requests.open_urls.required, self.open_urls),
+      ("storage", requests.storage.required, self.storage),
+    ] {
+      if required && !granted {
+        missing.push(label.into());
+      }
+    }
+    for ask in &requests.filesystem {
+      if !ask.required {
+        continue;
+      }
+      let satisfied = match self.filesystem.get(&ask.name) {
+        // A required writable directory is only satisfied by a writable grant;
+        // a read-only grant for it is still a gap.
+        Some(directory) => ask.access != Access::ReadWrite || directory.access.writable(),
+        None => false,
+      };
+      if !satisfied {
+        missing.push(ask.name.clone());
+      }
+    }
+    missing
+  }
+}
+
+fn validate_requests(requests: &Requests) -> io::Result<()> {
+  if requests.exec.len() > 16 {
+    return Err(invalid("too many host executable requests"));
+  }
+  for (name, ask) in &requests.exec {
+    validate_id(name)?;
+    ask.validate()?;
+  }
+  requests.settings.access().validate()?;
+  if requests.http.len() > 32 {
+    return Err(invalid("too many named HTTP scopes"));
+  }
+  for (name, ask) in &requests.http {
+    validate_id(name)?;
+    ask.scope.validate()?;
+  }
+  let names: BTreeSet<&str> = requests
+    .filesystem
+    .iter()
+    .map(|ask| ask.name.as_str())
+    .collect();
+  if requests.filesystem.len() > MAX_GRANTED_DIRS || names.len() != requests.filesystem.len() {
+    return Err(invalid("invalid requested directory slots"));
+  }
+  for ask in &requests.filesystem {
+    validate_id(&ask.name)?;
+    // A write-only request is not enforceable (a bind exposes reads) and is
+    // rejected rather than silently widened to read-write.
+    if ask.access == Access::Write {
+      return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "write-only host directories are unsupported: a filesystem bind also exposes reads",
+      ));
+    }
+  }
+  Ok(())
 }
 
 pub(crate) fn validate_media(name: &str) -> io::Result<()> {
@@ -226,9 +636,11 @@ pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Resu
   }
   let mut file = File::open(format!("/proc/self/fd/{}", path_file.as_raw_fd()))?;
   let mut bytes = Vec::new();
-  (&mut file).take(65537).read_to_end(&mut bytes)?;
-  if bytes.len() > 65536 {
-    return Err(invalid("plugin JSON exceeds size limit"));
+  (&mut file)
+    .take(MAX_PERSISTED_BYTES as u64 + 1)
+    .read_to_end(&mut bytes)?;
+  if bytes.len() > MAX_PERSISTED_BYTES {
+    return Err(invalid("persisted JSON exceeds size limit"));
   }
   serde_json::from_slice(&bytes).map_err(|_| invalid("invalid plugin JSON"))
 }
@@ -320,21 +732,59 @@ mod tests {
   #[test]
   fn requests_never_become_implicit_grants() {
     let requests = Requests {
-      read: vec!["music".into()],
-      network: true,
-      media: true,
-      notifications: true,
-      settings: true,
-      storage: true,
+      filesystem: vec![FileSystemRequest::optional("music")],
+      http: BTreeMap::new(),
+      exec: BTreeMap::new(),
+      network: Request {
+        asked: true,
+        required: true,
+      },
+      media: Request {
+        asked: true,
+        required: true,
+      },
+      notifications: Request {
+        asked: true,
+        required: true,
+      },
+      settings: crate::settings::Ask {
+        read: ["volume".into()].into(),
+        write: ["volume".into()].into(),
+        required: true,
+      },
+      open_urls: Request {
+        asked: true,
+        required: true,
+      },
+      storage: Request {
+        asked: true,
+        required: true,
+      },
     };
     let grants = Grants::default();
     grants.validate(&requests).unwrap();
-    assert!(!grants.network && grants.read.is_empty() && grants.media.is_none());
-    assert!(!grants.notifications && !grants.settings && !grants.storage);
-    assert!(!serde_json::from_str::<Grants>("{}").unwrap().settings);
+    assert!(!grants.network && grants.filesystem.is_empty() && grants.media.is_none());
+    assert!(
+      !grants.notifications && !grants.settings.can_write() && !grants.open_urls && !grants.storage
+    );
     assert!(
       Grants {
-        settings: true,
+        open_urls: true,
+        ..Default::default()
+      }
+      .validate(&Requests::default())
+      .is_err()
+    );
+    assert_eq!(
+      serde_json::from_str::<Grants>("{}").unwrap().settings,
+      crate::settings::Grant::default()
+    );
+    assert!(
+      Grants {
+        settings: crate::settings::Grant {
+          write: ["volume".into()].into(),
+          ..Default::default()
+        },
         ..Default::default()
       }
       .validate(&Requests::default())
@@ -377,7 +827,7 @@ mod tests {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("selected");
     fs::create_dir(&path).unwrap();
-    let selected = ReadDirectory::select(&path).unwrap();
+    let selected = FileSystemGrant::select(&path, Access::Read, Target::Directory).unwrap();
     selected.open().unwrap();
     fs::rename(&path, root.path().join("old")).unwrap();
     fs::create_dir(&path).unwrap();
@@ -388,5 +838,177 @@ mod tests {
     for id in ["../escape", "--unit", "*", "a/b", "a\n"] {
       assert!(validate_id(id).is_err());
     }
+  }
+
+  #[test]
+  fn write_only_is_rejected_but_file_and_directory_targets_are_supported() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("data")).unwrap();
+    fs::write(root.path().join("data").join("file.txt"), "data").unwrap();
+    // A write-only target is not enforceable: a bind also exposes reads.
+    assert_eq!(
+      FileSystemGrant::select(&root.path().join("data"), Access::Write, Target::Directory)
+        .unwrap_err()
+        .kind(),
+      io::ErrorKind::Unsupported
+    );
+    // A single file is an exact, enforceable target.
+    let file = FileSystemGrant::select(
+      &root.path().join("data").join("file.txt"),
+      Access::Read,
+      Target::File,
+    )
+    .unwrap();
+    assert_eq!(file.target, Target::File);
+    // A directory target is the whole subtree.
+    let directory = FileSystemGrant::select(
+      &root.path().join("data"),
+      Access::ReadWrite,
+      Target::Directory,
+    )
+    .unwrap();
+    assert_eq!(directory.target, Target::Directory);
+    // A file target that is actually a directory is rejected.
+    assert!(
+      FileSystemGrant::select(&root.path().join("data"), Access::Read, Target::File).is_err()
+    );
+    // Round-trip preserves the target kind.
+    let bytes = serde_json::to_vec(&file).unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("file"));
+    assert!(
+      serde_json::from_slice::<FileSystemGrant>(&bytes)
+        .unwrap()
+        .target
+        == Target::File
+    );
+  }
+
+  #[test]
+  fn constructed_grant_admission_refuses_unsupported_write_and_file_type_mismatch() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("data")).unwrap();
+    fs::write(root.path().join("data").join("file.txt"), "data").unwrap();
+    // A write-only grant that bypassed select() (e.g. deserialized from a
+    // record) is refused at the admission open() path and at Grants::validate().
+    let write = FileSystemGrant {
+      path: root.path().join("data"),
+      device: 1,
+      inode: 2,
+      access: Access::Write,
+      target: Target::Directory,
+    };
+    assert_eq!(write.open().unwrap_err().kind(), io::ErrorKind::Unsupported);
+    let mut grants = Grants::default();
+    grants.filesystem.insert("shared".into(), write);
+    let requests = Requests {
+      filesystem: vec![FileSystemRequest {
+        name: "shared".into(),
+        access: Access::ReadWrite,
+        required: false,
+      }],
+      ..Default::default()
+    };
+    assert_eq!(
+      grants.validate(&requests).unwrap_err().kind(),
+      io::ErrorKind::Unsupported
+    );
+    // A file-target grant pointing at a directory is refused at open() too;
+    // the bind would be a directory bind, not the exact file the grant names.
+    let dir_as_file = FileSystemGrant {
+      path: root.path().join("data"),
+      device: 1,
+      inode: 3,
+      access: Access::Read,
+      target: Target::File,
+    };
+    let error = dir_as_file.open().unwrap_err().to_string();
+    assert!(error.contains("not a regular file"), "{error}");
+  }
+
+  #[test]
+  fn device_and_ipc_roots_are_never_granted() {
+    for unsafe_path in ["/dev", "/dev/dri", "/proc", "/proc/self", "/sys", "/"] {
+      assert_eq!(
+        FileSystemGrant::select(Path::new(unsafe_path), Access::Read, Target::Directory)
+          .unwrap_err()
+          .kind(),
+        io::ErrorKind::InvalidData
+      );
+    }
+  }
+
+  #[test]
+  fn grants_respect_the_descriptor_budget() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("data")).unwrap();
+    let requests = Requests {
+      filesystem: (0..MAX_GRANTED_DIRS + 1)
+        .map(|i| FileSystemRequest::optional(format!("dir{i:03}")))
+        .collect(),
+      ..Default::default()
+    };
+    assert!(validate_requests(&requests).is_err());
+    let mut grants = Grants::default();
+    for request in &requests.filesystem {
+      grants.filesystem.insert(
+        request.name.clone(),
+        FileSystemGrant::select(&root.path().join("data"), Access::Read, Target::Directory)
+          .unwrap(),
+      );
+    }
+    assert!(grants.validate(&requests).is_err());
+    let _ = root;
+  }
+
+  #[test]
+  fn strict_request_deserialization_rejects_unknown_fields() {
+    assert!(
+      serde_json::from_str::<Requests>(r#"{"settings":{"required":true,"junk":1}}"#).is_err()
+    );
+    assert!(
+      serde_json::from_str::<Requests>(r#"{"settings":{"required":true,"required":false}}"#)
+        .is_err()
+    );
+    assert!(serde_json::from_str::<Requests>(r#"{"filesystem":[{"name":"x","junk":1}]}"#).is_err());
+    assert!(serde_json::from_str::<Requests>(r#"{"filesystem":[{"required":true}]}"#).is_err());
+    let requests = serde_json::from_str::<Requests>(
+      r#"{"filesystem":[{"name":"notes","required":true}, {"name":"music"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(requests.filesystem.len(), 2);
+    assert!(requests.filesystem[0].required);
+    assert_eq!(requests.filesystem[0].name, "notes");
+    assert!(!requests.filesystem[1].required);
+    // Round trip preserves requiredness in the canonical object schema.
+    let bytes = serde_json::to_vec(&requests).unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("\"music\""));
+  }
+
+  #[test]
+  fn directory_required_and_optional_are_both_blocking() {
+    // An optional directory the user declined does not block startup.
+    let requests = Requests {
+      filesystem: vec![FileSystemRequest::optional("notes")],
+      ..Default::default()
+    };
+    assert!(Grants::default().required_gap(&requests).is_empty());
+    // A required directory the user declined blocks activation by name.
+    let requests = Requests {
+      filesystem: vec![FileSystemRequest::required("notes")],
+      ..Default::default()
+    };
+    assert_eq!(Grants::default().required_gap(&requests), vec!["notes"]);
+    // A required writable directory is only satisfied by a writable grant.
+    let requests = Requests {
+      filesystem: vec![FileSystemRequest::write("notes", true)],
+      ..Default::default()
+    };
+    assert!(
+      Grants::default()
+        .required_gap(&requests)
+        .iter()
+        .any(|x| x == "notes")
+    );
+    assert!(serde_json::from_str::<Requests>(r#"{"filesystem":{"notes":true}}"#).is_err());
   }
 }

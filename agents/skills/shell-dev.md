@@ -11,6 +11,7 @@ Run `omarchy-restart-shell` after making changes to QML files.
 
 ## Plugin contract
 
+- For sandboxed third-party plugins, read [the authoring reference](../../docs/sandboxed-plugin-authoring.md) before choosing storage/asset paths, declaring manifest requests or calling runtime helpers. It distinguishes sandbox-local paths from host-command paths and documents the current schema; do not infer capabilities from the trusted in-process API.
 - First-party plugins live directly under `shell/plugins/` or one category
   level deeper, such as `shell/plugins/panels/weather/`. First-party bar-only
   widgets may use adjacent `*.manifest.json` files. Third-party plugins live

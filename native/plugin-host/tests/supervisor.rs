@@ -5,7 +5,10 @@ use std::{
   io::{self, BufRead, BufReader, Read, Write},
   os::{
     fd::{AsRawFd, FromRawFd, OwnedFd},
-    unix::net::{UnixListener, UnixStream},
+    unix::{
+      fs::PermissionsExt,
+      net::{UnixListener, UnixStream},
+    },
   },
   path::Path,
   process::Command,
@@ -32,6 +35,10 @@ fn controller_child() {
     .set_read_timeout(Some(Duration::from_millis(200)))
     .unwrap();
   let mut children = vec![Command::new("/usr/bin/sleep").arg("30").spawn().unwrap()];
+  let runtime = std::env::var_os("RUNTIME_DIRECTORY").unwrap();
+  let assets = Path::new(&runtime).join("assets");
+  fs::create_dir(&assets).unwrap();
+  fs::write(assets.join("fixture"), "session asset").unwrap();
   writeln!(stream, "READY").unwrap();
   let deadline = Instant::now() + Duration::from_secs(15);
   while Instant::now() < deadline {
@@ -146,6 +153,16 @@ fn transient_units_enforce_limits_and_reap_descendants() {
     let mut ready = String::new();
     stream.read_line(&mut ready).unwrap();
     assert_eq!(ready, "READY\n");
+    let runtime = Path::new(&std::env::var_os("XDG_RUNTIME_DIR").unwrap())
+      .join(unit.name().strip_suffix(".service").unwrap());
+    assert_eq!(
+      fs::metadata(&runtime).unwrap().permissions().mode() & 0o777,
+      0o700
+    );
+    assert_eq!(
+      fs::read(runtime.join("assets/fixture")).unwrap(),
+      b"session asset"
+    );
     let processes = process_handles(&unit);
     assert!(processes.len() >= 2, "test must include a descendant");
     match mode {
@@ -187,6 +204,7 @@ fn transient_units_enforce_limits_and_reap_descendants() {
       );
     }
     unit.stop().unwrap();
+    assert!(!runtime.exists(), "service teardown retained staged assets");
     println!("verified lifecycle mode {}", char::from(mode));
   }
 }

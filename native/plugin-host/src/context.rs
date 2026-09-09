@@ -2,24 +2,25 @@
 //! session, never from this payload. Large snapshots use one sealed descriptor
 //! so the control socket retains its small, fixed record/queue budget.
 use serde::{Deserialize, Serialize};
-use std::{
-  collections::BTreeMap,
-  fs::File,
-  io::{self, Write},
-  os::{fd::OwnedFd, unix::fs::FileExt},
-};
+use std::{collections::BTreeMap, fs::File, io, os::fd::OwnedFd};
 
 const MAX_BYTES: usize = 65536;
-const SEALS: rustix::fs::SealFlags = rustix::fs::SealFlags::SEAL
-  .union(rustix::fs::SealFlags::SHRINK)
-  .union(rustix::fs::SealFlags::GROW)
-  .union(rustix::fs::SealFlags::WRITE);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UiContext {
   pub settings: serde_json::Map<String, serde_json::Value>,
   pub theme: Option<Theme>,
+  /// Desired own-panel state. Repeated context updates do not replay an action.
+  pub panel: Option<PanelCommand>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PanelCommand {
+  pub serial: u32,
+  pub open: bool,
+  pub payload: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,7 +42,13 @@ impl UiContext {
     if bytes.len() > MAX_BYTES {
       return Err(io::Error::other("UI context exceeds 64 KiB"));
     }
-    Ok(serde_json::from_slice(bytes)?)
+    let context: Self = serde_json::from_slice(bytes)?;
+    if context.panel.as_ref().is_some_and(|panel| {
+      panel.serial == 0 || panel.payload.len() > 4096 || (!panel.open && !panel.payload.is_empty())
+    }) {
+      return Err(io::Error::other("invalid own-panel command"));
+    }
+    Ok(context)
   }
 
   fn bytes(&self) -> io::Result<Vec<u8>> {
@@ -51,35 +58,18 @@ impl UiContext {
   }
 
   pub(crate) fn seal(&self) -> io::Result<File> {
-    let mut file = File::from(rustix::fs::memfd_create(
-      "plugin-ui",
-      rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING,
-    )?);
-    file.write_all(&self.bytes()?)?;
-    rustix::fs::fcntl_add_seals(&file, SEALS)?;
-    Ok(file)
+    crate::payload::seal(&self.bytes()?, MAX_BYTES)
   }
 
   pub(crate) fn unseal(fd: OwnedFd) -> io::Result<Self> {
-    let file = File::from(fd);
-    let metadata = file.metadata()?;
-    if !metadata.is_file()
-      || metadata.len() > MAX_BYTES as u64
-      || !rustix::fs::fcntl_get_seals(&file)?.contains(SEALS)
-    {
-      return Err(io::Error::other(
-        "UI context requires a bounded sealed file",
-      ));
-    }
-    let mut bytes = vec![0; metadata.len() as usize];
-    file.read_exact_at(&mut bytes, 0)?;
-    Self::parse(&bytes)
+    Self::parse(&crate::payload::read(fd, MAX_BYTES)?)
   }
 
   /// Atomic replacement keeps FileView watchers live; only this private
   /// directory is mounted read-only, never the shell's configuration tree.
   #[cfg(any(feature = "graphics", test))]
   pub(crate) fn publish(&self, directory: &std::path::Path) -> io::Result<()> {
+    use std::io::Write;
     let mut file = tempfile::NamedTempFile::new_in(directory)?;
     file.write_all(&self.bytes()?)?;
     file.persist(directory.join("state.json"))?;
@@ -90,6 +80,34 @@ impl UiContext {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn panel_commands_are_optional_bounded_and_survive_transport() {
+    let mut context = UiContext::parse(br#"{"settings":{},"theme":null}"#).unwrap();
+    assert_eq!(context.panel, None);
+    context.panel = Some(PanelCommand {
+      serial: u32::MAX,
+      open: true,
+      payload: "value".into(),
+    });
+    assert_eq!(
+      UiContext::unseal(context.seal().unwrap().into()).unwrap(),
+      context
+    );
+    for value in ["0", "-1", "1.5", "4294967296", "null", "true"] {
+      assert!(
+        UiContext::parse(
+          format!(r#"{{"settings":{{}},"theme":null,"panel":{{"serial":{value},"open":false,"payload":""}}}}"#).as_bytes()
+        )
+        .is_err()
+      );
+    }
+    context.panel.as_mut().unwrap().payload = "x".repeat(4097);
+    assert!(context.seal().is_err());
+    context.panel.as_mut().unwrap().payload = "unexpected".into();
+    context.panel.as_mut().unwrap().open = false;
+    assert!(context.seal().is_err());
+  }
 
   #[test]
   fn snapshots_are_bounded_sealed_typed_and_atomically_replaced() {

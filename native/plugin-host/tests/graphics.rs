@@ -13,7 +13,7 @@ use smithay::backend::{
     dmabuf::{Dmabuf, DmabufFlags},
   },
   egl::{EGLContext, EGLDevice, EGLDisplay},
-  renderer::{ExportMem, ImportDma, gles::GlesRenderer},
+  renderer::{ExportMem, ImportDma, Renderer, gles::GlesRenderer},
 };
 use std::{
   fs,
@@ -182,6 +182,10 @@ ShellRoot {
           .chunks_exact(4)
           .filter(|pixel| pixel[..3] == [0x8a, 0x2b, 0xe2])
           .count();
+        let ready = bytes
+          .chunks_exact(4)
+          .filter(|pixel| pixel[..3] == [0xff, 0x33, 0x00])
+          .count() > 500;
         if green > 500 && purple > 5000 {
           if let Some(path) = std::env::var_os("OMARCHY_TEST_CAPTURE") {
             let mut file = std::io::BufWriter::new(fs::File::create(path).unwrap());
@@ -192,9 +196,13 @@ ShellRoot {
           }
           verified = true;
         }
+        drop(mapping);
+        drop(texture);
+        renderer.cleanup_texture_cache().unwrap();
         frames.presented(serial).unwrap();
         Control::Presented(serial).send(&channel).unwrap();
-        if !typed && start.elapsed() > Duration::from_millis(800) {
+        // Startup time is not readiness; wait for the actual target pixels.
+        if !typed && ready {
           for kind in [0, 1] {
             Control::Input {
               kind,
@@ -217,7 +225,7 @@ ShellRoot {
           }
           typed = true;
         }
-        if !clicked && start.elapsed() > Duration::from_millis(1300) {
+        if !clicked && green > 500 {
           for kind in [0, 1] {
             Control::Input {
               kind,

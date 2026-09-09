@@ -11,11 +11,16 @@ ShellRoot {
   id: root
   property var manifest: null
   property var context: null
+  property var grants: null
   property bool loaded: false
   property string pendingSettings: ""
-  property string settingsError: ""
+  property string requestError: ""
   readonly property var panel: overlayLoader.item || widgetLoader.item
   readonly property bool opened: panel && panel.opened === true
+  property int panelSerial: 0
+  property string sentPanelState: ""
+  readonly property string panelState: panelSerial + ":" + opened
+  onPanelStateChanged: Qt.callLater(reportPanelState)
   readonly property string section: manifest && manifest.barWidget
     ? (manifest.barWidget.defaultSection || "center") : "center"
 
@@ -37,13 +42,39 @@ ShellRoot {
   }
 
   function loadEntries() {
-    if (loaded || !manifest || !context) return
+    if (loaded || !manifest || !context || !grants) return
     loaded = true
     var entries = manifest.entryPoints
     if (entries.service) serviceLoader.source = entryUrl(entries.service)
     if (entries.overlay) overlayLoader.source = entryUrl(entries.overlay)
     widgetLoader.setSource(entryUrl(entries.barWidget), { bar: barApi, settings: JSON.parse(JSON.stringify(context.settings)) })
+    Qt.callLater(applyPanel)
+    Qt.callLater(reportPanelState)
   }
+
+  function applyPanel() {
+    var command = context ? context.panel : null
+    if (!loaded || !panel || !command || command.serial === panelSerial) return
+    panelSerial = command.serial
+    if (command.open) shellApi._summon(shellApi.pluginId, command.payload)
+    else shellApi._hide(shellApi.pluginId)
+  }
+
+  function reportPanelState() {
+    if (!loaded || panelStateProcess.running || sentPanelState === panelState) return
+    sentPanelState = panelState
+    panelStateProcess.command = ["/bootstrap", "--panel-state", String(panelSerial), String(opened)]
+    panelStateProcess.running = true
+  }
+
+  Process {
+    id: panelStateProcess
+    onExited: function(code) {
+      if (code !== 0) root.sentPanelState = ""
+      panelStateRetry.restart()
+    }
+  }
+  Timer { id: panelStateRetry; interval: 100; onTriggered: root.reportPanelState() }
 
   FileView {
     path: "/context/state.json"
@@ -66,7 +97,14 @@ ShellRoot {
       }
       if (widgetLoader.item) widgetLoader.item.settings = JSON.parse(JSON.stringify(root.context.settings))
       root.loadEntries()
+      root.applyPanel()
     }
+    onLoadFailed: Qt.quit()
+  }
+
+  FileView {
+    path: "/run/plugin/grants.json"
+    onLoaded: { root.grants = JSON.parse(text()); root.loadEntries() }
     onLoadFailed: Qt.quit()
   }
 
@@ -97,7 +135,19 @@ ShellRoot {
     _isOpen: id => id === pluginId && root.opened
     _updateSettings: (id, settings) => {
       if (id !== pluginId || !settings || typeof settings !== "object" || Array.isArray(settings)) return false
-      root.pendingSettings = JSON.stringify(settings)
+      var patch = {}
+      var writable = root.grants.settings.write
+      for (var key of Object.keys(settings)) {
+        if (key === "id" && settings[key] === pluginId) continue
+        if (writable.indexOf(key) !== -1) patch[key] = settings[key]
+        else if (JSON.stringify(settings[key]) !== JSON.stringify(root.context.settings[key])) {
+          root.requestError = "Setting is not writable: " + key
+          if (widgetLoader.item) widgetLoader.item.settings = JSON.parse(JSON.stringify(root.context.settings))
+          errorTimer.restart()
+          return false
+        }
+      }
+      root.pendingSettings = JSON.stringify(patch)
       settingsTimer.restart()
       return true
     }
@@ -110,7 +160,7 @@ ShellRoot {
       if (settingsProcess.running || !root.pendingSettings) return
       settingsProcess.command = ["/bootstrap", "--settings", root.pendingSettings]
       root.pendingSettings = ""
-      root.settingsError = ""
+      root.requestError = ""
       settingsProcess.running = true
     }
   }
@@ -118,16 +168,23 @@ ShellRoot {
     id: settingsProcess
     onExited: function(code) {
       if (code !== 0) {
-        root.settingsError = "Settings were not saved. Review plugin access or retry."
+        root.requestError = "Settings were not saved. Review plugin access or retry."
         if (widgetLoader.item) widgetLoader.item.settings = JSON.parse(JSON.stringify(root.context.settings))
         errorTimer.restart()
       }
       if (root.pendingSettings) settingsTimer.restart()
     }
   }
-  Timer { id: errorTimer; interval: 5000; onTriggered: root.settingsError = "" }
+  IpcHandler {
+    target: "plugin-runtime"
+    function linkFailed(): void {
+      root.requestError = "Link could not be opened. Review plugin access or retry."
+      errorTimer.restart()
+    }
+  }
+  Timer { id: errorTimer; interval: 5000; onTriggered: root.requestError = "" }
   PanelWindow {
-    visible: root.settingsError !== ""
+    visible: root.requestError !== ""
     anchors { bottom: true; right: true }
     margins { bottom: Style.gapsOut; right: Style.gapsOut }
     implicitWidth: Math.min(Style.space(340), screen ? screen.width - 2 * Style.gapsOut : 340)
@@ -146,7 +203,7 @@ ShellRoot {
         id: saveError
         anchors.centerIn: parent
         width: parent.width - 2 * Style.spacing.popupPadding
-        text: root.settingsError
+        text: root.requestError
         color: Color.popups.text
         font.family: Style.font.family
         font.pixelSize: Style.font.body

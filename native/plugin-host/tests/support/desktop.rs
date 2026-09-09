@@ -12,7 +12,7 @@ use smithay::backend::{
     dmabuf::{Dmabuf, DmabufFlags},
   },
   egl::{EGLContext, EGLDevice, EGLDisplay},
-  renderer::{ExportMem, ImportDma, gles::GlesRenderer},
+  renderer::{ExportMem, ImportDma, Renderer, gles::GlesRenderer},
 };
 use std::{
   ffi::OsStr,
@@ -228,6 +228,11 @@ impl Desktop {
             pixels: self.renderer.map_texture(&mapping).unwrap().to_vec(),
             size: self.pixels,
           });
+          // Smithay defers GPU deletion until renderer cleanup. This renderer
+          // only reads back textures, so no render/finish call drains it for us.
+          drop(mapping);
+          drop(texture);
+          self.renderer.cleanup_texture_cache().unwrap();
           self.graphics.presented(serial).unwrap();
         }
         Event::Mask { regions, .. } => self.last_mask = regions,

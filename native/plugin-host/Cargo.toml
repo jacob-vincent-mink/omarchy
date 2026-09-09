@@ -17,7 +17,10 @@ rustix = { version = "1.1.4", features = ["net", "fs"] }
 sha2 = "0.10.9"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+regex = { version = "=1.13.1", default-features = false, features = ["std", "perf"] }
 tempfile = "3.27.0"
+url = "2.5.8"
+ureq = { version = "=3.3.0", default-features = false, features = ["rustls"] }
 smithay = { version = "=0.7.0", optional = true, default-features = false, features = ["wayland_frontend", "backend_egl", "backend_gbm", "renderer_gl", "desktop"] }
 cxx = { version = "1.0", optional = true }
 

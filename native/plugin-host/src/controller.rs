@@ -14,6 +14,9 @@ use std::{
 /// Version 1 control records are 16, 24 or 28 bytes, little-endian. No plugin id
 /// is accepted here: identity belongs to the launched unit and admitted channel.
 #[derive(Debug, PartialEq, Eq)]
+// Control queues are bounded; keep snapshots inline instead of allocating
+// another box for each context update.
+#[allow(clippy::large_enum_variant)]
 pub enum Control {
   Hello,
   Ping(u64),
@@ -29,6 +32,10 @@ pub enum Control {
   },
   Scroll(Scroll),
   Context(UiContext),
+  PanelState {
+    serial: u32,
+    open: bool,
+  },
 }
 
 /// Host-local position and Qt-signed deltas. Source 0 is wheel (120 units per
@@ -75,7 +82,7 @@ impl Approval {
       unit,
     })
   }
-  fn check(&self) -> io::Result<()> {
+  pub(crate) fn check(&self) -> io::Result<()> {
     self
       .store
       .with_authority(&self.id, self.epoch, &self.unit, |_| Ok(()))
@@ -83,19 +90,22 @@ impl Approval {
   pub(crate) fn with_request<T>(
     &self,
     kind: crate::requests::Kind,
-    effect: impl FnOnce(&str) -> io::Result<T>,
+    effect: impl FnOnce(&str, &crate::grants::Grants) -> io::Result<T>,
   ) -> io::Result<T> {
     self
       .store
       .with_authority(&self.id, self.epoch, &self.unit, |record| {
         let granted = match kind {
           crate::requests::Kind::Notification => record.grants.notifications,
-          crate::requests::Kind::Settings => record.grants.settings,
+          crate::requests::Kind::Settings => record.grants.settings.can_write(),
+          crate::requests::Kind::OpenUrl => record.grants.open_urls,
+          crate::requests::Kind::Http => !record.grants.http.is_empty(),
+          crate::requests::Kind::Exec => !record.grants.exec.is_empty(),
         };
         if !granted {
           return Err(invalid("host request grant is not current"));
         }
-        effect(&self.id)
+        effect(&self.id, &record.grants)
       })
   }
 }
@@ -138,6 +148,7 @@ impl Control {
       Self::Pong(serial) => (3, *serial),
       Self::Stop => (4, 0),
       Self::Presented(serial) => (6, *serial),
+      Self::PanelState { serial, open } => (10, u64::from(*serial) | (u64::from(*open) << 32)),
       Self::Configure(_) | Self::Input { .. } | Self::Scroll(_) | Self::Context(_) => {
         unreachable!()
       }
@@ -204,6 +215,10 @@ impl Control {
       (3, 1..) => Ok(Self::Pong(serial)),
       (4, 0) => Ok(Self::Stop),
       (6, 1..) => Ok(Self::Presented(serial)),
+      (10, value) if value >> 32 <= 1 => Ok(Self::PanelState {
+        serial: value as u32,
+        open: value >> 32 == 1,
+      }),
       _ => Err(invalid("unknown control record")),
     }
   }
@@ -285,13 +300,27 @@ pub fn run(path: &Path, approval: Option<Approval>) -> io::Result<()> {
           )?);
         }
         #[cfg(feature = "graphics")]
-        Control::Context(next) => {
-          approval
+        Control::Context(mut next) => {
+          let approval = approval
             .as_ref()
-            .ok_or_else(|| invalid("UI context requires admission"))?
-            .check()?;
+            .ok_or_else(|| invalid("UI context requires admission"))?;
+          approval.store.with_authority(
+            &approval.id,
+            approval.epoch,
+            &approval.unit,
+            |record| {
+              record.grants.settings.filter(&mut next.settings);
+              Ok(())
+            },
+          )?;
           if let Some(graphics) = &graphics {
             next.publish(&graphics._runtime.path().join("context"))?;
+          }
+          if next.panel != context.panel
+            && next.panel.as_ref().is_some_and(|panel| panel.open)
+            && let Some(graphics) = &mut graphics
+          {
+            graphics.display.activate();
           }
           context = next;
         }
@@ -375,13 +404,18 @@ impl RunningGraphics {
     approval
       .store
       .with_authority(&approval.id, approval.epoch, &approval.unit, |record| {
+        let managed_runtime = std::env::var_os("RUNTIME_DIRECTORY")
+          .ok_or_else(|| invalid("controller runtime directory is unavailable"))?;
+        crate::revision::require_private_directory(Path::new(&managed_runtime))?;
         let runtime = tempfile::Builder::new()
           .prefix("omarchy-display-")
           .permissions(std::fs::Permissions::from_mode(0o700))
-          .tempdir()?;
+          .tempdir_in(managed_runtime)?;
         let path = runtime.path().join("wayland");
         let context_path = runtime.path().join("context");
         std::fs::create_dir(&context_path)?;
+        let mut context = context.clone();
+        record.grants.settings.filter(&mut context.settings);
         context.publish(&context_path)?;
         let context_directory = File::open(context_path)?;
         let mut display =
@@ -425,11 +459,61 @@ impl RunningGraphics {
             crate::media::MediaProxy::start(&address, runtime.path(), name, Limits::default())
           })
           .transpose()?;
-        let requests = if record.grants.notifications || record.grants.settings {
-          Some(crate::requests::Broker::start(runtime.path())?)
+        // Resolve staged assets before creating the broker that consumes them.
+        let plugin_path = if record.grants.exec.is_empty() {
+          None
+        } else {
+          Some(
+            crate::worker::stage_plugin_assets(
+              &approval.store.revisions().join(&record.revision),
+              &record.revision,
+              runtime.path(),
+            )?
+            .into_os_string()
+            .into_string()
+            .map_err(|_| invalid("staged plugin path is not UTF-8"))?,
+          )
+        };
+        // Admitted plugin-path directories: assets when exec is granted, data
+        // when storage is granted. Each drives both the sandbox environment
+        // variable and the exec broker's `$...` token resolution.
+        let mut paths = Vec::new();
+        if let Some(path) = &plugin_path {
+          paths.push(crate::exec_policy::PluginDir::assets(path.clone()));
+        }
+        if record.grants.storage {
+          let data_path = crate::worker::storage_directory_path(&approval.id)?
+            .into_os_string()
+            .into_string()
+            .map_err(|_| invalid("staged data path is not UTF-8"))?;
+          paths.push(crate::exec_policy::PluginDir::data(data_path));
+        }
+        let requests = if worker_runtime.is_some()
+          || record.grants.notifications
+          || !record.grants.http.is_empty()
+          || !record.grants.exec.is_empty()
+          || record.grants.settings.can_write()
+          || record.grants.open_urls
+        {
+          Some(crate::requests::Broker::start(
+            runtime.path(),
+            &std::env::current_exe()?,
+            paths.clone(),
+          )?)
         } else {
           None
         };
+        // Runtime-readable view of the *admitted* grants, authored here from the
+        // controller's own record (never plugin metadata) so a plugin can adapt
+        // to declined optional access. It is mounted read-only into the sandbox.
+        let grants_json_path = runtime.path().join("grants.json");
+        std::fs::write(&grants_json_path, serde_json::to_vec(&record.grants)?)?;
+        let grants_json = File::open(&grants_json_path)?;
+        let storage = record
+          .grants
+          .storage
+          .then(|| crate::worker::storage_directory(&approval.id))
+          .transpose()?;
         let child = crate::worker::spawn(
           &bootstrap,
           &bundle,
@@ -443,6 +527,9 @@ impl RunningGraphics {
             requests: requests.as_ref(),
             runtime: worker_runtime.as_ref(),
             context: worker_runtime.as_ref().map(|_| &context_directory),
+            grants_json: Some(&grants_json),
+            storage: storage.as_ref(),
+            paths,
           },
         )?;
         let fd = child
@@ -452,6 +539,9 @@ impl RunningGraphics {
           .as_raw_fd();
         if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
           return Err(io::Error::last_os_error());
+        }
+        if context.panel.as_ref().is_some_and(|panel| panel.open) {
+          display.activate();
         }
         display.describe(channel).map_err(graphics_error)?;
         Ok(Self {
@@ -471,6 +561,9 @@ impl RunningGraphics {
     }
     if let Some(requests) = &mut self.requests {
       requests.dispatch(approval)?;
+      if let Some(state) = requests.panel_state.take() {
+        state.send(channel)?;
+      }
     }
     let mut bytes = [0u8; 4096];
     if let Some(log) = &mut self.child.stderr {
@@ -513,6 +606,30 @@ fn invalid(message: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn panel_state_is_one_exact_descriptor_free_record() {
+    let (sender, receiver) = Channel::pair().unwrap();
+    for serial in [0, 1, u32::MAX] {
+      for open in [false, true] {
+        let state = Control::PanelState { serial, open };
+        state.send(&sender).unwrap();
+        let packet = receiver.receive().unwrap();
+        assert_eq!(packet.bytes.len(), 16);
+        assert!(packet.fds.is_empty());
+        let mut invalid = packet.bytes.clone();
+        assert_eq!(Control::decode(packet).unwrap(), state);
+        invalid[12] = 2;
+        assert!(
+          Control::decode(Packet {
+            bytes: invalid,
+            fds: vec![]
+          })
+          .is_err()
+        );
+      }
+    }
+  }
 
   #[test]
   fn context_uses_exact_record_and_one_immutable_descriptor() {

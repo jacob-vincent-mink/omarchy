@@ -3,7 +3,7 @@
 mod media_widget;
 mod support;
 use omarchy_plugin_host::{
-  grants::{Grants, ReadDirectory},
+  grants::{Access, FileSystemGrant, Grants, Target},
   media::MediaProxy,
   supervisor::{Limits, Unit},
   worker,
@@ -181,12 +181,14 @@ fn media_controller_child() {
     media: Some(SELECTED.into()),
     ..Grants::default()
   };
-  grants.read.insert(
+  grants.filesystem.insert(
     "bus".into(),
-    ReadDirectory::select(
+    FileSystemGrant::select(
       Path::new(address.strip_prefix("unix:path=").unwrap())
         .parent()
         .unwrap(),
+      Access::Read,
+      Target::Directory,
     )
     .unwrap(),
   );
@@ -208,6 +210,9 @@ fn media_controller_child() {
         requests: None,
         runtime: None,
         context: None,
+        grants_json: None,
+        storage: None,
+        paths: vec![],
       },
     )
     .unwrap(),
@@ -337,7 +342,7 @@ fn admitted_media_widget_uses_native_mpris_and_loses_access_on_revocation() {
       dmabuf::{Dmabuf, DmabufFlags},
     },
     egl::{EGLContext, EGLDevice, EGLDisplay},
-    renderer::{ExportMem, ImportDma, gles::GlesRenderer},
+    renderer::{ExportMem, ImportDma, Renderer, gles::GlesRenderer},
   };
   let Some(player) = std::env::var_os("OMARCHY_TEST_MEDIA_PLAYER") else {
     return;
@@ -582,6 +587,9 @@ fn admitted_media_widget_uses_native_mpris_and_loses_access_on_revocation() {
             file.write_all(&pixel[..3]).unwrap();
           }
         }
+        drop(mapping);
+        drop(texture);
+        renderer.cleanup_texture_cache().unwrap();
         if let Err(error) = session.send(Control::Presented(serial)) {
           failure = error.to_string();
           break;
