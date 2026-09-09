@@ -6,6 +6,8 @@ Ward's product scope is third-party plugins distributed through the Omarchy plug
 
 Ward's source and tests use synthetic plugins and generic resource fixtures, including for compatibility adapters. Concrete third-party plugin trials are temporary external experiments, not new test harnesses in Omarchy or a plugin repository. Keep their build artifacts outside Ward's target directory and the reviewed plugin bundle. First-party plugins are not sandbox-port targets.
 
+For process boundaries, rendering/input dataflow and resource paths, see the [architecture reference and diagram](ward-architecture.md).
+
 ## Start here
 
 A plugin is a Git repository containing `manifest.json`, QML and its scripts/assets. Add `sandbox` to select isolation. Review snapshots the repository; approval binds that revision. Later checkout edits do not change approved code. There are no install scripts, build hooks, post-approval hooks or manifest-driven data-copy hooks. Include already-built assets before review.
