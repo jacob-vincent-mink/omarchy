@@ -18,6 +18,7 @@ use std::{
 pub enum Update {
   Ready,
   Presentation(Event),
+  PanelState { serial: u32, open: bool },
   Failed(String),
 }
 
@@ -241,6 +242,9 @@ fn dispatch(
           Control::Pong(serial) if ready && serial > pong && serial <= ping => {
             pong = serial;
             deadline = now + Duration::from_secs(3);
+          }
+          Control::PanelState { serial, open } if ready => {
+            emit(updates, Update::PanelState { serial, open })?;
           }
           _ => return Err(io::Error::other("unexpected controller control record")),
         }

@@ -51,7 +51,7 @@ try {
   }
   assertEqual(scope.saveSandboxSettings('other', '{}'), 'plugin is not active', 'host rejects entries without the sandbox marker')
   assertEqual(scope.saveSandboxSettings('acme.review', '{"width":80}'), 'ok', 'active plugin can save its own settings')
-  assertDeepEqual(scope.shellConfig.plugins, [{ id: 'acme.review', sandbox: true, width: 80 }, { id: 'other', untouched: true }], 'host preserves the identity, sandbox marker and other entries')
+  assertDeepEqual(scope.shellConfig.plugins, [{ id: 'acme.review', sandbox: true, old: true, width: 80 }, { id: 'other', untouched: true }], 'host preserves unrelated settings, identity, sandbox marker and other entries')
   assertEqual(scope.saveSandboxSettings('acme.review', '{"type":"command","exec":"malicious"}'), 'ok', 'worker strings remain inert settings in its own sandbox entry')
   assertDeepEqual(scope.shellConfig.bar.layout.right, [{ id: 'acme.review', type: 'command', exec: 'untouched' }], 'sandbox settings cannot change a same-id legacy bar command or QML entry')
   scope.sandboxedPlugins.status = () => ({ state: 'disabled' })
@@ -61,7 +61,7 @@ try {
   fs.writeFileSync(path.join(source, 'manifest.json'), JSON.stringify({
     schemaVersion: 1, id: 'acme.review', name: 'Review fixture', version: '1', kinds: ['panel'],
     entryPoints: { panel: 'worker.qml' },
-    sandbox: { version: 1, entryPoint: 'worker.qml', requests: { network: true, notifications: true, settings: true, read: ['notes'] } }
+    sandbox: { version: 1, entryPoint: 'worker.qml', requests: { network: true, notifications: true, settings: {read: ['width'], write: ['width']}, filesystem: [{name: 'notes'}] } }
   }))
   fs.writeFileSync(path.join(source, 'worker.qml'), 'import Quickshell\nShellRoot {}\n')
   run('git', ['-C', source, 'init', '-q'])
@@ -81,12 +81,12 @@ try {
   assert(!fs.existsSync(path.join(store, 'acme.review.json')), 'disabling a reviewed plugin creates no approval')
   assert(run('omarchy-plugin-review', ['acme.review']).includes('No plugin code was run'), 'human review explains the snapshot boundary')
   run('omarchy-plugin-approve', ['acme.review', '--revision', review.revision], false)
-  run('omarchy-plugin-approve', ['acme.review', '--revision', review.revision, '--read', `notes=${source}`, '--allow-notifications', '--allow-settings', '--yes'])
+  run('omarchy-plugin-approve', ['acme.review', '--revision', review.revision, '--read', `notes=${source}`, '--allow-notifications', '--read-setting', 'width', '--write-setting', 'width', '--yes'])
   let record = JSON.parse(fs.readFileSync(path.join(store, 'acme.review.json')))
   assertEqual(record.grants.network, false, 'approval does not infer requested network access')
   assertEqual(record.grants.notifications, true, 'approval records the selected notification grant')
-  assertEqual(record.grants.settings, true, 'approval records only explicitly selected own-settings access')
-  assertEqual(record.grants.read.notes.path, source, 'approval records the selected folder')
+  assertDeepEqual(record.grants.settings, {read: ['width'], write: ['width']},  'approval records only explicitly selected own-settings access')
+  assertEqual(record.grants.filesystem.notes.path, source, 'approval records the selected folder')
   assertEqual(record.activeUnit, null, 'approval does not start a plugin')
   let listed = JSON.parse(run('omarchy-plugin-list', ['--json'])).find(row => row.id === 'acme.review')
   assertEqual(listed.approved, true, 'plugin list exposes exact-revision approval')
@@ -107,7 +107,7 @@ try {
   record = JSON.parse(fs.readFileSync(path.join(store, 'acme.review.json')))
   assertEqual(record.revision, updated.revision, 'explicit reapproval selects the updated snapshot')
   assertEqual(record.grants.notifications, false, 'reapproval does not silently carry old grants forward')
-  assertEqual(record.grants.settings, false, 'reapproval does not retain own-settings access implicitly')
+  assertDeepEqual(record.grants.settings, {read: [], write: []},  'reapproval does not retain own-settings access implicitly')
   fs.writeFileSync(path.join(stubs, 'omarchy-shell'), '#!/bin/bash\nif [[ $1 == "-q" ]]; then exit 0; else exit 1; fi\n', { mode: 0o755 })
   listed = JSON.parse(run('omarchy-plugin-list', ['--json'])).find(row => row.id === 'acme.review')
   assertEqual(listed.approved, true, 'approval remains visible when the shell is offline')

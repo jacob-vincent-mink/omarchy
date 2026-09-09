@@ -1,5 +1,5 @@
 use omarchy_plugin_host::{
-  grants::{Grants, ReadDirectory},
+  grants::{Access, FileSystemGrant, Grants, Target},
   supervisor::{Limits, Unit, watchdog},
   worker,
 };
@@ -11,7 +11,7 @@ use std::{
   os::{
     fd::AsRawFd,
     unix::{
-      fs::OpenOptionsExt,
+      fs::{OpenOptionsExt, PermissionsExt},
       net::{UnixListener, UnixStream},
     },
   },
@@ -200,12 +200,42 @@ fn granted_worker_child() {
 }
 
 #[test]
+fn filesystem_grants_child() {
+  if !Path::new("/bootstrap").exists() {
+    return;
+  }
+  worker::restrict_bootstrap().unwrap();
+  // The writable grant may create and overwrite; writes land on real host data.
+  fs::write("/grants/scratch/note", "written").unwrap();
+  assert_eq!(
+    fs::read_to_string("/grants/scratch/note").unwrap(),
+    "written"
+  );
+  // The read-only grant from the same run still refuses writes.
+  assert_eq!(
+    fs::read_to_string("/grants/files/allowed").unwrap(),
+    "selected data"
+  );
+  assert!(fs::write("/grants/files/allowed", "nope").is_err());
+  // Controller-authored introspection: what was actually admitted, not the
+  // plugin's desires.
+  let granted: serde_json::Value =
+    serde_json::from_slice(&fs::read("/run/plugin/grants.json").unwrap()).unwrap();
+  let directories = granted["filesystem"].as_object().unwrap();
+  assert_eq!(directories["scratch"]["access"], "readwrite");
+  assert_eq!(directories["files"]["access"], "read");
+  let mut display = UnixStream::connect("/run/plugin/wayland").unwrap();
+  display.write_all(b"PASS").unwrap();
+}
+
+#[test]
 fn controller_child() {
   let Some(root) = std::env::var_os("OMARCHY_WORKER_TEST_ROOT") else {
     return;
   };
   let root = Path::new(&root);
   let network = std::env::var("OMARCHY_WORKER_TEST_NETWORK").as_deref() == Ok("1");
+  let write_grant = std::env::var("OMARCHY_WORKER_TEST_WRITE").as_deref() == Ok("1");
   let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
   tcp.set_nonblocking(true).unwrap();
   fs::write(
@@ -216,11 +246,33 @@ fn controller_child() {
   let mut grants = Grants::default();
   if network {
     grants.network = true;
-    grants.read.insert(
+  }
+  if network || write_grant {
+    grants.filesystem.insert(
       "files".into(),
-      ReadDirectory::select(&root.join("selected")).unwrap(),
+      FileSystemGrant::select(&root.join("selected"), Access::Read, Target::Directory).unwrap(),
     );
   }
+  if write_grant {
+    grants.filesystem.insert(
+      "scratch".into(),
+      FileSystemGrant::select(
+        &root.join("scratch-write"),
+        Access::ReadWrite,
+        Target::Directory,
+      )
+      .unwrap(),
+    );
+  }
+  let grants_json = if write_grant {
+    // Controller-authored, exactly as controller.rs builds it: the granted
+    // record, not plugin metadata, so introspection reflects what was admitted.
+    let path = root.join("grants-state.json");
+    fs::write(&path, serde_json::to_vec(&grants).unwrap()).unwrap();
+    Some(path_fd(&path))
+  } else {
+    None
+  };
   let listener = UnixListener::bind(root.join("wayland")).unwrap();
   listener.set_nonblocking(true).unwrap();
   let bundle = path_fd(&root.join("bundle"));
@@ -243,13 +295,27 @@ fn controller_child() {
   );
   let descriptors = [&bootstrap, &bundle, &display, &runtime];
   let before = descriptors.map(|file| unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) });
+  // Shared runtimes have an authenticated own-panel state channel even when
+  // all host-effect grants are denied, matching the production controller.
+  let request_root = tempfile::Builder::new()
+    .permissions(fs::Permissions::from_mode(0o700))
+    .tempdir_in(root)
+    .unwrap();
+  let requests = omarchy_plugin_host::requests::Broker::start(
+    request_root.path(),
+    &std::env::current_exe().unwrap(),
+    vec![],
+  )
+  .unwrap();
   let mut child = worker::spawn(
     &bootstrap,
     &bundle,
     &display,
     &[
       OsStr::new("--exact"),
-      OsStr::new(if network {
+      OsStr::new(if write_grant {
+        "filesystem_grants_child"
+      } else if network {
         "granted_worker_child"
       } else {
         "worker_child"
@@ -259,8 +325,10 @@ fn controller_child() {
     limits(),
     &grants,
     worker::Resources {
+      requests: Some(&requests),
       runtime: Some(&runtime),
       context: Some(&runtime),
+      grants_json: grants_json.as_ref(),
       ..Default::default()
     },
   )
@@ -360,4 +428,53 @@ fn supervised_worker_isolation() {
       "selected data"
     );
   }
+}
+
+#[test]
+fn filesystem_grant_isolation() {
+  if std::env::var("OMARCHY_TEST_SYSTEMD").as_deref() != Ok("1") {
+    eprintln!("set OMARCHY_TEST_SYSTEMD=1 for temporary sandboxed user-service tests");
+    return;
+  }
+  let root = tempfile::tempdir().unwrap();
+  fs::create_dir(root.path().join("bundle")).unwrap();
+  fs::write(root.path().join("bundle/marker"), "approved").unwrap();
+  fs::create_dir(root.path().join("runtime")).unwrap();
+  fs::create_dir(root.path().join("selected")).unwrap();
+  fs::write(root.path().join("selected/allowed"), "selected data").unwrap();
+  fs::create_dir(root.path().join("scratch-write")).unwrap();
+  let args = [
+    OsString::from(format!(
+      "OMARCHY_WORKER_TEST_ROOT={}",
+      root.path().display()
+    )),
+    OsString::from("OMARCHY_WORKER_TEST_NETWORK=0"),
+    OsString::from("OMARCHY_WORKER_TEST_WRITE=1"),
+    std::env::current_exe().unwrap().into_os_string(),
+    "--exact".into(),
+    "controller_child".into(),
+    "--nocapture".into(),
+  ];
+  let mut unit = Unit::start(
+    Path::new("/usr/bin/env"),
+    &args.iter().map(OsString::as_os_str).collect::<Vec<_>>(),
+    limits(),
+  )
+  .unwrap();
+  let deadline = Instant::now() + Duration::from_secs(8);
+  while unit.running().unwrap() && Instant::now() < deadline {
+    std::thread::sleep(Duration::from_millis(20));
+  }
+  unit.stop().unwrap();
+  assert_eq!(fs::read(root.path().join("passed")).unwrap(), b"PASS");
+  // Host-side proof the writable grant's write landed on real host data.
+  assert_eq!(
+    fs::read_to_string(root.path().join("scratch-write/note")).unwrap(),
+    "written"
+  );
+  // The read-only grant was never modified from the host side.
+  assert_eq!(
+    fs::read_to_string(root.path().join("selected/allowed")).unwrap(),
+    "selected data"
+  );
 }

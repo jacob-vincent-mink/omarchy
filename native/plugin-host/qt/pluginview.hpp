@@ -17,12 +17,16 @@ class PluginView : public QQuickItem {
   Q_PROPERTY(bool presented READ presented NOTIFY stateChanged)
   Q_PROPERTY(QString error READ error NOTIFY stateChanged)
   Q_PROPERTY(QVariantList inputRegions READ inputRegions NOTIFY stateChanged)
+  Q_PROPERTY(bool panelOpen READ panelOpen NOTIFY panelChanged)
+  Q_PROPERTY(uint panelSerial READ panelSerial NOTIFY panelChanged)
 public:
   explicit PluginView(QQuickItem *parent = nullptr);
   bool ready() const { return m_ready; }
   bool resizing() const { return m_resizing; }
   bool presented() const { return m_presented; }
   QString error() const { return m_error; }
+  bool panelOpen() const { return m_panelOpen; }
+  uint panelSerial() const { return m_panelSerial; }
   QVariantList inputRegions() const;
   bool contains(const QPointF &) const override;
   Q_INVOKABLE void start(const QString &store, const QString &id, const QString &controller,
@@ -35,6 +39,8 @@ public:
   void fail(const QString &message);
 signals:
   void stateChanged();
+  void panelChanged();
+  void focusRequested();
 protected:
   QSGNode *updatePaintNode(QSGNode *, UpdatePaintNodeData *) override;
   void mousePressEvent(QMouseEvent *) override;
@@ -58,6 +64,8 @@ private:
   QRegion m_mask;
   QString m_error;
   bool m_started = false;
+  bool m_panelOpen = false;
+  uint m_panelSerial = 0;
   bool m_ready = false;
   bool m_hasSurface = false;
   bool m_presented = false;

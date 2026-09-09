@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Hyprland
 
 // Trusted lifecycle adapter. It selects only a host-owned component; plugin
 // paths and QML never enter this engine. Rust owns admission and supervision.
@@ -7,6 +8,19 @@ QtObject {
   id: root
   property var instances: ({})
   property var component: null
+  property var bar: null
+  property Connections workspaceChanges: Connections {
+    target: Hyprland
+    function onFocusedWorkspaceChanged() { root.dismissAll() }
+    function onFocusedMonitorChanged() { root.dismissAll() }
+  }
+  property Connections popoutChanges: Connections {
+    target: root.bar
+    ignoreUnknownSignals: true
+    function onActivePopoutChanged() {
+      if (root.bar && root.bar.activePopout) root.dismissAll(root.bar.activePopout)
+    }
+  }
   property string store: Quickshell.env("OMARCHY_PLUGIN_STORE")
     || (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state") + "/omarchy/plugin-host"
   property string controller: Quickshell.env("OMARCHY_PLUGIN_HOST")
@@ -49,6 +63,16 @@ QtObject {
       changed()
       if (instance.state === "running") activated(id)
     })
+    var coordinate = function() {
+      if (instances[id] !== instance) return
+      // Worker-reported state alone cannot take over host popup ownership.
+      if (instance.opened && instance.focusHeld) {
+        dismissAll(instance)
+        if (bar && typeof bar.requestPopout === "function") bar.requestPopout(instance)
+      } else if (bar && typeof bar.releasePopout === "function") bar.releasePopout(instance)
+    }
+    instance.openedChanged.connect(coordinate)
+    instance.focusHeldChanged.connect(coordinate)
     changed()
     return "starting"
   }
@@ -56,6 +80,7 @@ QtObject {
   function disable(id) {
     var instance = instances[id]
     if (!instance) return
+    if (bar && typeof bar.releasePopout === "function") bar.releasePopout(instance)
     var next = Object.assign({}, instances)
     delete next[id]
     instances = next
@@ -64,22 +89,24 @@ QtObject {
     changed()
   }
 
-  function show(id) {
+  function show(id, payload) {
     var instance = instances[id]
     if (!instance || instance.state === "error") return false
-    instance.shown = true
-    return true
+    return instance.setPanel(true, payload)
   }
 
   function hide(id) {
     var instance = instances[id]
     if (!instance) return false
-    instance.dismiss()
-    instance.shown = false
-    return true
+    return instance.dismiss()
   }
 
-  function isOpen(id) { return !!instances[id] && instances[id].shown }
+  // Closing private panels must not unmap their persistent bar widgets.
+  function dismissAll(except) {
+    for (var id in instances) if (instances[id] !== except) instances[id].dismiss()
+  }
+
+  function isOpen(id) { return !!instances[id] && instances[id].opened }
 
   function sync(entries) {
     var desired = ({})

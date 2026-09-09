@@ -664,6 +664,12 @@ impl Graphics {
     Ok(())
   }
 
+  /// Only the trusted host may arm focus for an explicitly summoned panel.
+  pub fn activate(&mut self) {
+    self.keyboard_active = true;
+    self.update_keyboard_focus();
+  }
+
   pub fn input(&mut self, kind: u32, code: u32, x: i32, y: i32, time: u32) -> Result<()> {
     if kind <= 2 {
       if x < 0

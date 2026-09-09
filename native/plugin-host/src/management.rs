@@ -1,7 +1,7 @@
 //! Administrative operations for the trusted plugin-review surface. This is a
 //! local CLI boundary, never an endpoint exposed to sandboxed workers.
 use crate::{
-  grants::{Grants, Manifest, ReadDirectory, invalid, validate_id},
+  grants::{Access, FileSystemGrant, Grants, Manifest, Target, invalid, validate_id},
   revision::Revision,
   store::Store,
 };
@@ -38,10 +38,16 @@ enum Request {
 #[serde(default, deny_unknown_fields)]
 struct Selections {
   read: BTreeMap<String, PathBuf>,
+  write: BTreeMap<String, PathBuf>,
   network: bool,
+  http: BTreeSet<String>,
+  exec: BTreeMap<String, BTreeSet<String>>,
   media: Option<String>,
   notifications: bool,
-  settings: bool,
+  settings: crate::settings::Grant,
+  #[serde(rename = "openUrls")]
+  open_urls: bool,
+  storage: bool,
 }
 
 pub fn run(root: &Path) -> io::Result<()> {
@@ -135,18 +141,60 @@ fn execute(root: &Path, bytes: &[u8]) -> io::Result<Value> {
       if review(&store, &revision)?["id"] != id {
         return Err(invalid("reviewed revision belongs to a different plugin"));
       }
+      let manifest = Manifest::read(&store.revisions().join(&revision))?;
       let mut grants = Grants {
         network: selections.network,
         media: selections.media,
         notifications: selections.notifications,
         settings: selections.settings,
+        open_urls: selections.open_urls,
+        storage: selections.storage,
         ..Grants::default()
       };
-      for (slot, path) in selections.read {
+      for name in selections.http {
+        let ask = manifest
+          .sandbox
+          .requests
+          .http
+          .get(&name)
+          .ok_or_else(|| invalid("HTTP scope was not requested by this revision"))?;
+        grants.http.insert(name, ask.scope.clone());
+      }
+      for (name, leaves) in selections.exec {
+        let ask = manifest
+          .sandbox
+          .requests
+          .exec
+          .get(&name)
+          .ok_or_else(|| invalid("host executable was not requested by this revision"))?;
+        grants
+          .exec
+          .insert(name, crate::exec::Grant::select(ask, leaves)?);
+      }
+      for (slot, path) in &selections.read {
         if !path.is_absolute() {
           return Err(invalid("select an absolute read-only folder"));
         }
-        grants.read.insert(slot, ReadDirectory::select(&path)?);
+        grants.filesystem.insert(
+          slot.clone(),
+          FileSystemGrant::select(path, Access::Read, Target::Directory)?,
+        );
+      }
+      for (slot, path) in &selections.write {
+        if !path.is_absolute() {
+          return Err(invalid("select an absolute writable folder"));
+        }
+        if selections.read.contains_key(slot) {
+          return Err(invalid(
+            "a directory slot cannot be both read-only and writable",
+          ));
+        }
+        grants.filesystem.insert(
+          slot.clone(),
+          // A writable bind also exposes reads; the reviewer message must say
+          // so and that revocation cannot undo completed writes.
+          FileSystemGrant::select(path, Access::ReadWrite, Target::Directory)?,
+        );
       }
       // Re-reviewing an active plugin requires an explicit Disable first. Do
       // not silently revoke a running revision on a failed approval attempt.
@@ -205,7 +253,7 @@ mod tests {
     .unwrap();
     fs::write(source.join("manifest.json"), serde_json::to_vec(&json!({
       "schemaVersion": 1, "id": "test.review", "name": "Review me", "version": "1", "kinds": ["panel"],
-      "entryPoints": {"panel": "worker.qml"}, "sandbox": {"version": 1, "entryPoint": "worker.qml", "requests": {"network": true, "notifications": true, "read": ["notes"]}}
+      "entryPoints": {"panel": "worker.qml"}, "sandbox": {"version": 1, "entryPoint": "worker.qml", "requests": {"network": true, "notifications": true, "storage": true, "filesystem": [{"name": "notes"}]}}
     })).unwrap()).unwrap();
     let review = call(json!({"operation": "import", "path": source}));
     assert_eq!(review["name"], "Review me");
@@ -218,11 +266,12 @@ mod tests {
       "import implicitly approved a plugin"
     );
     let record = call(
-      json!({"operation": "approve", "id": "test.review", "revision": review["revision"], "selections": {"notifications": true, "read": {"notes": source}}}),
+      json!({"operation": "approve", "id": "test.review", "revision": review["revision"], "selections": {"notifications": true, "storage": true, "read": {"notes": source}}}),
     );
     assert_eq!(record["enabled"], true);
     assert_eq!(record["grants"]["network"], false);
     assert_eq!(record["grants"]["notifications"], true);
+    assert_eq!(record["grants"]["storage"], true);
     assert_eq!(record["activeUnit"], Value::Null);
     let listed = call(json!({"operation": "list"}));
     assert_eq!(listed[0]["approved"], true);
@@ -233,5 +282,46 @@ mod tests {
     );
     call(json!({"operation": "revoke", "id": "test.review"}));
     assert_eq!(call(json!({"operation": "list"}))[0]["approved"], false);
+  }
+
+  #[test]
+  fn storage_selection_defaults_off_and_survives_disable() {
+    // storage may be omitted from selections (defaulting to false) without
+    // failing approval, matching the optional-request discipline.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("state");
+    let call = |request: Value| execute(&root, &serde_json::to_vec(&request).unwrap()).unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("worker.qml"), "import Quickshell\nShellRoot {}").unwrap();
+    fs::write(
+      source.join("manifest.json"),
+      serde_json::to_vec(&json!({
+        "schemaVersion": 1, "id": "test.storage", "name": "Storage", "version": "1",
+        "kinds": ["panel"], "entryPoints": {"panel": "worker.qml"},
+        "sandbox": {"version": 1, "entryPoint": "worker.qml", "requests": {"storage": true}}
+      }))
+      .unwrap(),
+    )
+    .unwrap();
+    let review = call(json!({"operation": "import", "path": source}));
+    let record = call(json!({
+      "operation": "approve", "id": "test.storage", "revision": review["revision"],
+      "selections": {}
+    }));
+    assert_eq!(
+      record["grants"]["storage"], false,
+      "storage defaults to unselected"
+    );
+    let with_storage = call(json!({
+      "operation": "approve", "id": "test.storage", "revision": review["revision"],
+      "selections": {"storage": true}
+    }));
+    assert_eq!(with_storage["grants"]["storage"], true);
+    assert_eq!(
+      call(json!({"operation": "list"}))[0]["grants"]["storage"],
+      true
+    );
+    call(json!({"operation": "revoke", "id": "test.storage"}));
   }
 }

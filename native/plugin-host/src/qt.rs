@@ -14,6 +14,7 @@ mod ffi {
     Buffer,
     Frame,
     Mask,
+    PanelState,
     Failed,
   }
   struct NativeRegion {
@@ -37,6 +38,8 @@ mod ffi {
     scale: u32,
     serial: u64,
     slot: u32,
+    panel_serial: u32,
+    panel_open: bool,
     buffer: Box<NativeBuffer>,
     regions: Vec<NativeRegion>,
     error: String,
@@ -129,6 +132,8 @@ fn next(session: &Session) -> io::Result<ffi::NativeEvent> {
     scale: 0,
     serial: 0,
     slot: 0,
+    panel_serial: 0,
+    panel_open: false,
     buffer: Box::new(NativeBuffer(None)),
     regions: Vec::new(),
     error: String::new(),
@@ -136,6 +141,11 @@ fn next(session: &Session) -> io::Result<ffi::NativeEvent> {
   match session.poll()? {
     None => (),
     Some(Update::Ready) => event.kind = ffi::EventKind::Ready,
+    Some(Update::PanelState { serial, open }) => {
+      event.kind = ffi::EventKind::PanelState;
+      event.panel_serial = serial;
+      event.panel_open = open;
+    }
     Some(Update::Presentation(presentation::Event::Configured {
       generation,
       viewport,

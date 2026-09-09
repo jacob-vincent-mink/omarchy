@@ -56,7 +56,15 @@ fn activation(review_ui: bool) {
   }
   fs::write(plugin.join("manifest.json"), serde_json::to_vec(&serde_json::json!({
     "schemaVersion": 1, "id": "test.activation", "name": "Activation", "version": "1", "kinds": ["panel"],
-    "entryPoints": {"panel": "worker.qml"}, "sandbox": {"version": 1, "entryPoint": "worker.qml", "requests": {"network": true, "notifications": true, "settings": true, "read": ["notes"]}}
+    "entryPoints": {"panel": "worker.qml"}, "sandbox": {
+      "version": 1, "entryPoint": "worker.qml", "requests": {
+        "network": true, "notifications": true, "storage": true, "settings": {"write": ["width"]}, "filesystem": [{"name": "notes"}],
+        "http": {"catalog": {"scope": {
+          "origin": "https://example.test", "method": "GET", "path": "/catalog",
+          "query": {"limit": {"required": true, "value": {"kind": "exact", "value": "10"}}}
+        }}}
+      }
+    }
   })).unwrap()).unwrap();
   fs::write(
     plugin.join("worker.qml"),
@@ -127,12 +135,17 @@ ShellRoot {{
       var review = reviewer.review
       var scroll = find(window.contentItem, "review-scroll")
       var folder = find(window.contentItem, "review-folder-notes")
+      var scrollTop = scroll.mapToItem(null, 0, 0).y
       return JSON.stringify({{visible: window.visible, busy: review.busy, error: review.error, revision: review.revision,
         scrollY: scroll.contentItem.contentY, scrollMoving: scroll.contentItem.moving,
+        scrollTop: scrollTop, scrollBottom: scrollTop + scroll.height,
         folders: review.folders, folderField: point("review-folder-notes"),
         folderFocus: folder && folder.activeFocus,
         approved: review.selectionApproved, current: review.current, network: review.network, notifications: review.notifications, settings: review.settings,
-        settingsButton: point("review-settings"),
+        settingsButton: point("review-setting-write-width"),
+        storage: review.storage, storageButton: point("review-storage"),
+        http: review.http, httpButton: point("review-http-catalog"),
+        httpDetails: point("review-http-scope-catalog"),
         notificationButton: point("review-notifications"), approvalButton: point("review-approve"), revokeButton: point("review-revoke"), closeButton: point("review-close")}})
     }}
   }}
@@ -214,28 +227,61 @@ ShellRoot {{
         ))
         .unwrap();
     };
+    let reveal = |key: &str| {
+      for _ in 0..40 {
+        let state = wait(&|state| state["scrollMoving"] == false);
+        let y = state[key][1].as_f64().unwrap();
+        if y > state["scrollTop"].as_f64().unwrap() + 12.0
+          && y < state["scrollBottom"].as_f64().unwrap() - 12.0
+        {
+          return state;
+        }
+        progress
+          .send(Stage::Scroll(
+            if y < state["scrollTop"].as_f64().unwrap() + 12.0 {
+              120
+            } else {
+              -120
+            },
+          ))
+          .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+      }
+      panic!("could not scroll {key} into view");
+    };
     if review_ui {
       run("omarchy-plugin-review", &["test.activation", "--ui"]);
       let state = wait(&|state| state["busy"] == false && state["revision"].is_object());
       assert_eq!(state["error"], "");
       assert_eq!(state["network"], false);
       assert_eq!(state["notifications"], false);
-      assert_eq!(state["settings"], false);
+      assert_eq!(state["settings"]["write"], serde_json::json!([]));
+      assert_eq!(state["http"], serde_json::json!([]));
       assert_eq!(state["current"]["approved"], false);
-      click(&state, "notificationButton");
+      click(&reveal("notificationButton"), "notificationButton");
       wait(&|state| state["notifications"] == true);
       let capture = |label| {
         std::thread::sleep(Duration::from_millis(150));
         progress.send(Stage::Capture(label)).unwrap();
       };
       capture("selection");
-      progress.send(Stage::Scroll(-720)).unwrap();
-      let state = wait(&|state| {
-        state["scrollY"].as_f64().unwrap_or(0.0) > 0.0 && state["scrollMoving"] == false
-      });
-      click(&state, "settingsButton");
-      let state = wait(&|state| state["settings"] == true);
-      click(&state, "folderField");
+      assert_eq!(state["storage"], false);
+      click(&reveal("storageButton"), "storageButton");
+      wait(&|state| state["storage"] == true);
+      capture("storage-selected");
+      click(&reveal("storageButton"), "storageButton");
+      wait(&|state| state["storage"] == false);
+      capture("storage-denied");
+      click(&reveal("storageButton"), "storageButton");
+      wait(&|state| state["storage"] == true);
+      click(&reveal("settingsButton"), "settingsButton");
+      wait(&|state| state["settings"]["write"] == serde_json::json!(["width"]));
+      click(&reveal("httpButton"), "httpButton");
+      wait(&|state| state["http"] == serde_json::json!(["catalog"]));
+      capture("http");
+      reveal("httpDetails");
+      capture("http-scope");
+      click(&reveal("folderField"), "folderField");
       wait(&|state| state["folderFocus"] == true);
       progress.send(Stage::Key(53)).unwrap(); // x: an invalid relative folder
       capture("typing");
@@ -250,7 +296,7 @@ ShellRoot {{
       });
       assert_eq!(state["current"]["approved"], false);
       capture("error");
-      click(&state, "folderField");
+      click(&reveal("folderField"), "folderField");
       wait(&|state| state["folderFocus"] == true);
       progress.send(Stage::Key(22)).unwrap(); // Backspace: leave the folder denied
       let state = wait(&|state| state["folders"]["notes"] == "");
@@ -262,9 +308,20 @@ ShellRoot {{
         "approval started a plugin"
       );
       assert_eq!(state["current"]["grants"]["network"], false);
+      assert_eq!(
+        state["current"]["grants"]["http"]["catalog"],
+        state["revision"]["requests"]["http"]["catalog"]["scope"]
+      );
       assert_eq!(state["current"]["grants"]["notifications"], true);
-      assert_eq!(state["current"]["grants"]["settings"], true);
-      assert_eq!(state["current"]["grants"]["read"], serde_json::json!({}));
+      assert_eq!(state["current"]["grants"]["storage"], true);
+      assert_eq!(
+        state["current"]["grants"]["settings"],
+        serde_json::json!({"read": [], "write": ["width"]})
+      );
+      assert_eq!(
+        state["current"]["grants"]["filesystem"],
+        serde_json::json!({})
+      );
       capture("approved");
       click(&state, "approvalButton");
       let state = wait(&|state| state["current"]["enabled"] == true && state["busy"] == false);
@@ -280,16 +337,29 @@ ShellRoot {{
     if review_ui {
       run("omarchy-plugin-review", &["test.activation", "--ui"]);
       let state = wait(&|state| state["current"]["enabled"] == true && state["busy"] == false);
+      assert_eq!(state["storage"], false, "reopen silently selected storage");
+      assert_eq!(state["current"]["grants"]["storage"], true);
       assert_eq!(
         state["notifications"], false,
         "reopen silently selected an existing grant"
       );
       assert_eq!(
-        state["settings"], false,
+        state["http"],
+        serde_json::json!([]),
+        "reopen silently selected HTTP access"
+      );
+      assert!(
+        state["current"]["grants"]["http"]["catalog"].is_object(),
+        "reopen changed saved HTTP access"
+      );
+      assert_eq!(
+        state["settings"]["write"],
+        serde_json::json!([]),
         "reopen silently selected settings access"
       );
       assert_eq!(
-        state["current"]["grants"]["settings"], true,
+        state["current"]["grants"]["settings"],
+        serde_json::json!({"read": [], "write": ["width"]}),
         "reopen changed saved settings access"
       );
       assert_eq!(
@@ -318,7 +388,7 @@ ShellRoot {{
   let mut disabled = false;
   let mut withdrawn = false;
   let mut latest_frame: Option<desktop::Frame> = None;
-  while start.elapsed() < Duration::from_secs(15) {
+  while start.elapsed() < Duration::from_secs(25) {
     let time = start.elapsed().as_millis() as u32;
     while let Ok(stage) = stages.try_recv() {
       match stage {

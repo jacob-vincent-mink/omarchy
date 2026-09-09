@@ -164,10 +164,13 @@ void PluginView::stop() {
   m_ready = false;
   m_hasSurface = false;
   m_presented = false;
+  m_panelOpen = false;
+  m_panelSerial = 0;
   m_resizing = true;
   setFocus(false);
   update();
   emit stateChanged();
+  emit panelChanged();
 }
 void PluginView::fail(const QString &message) { m_error = message; stop(); }
 
@@ -179,6 +182,11 @@ void PluginView::poll() {
       switch (event.kind) {
         case omarchy::EventKind::Empty: return;
         case omarchy::EventKind::Ready: m_ready = true; emit stateChanged(); break;
+        case omarchy::EventKind::PanelState:
+          m_panelOpen = event.panel_open;
+          m_panelSerial = event.panel_serial;
+          emit panelChanged();
+          break;
         case omarchy::EventKind::Configured:
           m_generation = event.generation;
           m_viewport = QSize(event.width, event.height);
@@ -254,7 +262,7 @@ void PluginView::input(uint32_t kind, uint32_t code, QPointF point) {
   try { omarchy::input(**m_session, kind, code, int(x), int(y)); }
   catch (const rust::Error &error) { fail(QString::fromUtf8(error.what())); }
 }
-void PluginView::mousePressEvent(QMouseEvent *event) { forceActiveFocus(); input(0, buttonCode(event->button()), event->position()); event->accept(); }
+void PluginView::mousePressEvent(QMouseEvent *event) { emit focusRequested(); forceActiveFocus(); input(0, buttonCode(event->button()), event->position()); event->accept(); }
 void PluginView::mouseReleaseEvent(QMouseEvent *event) { input(1, buttonCode(event->button()), event->position()); event->accept(); }
 void PluginView::mouseMoveEvent(QMouseEvent *event) { input(2, 0, event->position()); event->accept(); }
 void PluginView::hoverMoveEvent(QHoverEvent *event) { input(2, 0, event->position()); event->accept(); }

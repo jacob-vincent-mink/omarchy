@@ -9,21 +9,66 @@ QtObject {
   property var revision: null
   property var current: null
   property bool network: false
+  property var http: []
+  property var exec: ({})
+  readonly property var execRequests: {
+    if (!revision) return []
+    var rows = []
+    function argument(arg) {
+      if (arg.kind === "exact") return JSON.stringify(arg.value)
+      if (arg.kind === "oneOf") return "one of " + JSON.stringify(arg.values)
+      if (arg.kind === "integer") return "integer " + arg.min + "…" + arg.max
+      if (arg.kind === "pattern") return "whole-argument pattern (≤" + arg.max + " bytes): " + arg.value
+      return "text " + arg.min + "…" + arg.max + " bytes, prefix " + JSON.stringify(arg.prefix)
+    }
+    function walk(name, ask, tree, args) {
+      if (tree.end) rows.push({name: name, leaf: tree.end, executable: ask.executable,
+        required: ask.required.indexOf(tree.end) !== -1, command: args.join("\n") || "(no arguments)"})
+      for (var step of tree.next) walk(name, ask, step.then, args.concat([argument(step.arg)]))
+    }
+    for (var name of Object.keys(revision.requests.exec)) {
+      var ask = revision.requests.exec[name]
+      walk(name, ask, ask.tree, [])
+    }
+    return rows
+  }
+  readonly property var httpRequests: revision ? Object.keys(revision.requests.http) : []
   property bool notifications: false
-  property bool settings: false
+  property var settings: ({read: [], write: []})
+  property bool openUrls: false
+  property bool storage: false
   property string media: ""
   property var folders: ({})
+  property var writableFolders: ({})
+  readonly property var folderRequests: revision ? revision.requests.filesystem : []
+  readonly property var settingRequests: {
+    if (!revision) return []
+    var result = []
+    for (var access of ["read", "write"])
+      for (var key of revision.requests.settings[access]) result.push({access: access, key: key})
+    return result
+  }
   property bool busy: false
   property string operation: ""
   property string error: ""
   property string notice: ""
   property bool selectionApproved: false
 
-  onNetworkChanged: selectionApproved = false
+  onNetworkChanged: { selectionApproved = false; if (network) http = [] }
+  onHttpChanged: selectionApproved = false
+  onExecChanged: selectionApproved = false
   onNotificationsChanged: selectionApproved = false
   onSettingsChanged: selectionApproved = false
+  onOpenUrlsChanged: selectionApproved = false
+  onStorageChanged: selectionApproved = false
   onMediaChanged: selectionApproved = false
   onFoldersChanged: selectionApproved = false
+  onWritableFoldersChanged: selectionApproved = false
+
+  function requestLabel(name, label) {
+    var request = revision ? revision.requests[name] : null
+    return label + (request && request.required === true ? " · required" : "")
+  }
 
   function load(id) {
     if (busy) return false
@@ -35,10 +80,15 @@ QtObject {
     revision = null
     current = null
     network = false
+    http = []
+    exec = ({})
     notifications = false
-    settings = false
+    settings = ({read: [], write: []})
+    openUrls = false
+    storage = false
     media = ""
     folders = ({})
+    writableFolders = ({})
     selectionApproved = false
     return run("review", ["omarchy-plugin-review", id, "--json"])
   }
@@ -49,14 +99,53 @@ QtObject {
     folders = next
   }
 
+  function setWritable(slot, allowed) {
+    var next = Object.assign({}, writableFolders)
+    next[slot] = allowed === true
+    writableFolders = next
+  }
+
+  function toggleSetting(access, key) {
+    var next = {read: settings.read.slice(), write: settings.write.slice()}
+    var index = next[access].indexOf(key)
+    if (index < 0) next[access].push(key)
+    else next[access].splice(index, 1)
+    settings = next
+  }
+
+  function toggleHttp(name) {
+    var next = http.slice()
+    var index = next.indexOf(name)
+    if (index < 0) { next.push(name); network = false }
+    else next.splice(index, 1)
+    http = next
+  }
+
+  function toggleExec(name, leaf) {
+    var next = Object.assign({}, exec)
+    var selected = (Object.prototype.hasOwnProperty.call(exec, name) ? exec[name] : []).slice()
+    var index = selected.indexOf(leaf)
+    if (index < 0) selected.push(leaf)
+    else selected.splice(index, 1)
+    next[name] = selected
+    exec = next
+  }
+
   function approve() {
     if (!revision || busy) return
     var args = ["omarchy-plugin-approve", pluginId, "--revision", revision.revision, "--yes"]
     if (network) args.push("--allow-network")
+    for (var name of http) args.push("--http", name)
+    for (var name of Object.keys(exec))
+      for (var leaf of exec[name]) args.push("--exec", name + ":" + leaf)
     if (notifications) args.push("--allow-notifications")
-    if (settings) args.push("--allow-settings")
+    for (var access of ["read", "write"])
+      for (var key of settings[access]) args.push("--" + access + "-setting", key)
+    if (openUrls) args.push("--allow-open-urls")
+    if (storage) args.push("--allow-storage")
     if (media.trim()) args.push("--media", media.trim())
-    for (var slot in folders) if (folders[slot].trim()) args.push("--read", slot + "=" + folders[slot].trim())
+    for (var slot in folders) if (folders[slot].trim())
+      args.push(writableFolders[slot] === true ? "--write" : "--read", slot + "=" + folders[slot].trim())
     run("approve", args)
   }
 

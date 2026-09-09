@@ -76,7 +76,7 @@ fn missing_or_invalid_shared_runtime_fails_without_presenting() {
           panic!("invalid runtime produced a frame");
         }
         // Ready acknowledges controller admission, not worker content.
-        Some(Update::Ready | Update::Presentation(_)) => (),
+        Some(Update::Ready | Update::Presentation(_) | Update::PanelState { .. }) => (),
         None => {
           assert!(
             Instant::now() < deadline,
@@ -147,7 +147,7 @@ fn shared_runtime(settings_granted: bool) {
     "schemaVersion": 1, "id": "test.shared", "name": "Shared runtime", "version": "1",
     "kinds": ["bar-widget", "service", "overlay"],
     "entryPoints": {"barWidget": "Widget #.qml", "service": "Service.qml", "overlay": "Overlay.qml"},
-    "barWidget": {"defaultSection": "right"}, "sandbox": {"version": 1, "requests": {"settings": true}}
+    "barWidget": {"defaultSection": "right"}, "sandbox": {"version": 1, "requests": {"settings": {"read": ["width", "fontSize", "nested"], "write": ["width", "fontSize", "nested"]}}}
   })).unwrap()).unwrap();
   fs::write(
     source.join("Service.qml"),
@@ -177,6 +177,7 @@ BarWidget {
     && bar.shell.summon("other.plugin", "") === false
     && bar.shell.updateEntryInline("other.plugin", {}) === false
     && settings.id === undefined && settings.sandbox === undefined
+    && settings.hidden === undefined
     && settings.nested.text.length === 8192 && settings.nested.other === undefined
     && Style.fontBaseSize === settings.fontSize && Style.cornerRadius === 7 && Style.gapsOut === 4
     && Style.resolvedFontFamily === "monospace"
@@ -238,7 +239,14 @@ Item {
     .approve(
       &revision.digest,
       Grants {
-        settings: settings_granted,
+        settings: omarchy_plugin_host::settings::Grant {
+          read: ["width".into(), "fontSize".into(), "nested".into()].into(),
+          write: if settings_granted {
+            ["width".into(), "fontSize".into(), "nested".into()].into()
+          } else {
+            Default::default()
+          },
+        },
         ..Default::default()
       },
     )
@@ -283,7 +291,7 @@ Item {
   let context = |width, font_size, foreground| {
     serde_json::json!({
       "settings": {"id": "test.shared", "sandbox": true, "width": width, "fontSize": font_size,
-        "nested": {"text": "x".repeat(8192)}},
+        "nested": {"text": "x".repeat(8192)}, "hidden": "host-only"},
       "foreground": foreground, "fontSize": font_size, "enabled": true,
       "untouched": {"otherPlugin": "preserved"},
     })
@@ -481,6 +489,10 @@ ShellRoot {
   );
   assert_eq!(saved["settings"]["id"], "test.shared");
   assert_eq!(saved["settings"]["sandbox"], true);
+  assert_eq!(
+    saved["settings"]["hidden"], "host-only",
+    "saving selected keys must preserve unreadable settings"
+  );
   assert_eq!(saved["untouched"]["otherPlugin"], "preserved");
   saved["enabled"] = false.into();
   fs::write(&host_context, serde_json::to_vec(&saved).unwrap()).unwrap();

@@ -1,5 +1,5 @@
 use crate::{
-  grants::{Grants, validate_id},
+  grants::{Grants, MAX_GRANTED_DIRS, invalid, validate_id},
   media::MediaProxy,
   sandbox, supervisor,
 };
@@ -14,9 +14,57 @@ use std::{
       process::CommandExt,
     },
   },
-  path::Path,
+  path::{Path, PathBuf},
   process::{Child, Command, Stdio},
 };
+
+/// Persistent per-plugin storage under the user's XDG state home. The
+/// The persistent per-identity data directory behind the storage mount is
+/// created 0700 (owned by the controller) and opened for the worker mount; the
+/// plugin id names the directory so state survives revision changes.
+/// Returns the host path of that directory, exposed as `\$OMARCHY_PLUGIN_DATA`.
+pub fn storage_directory_path(id: &str) -> io::Result<PathBuf> {
+  validate_id(id)?;
+  let state_home = std::env::var_os("XDG_STATE_HOME")
+    .map(PathBuf::from)
+    .map(Ok)
+    .unwrap_or_else(|| {
+      std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".local/state"))
+        .ok_or_else(|| {
+          io::Error::new(
+            io::ErrorKind::NotFound,
+            "no HOME available for plugin storage",
+          )
+        })
+    })?;
+  if !state_home.is_absolute() {
+    return Err(invalid("plugin storage requires an absolute state home"));
+  }
+  Ok(state_home.join("omarchy").join("plugins").join(id))
+}
+
+/// Create (0755 parent dirs as needed) and open the persistent per-identity
+/// storage directory, restricted to the owner. Contents survive launches, so
+/// changes of the same plugin across restarts are preserved.
+pub fn storage_directory(id: &str) -> io::Result<File> {
+  use std::os::unix::fs::PermissionsExt;
+  let root = storage_directory_path(id)?;
+  std::fs::create_dir_all(&root)?;
+  std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+  File::open(&root)
+}
+
+/// Copy only the reviewed revision into this controller's private temporary
+/// directory. Reuse the bounded snapshot copier rather than merging into a
+/// persistent per-id path. The runtime owner removes the stage on teardown.
+pub fn stage_plugin_assets(bundle: &Path, revision: &str, runtime: &Path) -> io::Result<PathBuf> {
+  let staged = crate::revision::Revision::import(bundle, runtime)?;
+  if staged.digest != revision {
+    return Err(invalid("plugin assets changed since review"));
+  }
+  Ok(staged.path)
+}
 
 #[derive(Default)]
 pub struct Resources<'a> {
@@ -25,6 +73,21 @@ pub struct Resources<'a> {
   pub requests: Option<&'a crate::requests::Broker>,
   pub runtime: Option<&'a File>,
   pub context: Option<&'a File>,
+  /// Read-only view of the *admitted* grants, written by the controller from
+  /// its own record (never from plugin-provided metadata), exposed so plugin
+  /// code can adapt to actually-granted access at runtime.
+  pub grants_json: Option<&'a File>,
+  /// Persistent per-plugin storage directory. When the storage grant is
+  /// admitted this is bind-mounted read-write over `/home/plugin`, so plugin
+  /// writes under `$HOME` (and the default `$HOME/.local/state`) survive
+  /// restarts; otherwise `/home/plugin` remains an ephemeral tmpfs.
+  pub storage: Option<&'a File>,
+  /// Admitted plugin-path directories: each exposes its host-chosen value as
+  /// an environment variable (so source can build host-real absolute paths) and
+  /// as a `$...` token for the exec broker, resolved symmetrically. Only the
+  /// directories actually admitted are present (assets when exec is granted,
+  /// data when storage is granted).
+  pub paths: Vec<crate::exec_policy::PluginDir>,
 }
 
 /// Launch only from a resource-limited trusted controller. All arguments and
@@ -34,7 +97,9 @@ pub struct Resources<'a> {
 ///
 /// Grants must come from the controller's current admitted record. Read-only
 /// directory slots, optional network access, a selected media proxy, and a GPU
-/// render node and text notifications are implemented; storage is not yet.
+/// render node and text notifications are implemented; storage and sound are
+/// served through the grant pipeline. Sandboxed plugins remain unable to reach
+/// the desktop's PipeWire or Wayland session directly.
 /// `bootstrap` must restrict itself before loading any code from the bundle.
 /// The caller must drain stderr with a bounded log budget and supervise child
 /// exit; dropping the returned Child is not a substitute for stopping the Unit.
@@ -57,10 +122,9 @@ pub fn spawn(
       "invalid worker mount descriptors",
     ));
   }
-  if grants.read.len() > 8 || grants.storage {
-    return Err(io::Error::new(
-      io::ErrorKind::Unsupported,
-      "worker resource grant is not implemented yet",
+  if grants.filesystem.len() > MAX_GRANTED_DIRS {
+    return Err(invalid(
+      "directory grants exceed the enforced sandbox descriptor budget",
     ));
   }
   let media = match (&grants.media, resources.media) {
@@ -68,7 +132,34 @@ pub fn spawn(
     (None, None) => None,
     _ => return Err(io::Error::other("media grant and prepared proxy disagree")),
   };
-  let requests = match (grants.notifications || grants.settings, resources.requests) {
+  // The storage grant is only satisfiable when the controller prepared an
+  // owned private directory; a grant without the directory (or vice versa) is
+  // a host/controller disagreement, never a silent downgrade to tmpfs.
+  let storage = match (&grants.storage, resources.storage) {
+    (true, Some(directory)) => {
+      if !directory.metadata()?.is_dir() {
+        return Err(io::Error::other(
+          "storage grant requires a directory resource",
+        ));
+      }
+      Some(directory)
+    }
+    (false, None) => None,
+    _ => {
+      return Err(io::Error::other(
+        "storage grant and prepared directory disagree",
+      ));
+    }
+  };
+  let requests = match (
+    resources.runtime.is_some()
+      || grants.notifications
+      || !grants.http.is_empty()
+      || !grants.exec.is_empty()
+      || grants.settings.can_write()
+      || grants.open_urls,
+    resources.requests,
+  ) {
     (true, Some(broker)) => Some(broker.socket()),
     (false, None) => None,
     _ => {
@@ -77,10 +168,13 @@ pub fn spawn(
       ));
     }
   };
-  let mut directories = Vec::new();
-  for (name, directory) in &grants.read {
+  // Each granted host entry consumes one descriptor that must stay open for
+  // bubblewrap to consume; the count is bounded by MAX_GRANTED_DIRS, which is
+  // itself derived from the persisted-record budget (see grants.rs).
+  let mut directories: Vec<(&String, File, bool)> = Vec::new();
+  for (name, directory) in &grants.filesystem {
     validate_id(name)?;
-    directories.push((name, directory.open()?));
+    directories.push((name, directory.open()?, directory.access.writable()));
   }
   let mut command = Command::new("/usr/bin/bwrap");
   command.env_clear().args([
@@ -117,10 +211,6 @@ pub fn spawn(
     "16777216",
     "--tmpfs",
     "/tmp",
-    "--size",
-    "33554432",
-    "--tmpfs",
-    "/home/plugin",
     "--size",
     "8388608",
     "--tmpfs",
@@ -194,6 +284,17 @@ pub fn spawn(
     (display, "/run/plugin/wayland"),
   ];
   let mut descriptors = mounts.map(|(file, _)| file.as_raw_fd()).to_vec();
+  // A persistent storage grant replaces the ephemeral home tmpfs with a
+  // read-write bind of the controller-owned directory; otherwise HOME stays a
+  // 32 MiB tmpfs. bwrap --size applies to the *following* --tmpfs, so keep
+  // each home tmpfs paired with its own --size (the bind takes no size).
+  if let Some(directory) = storage {
+    let fd = directory.as_raw_fd();
+    command.args(["--bind-fd", &fd.to_string(), "/home/plugin"]);
+    descriptors.push(fd);
+  } else {
+    command.args(["--size", "33554432", "--tmpfs", "/home/plugin"]);
+  }
   for (file, destination) in mounts {
     command.args(["--ro-bind-fd", &file.as_raw_fd().to_string(), destination]);
   }
@@ -221,9 +322,16 @@ pub fn spawn(
   if resources.context.is_some() {
     command.args(["--setenv", "OMARCHY_PLUGIN_CONTEXT", "1"]);
   }
-  for (name, file) in &directories {
+  for (name, file, writable) in &directories {
+    // A selected writable host directory is a read-write bind (writes affect
+    // real host data); the read directory stays read-only.
+    let option = if *writable {
+      "--bind-fd"
+    } else {
+      "--ro-bind-fd"
+    };
     command.args([
-      "--ro-bind-fd",
+      option,
       &file.as_raw_fd().to_string(),
       &format!("/grants/{name}"),
     ]);
@@ -240,29 +348,47 @@ pub fn spawn(
     ]);
     descriptors.push(file.as_raw_fd());
   }
+  // Runtime-readable view of the actually-granted access, authored by the
+  // controller from its admitted record. Read-only so plugin code can adapt to
+  // declined optional access but cannot rewrite its own grants.
+  if let Some(file) = resources.grants_json {
+    command.args([
+      "--ro-bind-fd",
+      &file.as_raw_fd().to_string(),
+      "/run/plugin/grants.json",
+    ]);
+    descriptors.push(file.as_raw_fd());
+  }
   // Bubblewrap consumes each --ro-bind-fd descriptor, including aliases.
-  let request_alias = requests
-    .filter(|_| grants.notifications && grants.settings)
-    .map(File::try_clone)
-    .transpose()?;
-  if let Some(file) = requests {
-    for (granted, destination, socket) in [
-      (grants.notifications, "/run/plugin/notify", file),
-      (
-        grants.settings,
-        "/run/plugin/settings",
-        request_alias.as_ref().unwrap_or(file),
-      ),
+  let mut request_mounts = Vec::new();
+  if let Some(socket) = requests {
+    for (granted, destination) in [
+      (resources.runtime.is_some(), "/run/plugin/ui"),
+      (grants.notifications, "/run/plugin/notify"),
+      (grants.settings.can_write(), "/run/plugin/settings"),
+      (grants.open_urls, "/run/plugin/open-url"),
+      (!grants.http.is_empty(), "/run/plugin/http"),
+      (!grants.exec.is_empty(), "/run/plugin/exec"),
     ] {
       if granted {
-        command.args(["--ro-bind-fd", &socket.as_raw_fd().to_string(), destination]);
-        descriptors.push(socket.as_raw_fd());
+        request_mounts.push((socket.try_clone()?, destination));
       }
     }
   }
+  for (socket, destination) in &request_mounts {
+    command.args(["--ro-bind-fd", &socket.as_raw_fd().to_string(), destination]);
+    descriptors.push(socket.as_raw_fd());
+  }
   for (name, value) in [
     ("HOME", "/home/plugin"),
-    ("PATH", "/usr/bin"),
+    (
+      "PATH",
+      if resources.runtime.is_some() {
+        "/runtime/bin:/usr/bin"
+      } else {
+        "/usr/bin"
+      },
+    ),
     ("LANG", "C.UTF-8"),
     ("XDG_RUNTIME_DIR", "/run/plugin"),
     ("WAYLAND_DISPLAY", "wayland"),
@@ -272,6 +398,9 @@ pub fn spawn(
     ("QML_IMPORT_PATH", "/plugin/native"),
   ] {
     command.args(["--setenv", name, value]);
+  }
+  for dir in &resources.paths {
+    command.args(["--setenv", dir.env, &dir.value]);
   }
   command
     .args([
@@ -319,6 +448,8 @@ pub fn restrict_bootstrap() -> io::Result<()> {
     "/run/plugin/media",
     "/run/plugin/notify",
     "/run/plugin/settings",
+    "/run/plugin/exec",
+    "/run/plugin/open-url",
   ] {
     match OpenOptions::new()
       .read(true)
@@ -330,7 +461,9 @@ pub fn restrict_bootstrap() -> io::Result<()> {
       Err(error) => return Err(error),
     }
   }
-  let directories = ["/tmp", "/home/plugin", "/run/plugin"].map(|path| {
+  // Home can be persistent host-backed storage. File access must not also
+  // grant access to host sockets there, even if its backing filesystem is tmpfs.
+  let directories = ["/tmp", "/run/plugin"].map(|path| {
     OpenOptions::new()
       .read(true)
       .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
@@ -341,4 +474,53 @@ pub fn restrict_bootstrap() -> io::Result<()> {
     &sockets.iter().map(AsFd::as_fd).collect::<Vec<_>>(),
     &directories.iter().map(AsFd::as_fd).collect::<Vec<_>>(),
   )
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::revision::Revision;
+  use std::{fs, os::unix::fs::PermissionsExt};
+
+  #[test]
+  fn host_assets_are_revision_exact_and_owned_by_one_runtime() {
+    let private = || {
+      tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap()
+    };
+    let source = private();
+    let revisions = private();
+    let first_runtime = private();
+    let second_runtime = private();
+    fs::write(source.path().join("sound.wav"), "first").unwrap();
+    fs::write(source.path().join("removed.wav"), "old asset").unwrap();
+    let first = Revision::import(source.path(), revisions.path()).unwrap();
+    let first_stage =
+      stage_plugin_assets(&first.path, &first.digest, first_runtime.path()).unwrap();
+    fs::remove_file(source.path().join("removed.wav")).unwrap();
+    fs::write(source.path().join("sound.wav"), "second").unwrap();
+    let second = Revision::import(source.path(), revisions.path()).unwrap();
+    let second_stage =
+      stage_plugin_assets(&second.path, &second.digest, second_runtime.path()).unwrap();
+    assert_eq!(fs::read(first_stage.join("sound.wav")).unwrap(), b"first");
+    assert_eq!(fs::read(second_stage.join("sound.wav")).unwrap(), b"second");
+    assert!(first_stage.join("removed.wav").exists());
+    assert!(!second_stage.join("removed.wav").exists());
+    assert!(stage_plugin_assets(&first.path, &second.digest, second_runtime.path()).is_err());
+
+    // A pre-existing stage must not redirect a copy into an unrelated file.
+    let outside = source.path().join("outside");
+    fs::write(&outside, "untouched").unwrap();
+    fs::remove_file(first_stage.join("sound.wav")).unwrap();
+    std::os::unix::fs::symlink(&outside, first_stage.join("sound.wav")).unwrap();
+    assert!(stage_plugin_assets(&first.path, &first.digest, first_runtime.path()).is_err());
+    assert_eq!(fs::read(&outside).unwrap(), b"untouched");
+    drop(first_runtime);
+    assert!(!first_stage.exists());
+    assert!(second_stage.exists());
+    drop(second_runtime);
+    assert!(!second_stage.exists());
+  }
 }

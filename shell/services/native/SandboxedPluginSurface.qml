@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Window
 import Quickshell
 import Quickshell.Wayland
 import Omarchy.PluginHost
@@ -12,8 +13,16 @@ PanelWindow {
   required property string store
   required property string controller
   property var settings: ({})
+  property var panelCommand: null
+  readonly property bool opened: !error && (panelCommand && panelCommand.serial !== view.panelSerial
+    ? panelCommand.open : view.panelOpen)
+  property bool focusPrimed: false
+  property bool focusHeld: false
+  property bool hadWindowFocus: false
+  onOpenedChanged: if (!opened) focusHeld = false
   readonly property string contextJson: JSON.stringify({
     settings: settings,
+    panel: panelCommand,
     theme: {
       foreground: String(Color.foreground), background: String(Color.background),
       accent: String(Color.accent), urgent: String(Color.urgent), muted: String(Color.muted),
@@ -23,7 +32,6 @@ PanelWindow {
   })
   function updateContext() { if (started && !error) view.setContext(contextJson) }
   onContextJsonChanged: Qt.callLater(updateContext)
-  property bool shown: true
   readonly property string error: view.error
   readonly property string state: error ? "error" : view.presented ? "running" : "starting"
   signal statusChanged()
@@ -33,11 +41,12 @@ PanelWindow {
   screen: targetScreen
   anchors { top: true; bottom: true; left: true; right: true }
   color: "transparent"
-  visible: shown && !error && targetScreen !== null
+  visible: !error && targetScreen !== null
   exclusionMode: ExclusionMode.Ignore
   WlrLayershell.namespace: "omarchy-plugin-" + pluginId
   WlrLayershell.layer: WlrLayer.Top
-  WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
+  WlrLayershell.keyboardFocus: focusPrimed ? WlrKeyboardFocus.Exclusive
+    : focusHeld ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
   mask: inputMask
 
   property Region inputMask: Region {}
@@ -59,7 +68,35 @@ PanelWindow {
   }
 
   function stop() { view.stop() }
-  function dismiss() { view.dismiss() }
+  function primeFocus() {
+    focusHeld = true
+    focusPrimed = true
+    focusPrimeTimer.restart()
+    view.forceActiveFocus()
+  }
+  function setPanel(open, payload) {
+    if (error) return false
+    var text = open ? String(payload || "") : ""
+    try {
+      if (encodeURIComponent(text).replace(/%[0-9A-F]{2}/g, "x").length > 4096) return false
+    } catch (e) { return false }
+    panelCommand = {
+      serial: (panelCommand ? panelCommand.serial : 0) % 2147483647 + 1,
+      open: open, payload: text
+    }
+    if (open) {
+      primeFocus()
+    } else {
+      focusPrimeTimer.stop()
+      focusPrimed = false
+      focusHeld = false
+      view.dismiss()
+    }
+    return true
+  }
+  function dismiss() { return setPanel(false, "") }
+  function close() { dismiss() }
+  Timer { id: focusPrimeTimer; interval: 75; onTriggered: root.focusPrimed = false }
   readonly property int renderScale: targetScreen ? Math.max(1, Math.ceil(targetScreen.devicePixelRatio)) : 1
   property bool started: false
   function configure() {
@@ -81,5 +118,13 @@ PanelWindow {
     id: view
     anchors.fill: parent
     onStateChanged: root.updateMask()
+    onFocusRequested: root.primeFocus()
+    Window.onActiveChanged: {
+      if (Window.active) root.hadWindowFocus = true
+      else if (root.hadWindowFocus) {
+        root.hadWindowFocus = false
+        root.dismiss()
+      }
+    }
   }
 }
