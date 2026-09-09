@@ -5,6 +5,7 @@ import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 import "Services"
+import "Ward/RequestFeedback.js" as RequestFeedback
 
 // Evaluated only inside the restricted worker, never by the desktop shell.
 ShellRoot {
@@ -204,16 +205,17 @@ ShellRoot {
   }
   IpcHandler {
     target: "ward-runtime"
-    function linkFailed(): void {
-      root.requestError = "Link could not be opened. Review plugin access or retry."
+    function linkFailed(status: string): void {
+      root.requestError = RequestFeedback.linkError(status)
       errorTimer.restart()
     }
   }
   Timer { id: errorTimer; interval: 5000; onTriggered: root.requestError = "" }
   PanelWindow {
+    readonly property var placement: RequestFeedback.placement(root.barPlacement, Style.gapsOut, Style.bar.sizeHorizontal)
     visible: root.requestError !== ""
-    anchors { bottom: true; right: true }
-    margins { bottom: Style.gapsOut; right: Style.gapsOut }
+    anchors { top: true; right: true }
+    margins { top: placement.top; right: placement.right }
     implicitWidth: Math.min(Style.space(340), screen ? screen.width - 2 * Style.gapsOut : 340)
     implicitHeight: saveError.implicitHeight + 2 * Style.spacing.popupPadding
     color: "transparent"
