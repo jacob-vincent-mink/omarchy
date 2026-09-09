@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Window
 import Quickshell
 import Quickshell.Wayland
-import Omarchy.PluginHost
+import Omarchy.Ward
 import qs.Commons
 
 // One private desktop canvas, hosted by the existing trusted shell. A worker's
@@ -43,7 +43,7 @@ PanelWindow {
   color: "transparent"
   visible: !error && targetScreen !== null
   exclusionMode: ExclusionMode.Ignore
-  WlrLayershell.namespace: "omarchy-plugin-" + pluginId
+  WlrLayershell.namespace: "omarchy-ward-" + pluginId
   WlrLayershell.layer: WlrLayer.Top
   WlrLayershell.keyboardFocus: focusPrimed ? WlrKeyboardFocus.Exclusive
     : focusHeld ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None

@@ -278,7 +278,7 @@ verifies together:
 
 The revised client records and acknowledges layer configures, repaints resized buffers, checks post-change pixels and stale-region clearing, and verifies logical pointer coordinates after narrowing its output. The shared readback fixture accepts new physical buffer dimensions after rescaling. Teardown sets `stop`, dispatches while polling `is_finished()`, and requires termination within five seconds before joining; a stuck client fails rather than silently passing.
 
-The review harness lives in a scratch crate that symlinks the plugin-host; the
+The review harness lives in a scratch crate that symlinks the ward; the
 five failing cases plus this panel test are exercised with
 `cargo test --features graphics` (gated on `OMARCHY_TEST_GRAPHICS=1`) and via
 `cargo clippy --features graphics --all-targets -- -D warnings`, both clean.

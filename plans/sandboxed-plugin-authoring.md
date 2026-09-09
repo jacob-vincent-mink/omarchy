@@ -7,9 +7,9 @@ Proposal, not implemented syntax. The [authoring reference](../docs/sandboxed-pl
 Retain the two underlying resources: an approved read-only bundle and a private mutable home. Do not add another data directory or a manifest staging lifecycle.
 
 - Local plugin code uses relative QML URLs or `/plugin` for assets and `$HOME` for data. The existing standard paths are sufficient.
-- Rename the host-command-only tokens/variables from `OMARCHY_PLUGIN_PATH` to `OMARCHY_PLUGIN_HOST_ASSETS` and from `OMARCHY_PLUGIN_DATA` to `OMARCHY_PLUGIN_HOST_DATA`. The longer names make their execution context explicit; they must not look like ordinary local paths.
+- Rename the host-command-only tokens/variables from `OMARCHY_PLUGIN_PATH` to `OMARCHY_WARD_HOST_ASSETS` and from `OMARCHY_PLUGIN_DATA` to `OMARCHY_WARD_HOST_DATA`. The longer names make their execution context explicit; they must not look like ordinary local paths.
 - Encourage literal tokens in broker argv, rather than reading the host-path environment variables. Host resolution remains an exec concern; entry-point paths stay repository-relative with no interpolation.
-- Writing `$HOME/x` makes the same file available to an approved host command as `$OMARCHY_PLUGIN_HOST_DATA/x` when storage is granted. Shipped read-only assets do not need copying into data. Plugins initialize mutable defaults on first use; no install hook or automatic data overwrite is introduced.
+- Writing `$HOME/x` makes the same file available to an approved host command as `$OMARCHY_WARD_HOST_DATA/x` when storage is granted. Shipped read-only assets do not need copying into data. Plugins initialize mutable defaults on first use; no install hook or automatic data overwrite is introduced.
 
 Do not teach `/plugin` as a usable path for a host process, or make `$HOME` mean different locations based on which manifest field contains it. Do not silently substitute paths in arbitrary arguments, regexes or QML strings.
 

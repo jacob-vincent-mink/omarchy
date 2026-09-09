@@ -50,7 +50,7 @@ Item {
 
         RowLayout {
           Layout.fillWidth: true
-          Label { text: "Review plugin access"; font.pixelSize: Style.font.heading; font.bold: true; Layout.fillWidth: true }
+          Label { text: "Ward · Plugin access"; font.pixelSize: Style.font.heading; font.bold: true; Layout.fillWidth: true }
           Button {
             objectName: "review-close"
             text: "Close"; focusable: true

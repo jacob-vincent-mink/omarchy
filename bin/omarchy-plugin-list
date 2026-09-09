@@ -30,7 +30,7 @@ if jq -e 'any(.[]; .sandboxed)' <<<"$catalog" >/dev/null; then
   # The catalog remains usable with no running shell. Approval comes from
   # Rust, while enabled continues to describe shell activation, not grants.
   shell_plugins=$(omarchy-shell shell listPlugins 2>/dev/null) || shell_plugins='[]'
-  native=$(printf '%s' '{"operation":"list"}' | omarchy-plugin-runtime)
+  native=$(printf '%s' '{"operation":"list"}' | omarchy-ward-runtime)
   plugins=$(jq -cn --argjson catalog "$catalog" --argjson live "$shell_plugins" --argjson native "$native" '
     $catalog | map(. as $entry |
       (first($live[] | select(.id == $entry.id)) // {}) as $running |
