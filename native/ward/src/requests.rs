@@ -191,11 +191,21 @@ pub struct Broker {
   budgets: [Budget; 4],
   // Bound executable snapshot memory within the existing controller ceiling.
   // Worker helpers retry only explicit not-started Busy/RateLimited replies.
-  jobs: [Option<(crate::host_job::Job, Channel)>; 2],
+  jobs: [Option<ExecDelivery>; 2],
   exec_budget: Budget,
   environment: crate::host_job::Environment,
   admission_window: Instant,
   admissions: u32,
+}
+
+enum ExecState {
+  Preparing(crate::exec::Preparation),
+  Running(crate::host_job::Job),
+}
+
+struct ExecDelivery {
+  state: ExecState,
+  channel: Option<Channel>,
 }
 
 struct Delivery {
@@ -272,16 +282,64 @@ impl Broker {
     let now = Instant::now();
     for slot in &mut self.jobs {
       // One invocation per connection; a canceled forwarder also cancels its job.
-      if slot.as_ref().is_some_and(|(_, channel)| {
+      if slot.as_ref().and_then(|job| job.channel.as_ref()).is_some_and(|channel| {
         !matches!(channel.receive(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
       }) {
-        *slot = None;
+        if let Some(ExecDelivery { state: ExecState::Preparing(_), channel }) = slot {
+          *channel = None;
+        } else {
+          *slot = None;
+          continue;
+        }
+      }
+      if let Some(ExecDelivery {
+        state: ExecState::Preparing(preparation),
+        channel,
+      }) = slot
+      {
+        if preparation.started.elapsed() >= crate::host_job::TIMEOUT
+          && let Some(channel) = channel.take()
+        {
+          let _ = reply(&channel, Status::TimedOut);
+        }
+        if !preparation.is_finished() {
+          continue;
+        }
+        let ExecDelivery {
+          state: ExecState::Preparing(preparation),
+          channel,
+        } = slot.take().unwrap()
+        else {
+          unreachable!()
+        };
+        if let Some(channel) = channel {
+          // Discard observed cancellations and recheck live authority under
+          // its lock immediately before executing the sealed bytes.
+          let result = approval.with_request(Kind::Exec, |_, grants| {
+            preparation.start(&grants.exec, &self.environment, &self.paths)
+          });
+          match result {
+            Ok(job) => {
+              *slot = Some(ExecDelivery {
+                state: ExecState::Running(job),
+                channel: Some(channel),
+              })
+            }
+            Err(error) => {
+              let _ = reply(&channel, Status::from_error(&error));
+            }
+          }
+        }
         continue;
       }
-      if let Some((job, _)) = slot {
+      if let Some(ExecDelivery {
+        state: ExecState::Running(job),
+        ..
+      }) = slot
+      {
         let result = job.poll();
         if !matches!(result, Ok(None)) {
-          let (_, channel) = slot.take().unwrap();
+          let channel = slot.take().unwrap().channel.unwrap();
           approval.with_request(Kind::Exec, |_, _| {
             use std::os::fd::AsFd;
             match result.and_then(|output| crate::exec::response(output.unwrap())) {
@@ -383,7 +441,7 @@ impl Broker {
         }
         continue;
       };
-      if let Request::Exec(request) = &request {
+      if let Request::Exec(request) = request {
         let Some(slot) = self.jobs.iter_mut().find(|slot| slot.is_none()) else {
           let _ = reply(&client, Status::Busy);
           continue;
@@ -392,17 +450,19 @@ impl Broker {
           let _ = reply(&client, Status::RateLimited);
           continue;
         }
-        match approval.with_request(kind, |_, grants| {
-          request.start(&grants.exec, &self.environment, &self.paths)
-        }) {
-          Ok(job) => *slot = Some((job, client)),
+        match approval.with_request(kind, |_, grants| request.prepare(&grants.exec, &self.paths)) {
+          Ok(preparation) => {
+            *slot = Some(ExecDelivery {
+              state: ExecState::Preparing(preparation),
+              channel: Some(client),
+            })
+          }
           Err(error) => {
             let _ = reply(&client, Status::from_error(&error));
           }
         }
-        // Executable verification and sealing can be substantial work. Return
-        // after one launch attempt so the controller renews its watchdog and
-        // polls owned jobs before processing another queued executable.
+        // Keep admission work bounded; verification proceeds independently of
+        // the compositor/input loop within the existing two job slots.
         return Ok(());
       }
       let budget = kind as usize;

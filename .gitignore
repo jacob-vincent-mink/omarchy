@@ -5,3 +5,6 @@ __pycache__/
 
 # Native payload installed into a development checkout by CMake
 /lib/
+
+# Shared Cargo workspace build output
+/target/

@@ -210,10 +210,10 @@ Build the development Qt module without installing it:
 
 ```bash
 cargo build --locked --manifest-path native/ward/Cargo.toml --features graphics,qt-bridge
-cmake -S native/ward/qt -B /tmp/omarchy-plugin-qt -G Ninja -DRUST_TARGET_DIR="$PWD/native/ward/target"
+cmake -S native/ward/qt -B /tmp/omarchy-plugin-qt -G Ninja -DRUST_TARGET_DIR="$PWD/target"
 cmake --build /tmp/omarchy-plugin-qt
 OMARCHY_TEST_SYSTEMD=1 OMARCHY_TEST_GRAPHICS=1 OMARCHY_TEST_QT_BRIDGE=/tmp/omarchy-plugin-qt cargo test --locked --manifest-path native/ward/Cargo.toml --features graphics,qt-bridge --test qt
-OMARCHY_TEST_SYSTEMD=1 OMARCHY_TEST_GRAPHICS=1 OMARCHY_TEST_QT_BRIDGE=/tmp/omarchy-plugin-qt OMARCHY_TEST_WARD_HOST="$PWD/native/ward/target/debug/omarchy-ward" bash test/shell.d/ward-integration-test.sh
+OMARCHY_TEST_SYSTEMD=1 OMARCHY_TEST_GRAPHICS=1 OMARCHY_TEST_QT_BRIDGE=/tmp/omarchy-plugin-qt OMARCHY_TEST_WARD_HOST="$PWD/target/debug/omarchy-ward" bash test/shell.d/ward-integration-test.sh
 ```
 
 For installed-layout verification, stage with `cmake --install /tmp/omarchy-plugin-qt --prefix <private-staging-directory>` and repeat the tests with `OMARCHY_TEST_QT_BRIDGE=<private-staging-directory>/lib/qml`; `OMARCHY_TEST_WARD_HOST=<private-staging-directory>/lib/omarchy-ward` selects the staged executable for activation. Add `--test shared_runtime` with both variables to exercise the packaged original-entry-point loader; it also checks the staged bootstrap matches the current source. `OMARCHY_TEST_ACTIVATION_CAPTURE` optionally selects the activation PPM capture, and `OMARCHY_TEST_SURFACE_FRAMES` selects an existing directory for shared-runtime captures. CMake accepts `-DRUST_PROFILE=release` for release builds; no default package or setup step installs these artifacts yet.
