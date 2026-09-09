@@ -111,12 +111,7 @@ fn notification_worker_child() {
       );
       assert_eq!(receive(&first), "completed");
       omarchy_ward::requests::open_url("webapp", "https://example.test/second").unwrap();
-      assert_eq!(
-        receive(&request(
-          br#"{"version":1,"mode":"browser","url":"https://example.test/rate"}"#
-        )),
-        "rate_limited"
-      );
+      omarchy_ward::requests::open_url("browser", "https://example.test/third").unwrap();
     } else {
       let started = Instant::now();
       assert!(omarchy_ward::requests::open_url("browser", "https://example.test/blocked").is_err());
@@ -503,7 +498,10 @@ fn notification_authority_is_bounded_and_revocation_stops_inflight_delivery() {
           "https://example.test/--private?next=$(touch%20/secret)&q='quoted'",
           "test.notification",
           "webapp",
-          "https://example.test/second"
+          "https://example.test/second",
+          "test.notification",
+          "browser",
+          "https://example.test/third"
         ]
       ),
       "url-revoke" | "url-timeout" => assert_eq!(

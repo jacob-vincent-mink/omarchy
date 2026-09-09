@@ -263,7 +263,9 @@ impl Broker {
       budgets: [
         Budget::new(now, 2, 30),
         Budget::new(now, 8, 1),
-        Budget::new(now, 2, 30),
+        // Navigation is interactive; normal repeated clicks must not incur a
+        // notification-style thirty-second cooldown. Keep only a burst bound.
+        Budget::new(now, 8, 1),
         Budget::new(now, 128, 1),
       ],
       jobs: std::array::from_fn(|_| None),

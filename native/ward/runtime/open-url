@@ -8,9 +8,10 @@ case ${0##*/} in
   omarchy-launch-webapp) mode=webapp ;;
   *) exit 1 ;;
 esac
-if /bootstrap --open-url "$mode" "$1"; then
+if result=$(/bootstrap --json --open-url "$mode" "$1"); then
   exit 0
 else
-  timeout 1s qs ipc -n -p /runtime/shell/worker.qml call -- ward-runtime linkFailed >/dev/null 2>&1
+  status=$(jq -r 'if .version == 1 then .status else "unknown" end' <<<"$result" 2>/dev/null) || status=unknown
+  timeout 1s qs ipc -n -p /runtime/shell/worker.qml call -- ward-runtime linkFailed "$status" >/dev/null 2>&1
   exit 1
 fi
