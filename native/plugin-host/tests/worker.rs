@@ -53,6 +53,15 @@ fn worker_child() {
     assert!(std::env::var_os("NOTIFY_SOCKET").is_none());
     assert!(std::env::var_os("OMARCHY_WORKER_TEST_ROOT").is_none());
     assert_eq!(fs::read_to_string("/plugin/marker").unwrap(), "approved");
+    assert_eq!(std::env::var("OMARCHY_PATH").unwrap(), "/runtime");
+    assert_eq!(fs::read_to_string("/runtime/marker").unwrap(), "runtime");
+    assert!(fs::write("/runtime/marker", "changed").is_err());
+    assert_eq!(
+      UnixStream::connect("/runtime/denied")
+        .unwrap_err()
+        .raw_os_error(),
+      Some(libc::EACCES)
+    );
     assert!(fs::write("/plugin/marker", "changed").is_err());
     assert!(fs::write("/escape", "changed").is_err());
     fs::write("/home/plugin/private", "private").unwrap();
@@ -209,6 +218,10 @@ fn controller_child() {
   let listener = UnixListener::bind(root.join("wayland")).unwrap();
   listener.set_nonblocking(true).unwrap();
   let bundle = path_fd(&root.join("bundle"));
+  let runtime = path_fd(&root.join("runtime"));
+  fs::rename(root.join("runtime"), root.join("original-runtime")).unwrap();
+  fs::create_dir(root.join("runtime")).unwrap();
+  fs::write(root.join("runtime/marker"), "replacement").unwrap();
   // Substitute the name after opening: the original approved inode must remain
   // the mounted bundle, not this replacement directory.
   fs::rename(root.join("bundle"), root.join("original")).unwrap();
@@ -222,7 +235,7 @@ fn controller_child() {
     unsafe { libc::fcntl(leaked.as_raw_fd(), libc::F_SETFD, 0) },
     0
   );
-  let descriptors = [&bootstrap, &bundle, &display];
+  let descriptors = [&bootstrap, &bundle, &display, &runtime];
   let before = descriptors.map(|file| unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) });
   let mut child = worker::spawn(
     &bootstrap,
@@ -239,7 +252,10 @@ fn controller_child() {
     ],
     limits(),
     &grants,
-    worker::Resources::default(),
+    worker::Resources {
+      runtime: Some(&runtime),
+      ..Default::default()
+    },
   )
   .unwrap();
   assert_eq!(
@@ -299,6 +315,9 @@ fn supervised_worker_isolation() {
     fs::create_dir(root.path().join("bundle")).unwrap();
     fs::write(root.path().join("bundle/marker"), "approved").unwrap();
     let _denied = UnixListener::bind(root.path().join("bundle/denied")).unwrap();
+    fs::create_dir(root.path().join("runtime")).unwrap();
+    fs::write(root.path().join("runtime/marker"), "runtime").unwrap();
+    let _runtime_denied = UnixListener::bind(root.path().join("runtime/denied")).unwrap();
     fs::create_dir(root.path().join("selected")).unwrap();
     fs::write(root.path().join("selected/allowed"), "selected data").unwrap();
     let _selected_denied = UnixListener::bind(root.path().join("selected/denied")).unwrap();

@@ -1,11 +1,12 @@
 #![cfg(feature = "graphics")]
 #[path = "support/desktop.rs"]
 mod desktop;
+#[path = "support/operator.rs"]
+mod operator;
 use desktop::{Desktop, Host};
 use omarchy_plugin_host::{controller::Scroll, presentation::Viewport};
 use std::{
   fs,
-  os::unix::fs::PermissionsExt,
   path::PathBuf,
   process::Command,
   sync::mpsc,
@@ -49,9 +50,7 @@ fn activation(review_ui: bool) {
     .to_path_buf();
   let home = root.path().join("home");
   let plugin = home.join(".config/omarchy/plugins/test.activation");
-  let stubs = root.path().join("bin");
   fs::create_dir_all(&plugin).unwrap();
-  fs::create_dir(&stubs).unwrap();
   for module in ["Commons", "Ui"] {
     std::os::unix::fs::symlink(repo.join("shell").join(module), root.path().join(module)).unwrap();
   }
@@ -138,46 +137,7 @@ ShellRoot {{
   }}
 }}
 "##, repo.display(), repo.display())).unwrap();
-  // Redirect only the IPC transport to this private host. All plugin commands
-  // and the SandboxedPlugins/Surface components are the production sources.
-  let transport = stubs.join("omarchy-shell");
-  fs::write(&transport, "#!/bin/bash\nquiet=0\nif [[ $1 == \"-q\" ]]; then quiet=1; shift; fi\nresult=$(/usr/bin/qs ipc -n -p \"$TEST_HOST_QML\" call -- \"$@\") || exit 1\nif (( !quiet )); then echo \"$result\"; fi\n").unwrap();
-  fs::set_permissions(&transport, fs::Permissions::from_mode(0o755)).unwrap();
-  let env = vec![
-    ("HOME", home.into_os_string()),
-    ("OMARCHY_PATH", repo.clone().into_os_string()),
-    (
-      "OMARCHY_PLUGIN_STORE",
-      root.path().join("state").into_os_string(),
-    ),
-    (
-      "OMARCHY_PLUGIN_HOST",
-      std::env::var_os("OMARCHY_TEST_PLUGIN_HOST")
-        .unwrap_or_else(|| env!("CARGO_BIN_EXE_omarchy-plugin-host").into()),
-    ),
-    ("XDG_RUNTIME_DIR", root.path().as_os_str().to_owned()),
-    (
-      "XDG_CONFIG_HOME",
-      root.path().join("config").into_os_string(),
-    ),
-    ("XDG_CACHE_HOME", root.path().join("cache").into_os_string()),
-    ("WAYLAND_DISPLAY", "wayland".into()),
-    ("QT_QPA_PLATFORM", "wayland".into()),
-    ("QT_QPA_PLATFORMTHEME", "none".into()),
-    ("QSG_RHI_BACKEND", "opengl".into()),
-    ("QT_WAYLAND_DISABLE_WINDOWDECORATION", "1".into()),
-    ("QML_IMPORT_PATH", module.clone()),
-    ("TEST_HOST_QML", host_qml.clone().into_os_string()),
-    (
-      "PATH",
-      format!(
-        "{}:{}:/usr/bin",
-        stubs.display(),
-        repo.join("bin").display()
-      )
-      .into(),
-    ),
-  ];
+  let env = operator::environment(root.path(), &repo, &host_qml, &module);
   let mut outer = Desktop::new(
     root.path(),
     Viewport {
@@ -199,24 +159,7 @@ ShellRoot {{
   let (progress, stages) = mpsc::channel();
   let (resume, proceed) = mpsc::channel();
   let commands = std::thread::spawn(move || {
-    let run = |name: &str, args: &[&str]| {
-      let result = Command::new("/usr/bin/timeout")
-        .arg("15s")
-        .arg(name)
-        .args(args)
-        .env_remove("DISPLAY")
-        .envs(env.iter().cloned())
-        .output()
-        .unwrap();
-      assert!(
-        result.status.success(),
-        "{name} ({}): {} {}",
-        result.status,
-        String::from_utf8_lossy(&result.stderr),
-        String::from_utf8_lossy(&result.stdout)
-      );
-      String::from_utf8(result.stdout).unwrap()
-    };
+    let run = |name: &str, args: &[&str]| operator::run(&env, name, args);
     let review: serde_json::Value = serde_json::from_str(&run(
       "omarchy-plugin-review",
       &["test.activation", "--json"],

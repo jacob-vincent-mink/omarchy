@@ -77,7 +77,7 @@ pub struct Manifest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SandboxManifest {
   pub version: u32,
-  pub entry_point: String,
+  pub entry_point: Option<String>,
   pub requests: Requests,
 }
 
@@ -105,11 +105,36 @@ impl Manifest {
     for entry in manifest
       .entry_points
       .values()
-      .chain([&manifest.sandbox.entry_point])
+      .chain(manifest.sandbox.entry_point.iter())
     {
       if !safe_relative(entry) || !revision.join(entry).is_file() {
         return Err(invalid(
           "entry point is not a file in the approved revision",
+        ));
+      }
+    }
+    if manifest.sandbox.entry_point.is_none() {
+      let entries = manifest
+        .kinds
+        .iter()
+        .map(|kind| match kind.as_str() {
+          "bar-widget" => Ok("barWidget"),
+          "service" => Ok("service"),
+          "overlay" => Ok("overlay"),
+          _ => Err(invalid(
+            "shared worker does not support this plugin kind yet",
+          )),
+        })
+        .collect::<io::Result<BTreeSet<_>>>()?;
+      if !entries.contains("barWidget")
+        || entries.len() != manifest.kinds.len()
+        || entries.len() != manifest.entry_points.len()
+        || !entries
+          .iter()
+          .all(|key| manifest.entry_points.contains_key(*key))
+      {
+        return Err(invalid(
+          "shared worker requires matching bar-widget entry points",
         ));
       }
     }
@@ -242,6 +267,53 @@ pub(crate) fn invalid(message: &str) -> io::Error {
 mod tests {
   use super::*;
   use std::fs;
+  #[test]
+  fn shared_worker_requires_supported_matching_entry_points() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("Widget.qml"), "Item {}").unwrap();
+    let mut value = serde_json::json!({
+      "schemaVersion": 1, "id": "test.shared", "name": "Shared", "version": "1",
+      "kinds": ["bar-widget"], "entryPoints": { "barWidget": "Widget.qml" },
+      "sandbox": { "version": 1, "requests": {} }
+    });
+    let read = |value: &serde_json::Value| {
+      fs::write(
+        root.path().join("manifest.json"),
+        serde_json::to_vec(value).unwrap(),
+      )
+      .unwrap();
+      Manifest::read(root.path())
+    };
+    assert!(read(&value).unwrap().sandbox.entry_point.is_none());
+    value["kinds"] = serde_json::json!(["bar-widget", "service", "overlay"]);
+    value["entryPoints"]["service"] = "Widget.qml".into();
+    value["entryPoints"]["overlay"] = "Widget.qml".into();
+    assert!(read(&value).is_ok());
+    value["entryPoints"]["extra"] = "Widget.qml".into();
+    assert!(read(&value).is_err());
+    value["entryPoints"]
+      .as_object_mut()
+      .unwrap()
+      .remove("extra");
+    for kinds in [
+      serde_json::json!(["service", "overlay"]),
+      serde_json::json!(["bar-widget", "bar"]),
+      serde_json::json!(["bar-widget", "bar-widget"]),
+    ] {
+      value["kinds"] = kinds;
+      assert!(read(&value).is_err());
+    }
+    value["sandbox"]["entryPoint"] = "Widget.qml".into();
+    assert_eq!(
+      read(&value).unwrap().sandbox.entry_point.as_deref(),
+      Some("Widget.qml")
+    );
+    value["sandbox"]["entryPoint"] = "../Widget.qml".into();
+    assert!(read(&value).is_err());
+    value["sandbox"]["entryPoint"] = "missing.qml".into();
+    assert!(read(&value).is_err());
+  }
+
   #[test]
   fn requests_never_become_implicit_grants() {
     let requests = Requests {

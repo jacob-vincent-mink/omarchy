@@ -70,10 +70,19 @@ ShellRoot {
       layer.effect: MultiEffect { shadowEnabled: true; shadowBlur: 1; shadowVerticalOffset: 8 }
       NumberAnimation on rotation { from: 0; to: 360; duration: 1800; loops: Animation.Infinite }
     }
-    TextInput { id: input; x: 24; y: 115; width: 200; height: 40; color: "white"; font.pixelSize: 20; text: "INPUT" }
+    TextInput {
+      id: input; x: 24; y: 115; width: 200; height: 40; color: "white"; font.pixelSize: 20; text: "INPUT"
+      property bool escapePressed: false
+      property bool escapeReleased: false
+      Keys.onEscapePressed: event => { escapePressed = true; event.accepted = true }
+      Keys.onReleased: event => {
+        if (event.key === Qt.Key_Escape) { escapeReleased = escapePressed; event.accepted = true }
+      }
+    }
     Rectangle { x: 250; y: 115; width: 32; height: 32; color: input.text.indexOf("e") >= 0 ? "#44ee22" : "#ff3300" }
     Rectangle { x: 294; y: 115; width: 32; height: 32; color: input.text.indexOf("r") >= 0 ? "#ffee44" : "#111122" }
     Rectangle { x: 338; y: 115; width: 16; height: 32; color: input.activeFocus ? "#aaeeff" : "#111122" }
+    Rectangle { x: 360; y: 115; width: 32; height: 32; color: input.escapeReleased && input.activeFocus ? "#22ccdd" : "#111122" }
     Rectangle {
       id: button; x: 24; y: 180; width: 180; height: 48; color: "#607080"
       Text { anchors.centerIn: parent; text: "Open popup"; color: "white" }
@@ -152,6 +161,8 @@ ShellRoot {
   let mut resize_stage = 0;
   let mut resize_ready = false;
   let mut retyped = false;
+  let mut escape_sent = false;
+  let mut escaped = false;
   let mut resized_at = 0;
   let mut revoked = None;
   let mut withdrawn = false;
@@ -221,7 +232,16 @@ ShellRoot {
         }
         resize_stage = 3;
       }
-      if resize_stage == 3 && count([0xaa, 0xee, 0xff]) > 200 {
+      if resize_stage == 3 && !escape_sent && count([0xaa, 0xee, 0xff]) > 200 {
+        // Escape belongs to the worker's focused control (clear search, close
+        // a menu, etc.), not an unconditional host-side focus withdrawal.
+        for kind in [3, 4] {
+          outer.graphics.input(kind, 9, 0, 0, time).unwrap();
+        }
+        escape_sent = true;
+      }
+      if resize_stage == 3 && escape_sent && count([0x22, 0xcc, 0xdd]) > 500 {
+        escaped = true;
         for kind in [3, 4] {
           outer.graphics.input(kind, 27, 0, 0, time).unwrap();
         }
@@ -345,8 +365,8 @@ ShellRoot {
   }
   store.revoke("test.qt").unwrap();
   assert!(
-    verified && resize_ready && retyped && withdrawn,
-    "Qt bridge verification failed: rendered={verified}, resize={resize_ready}/{resize_stage}, withdrawn={withdrawn}, frames={frames}, colors={maximum_colors:?}\n{}",
+    verified && resize_ready && retyped && escaped && withdrawn,
+    "Qt bridge verification failed: rendered={verified}, resize={resize_ready}/{resize_stage}, escape={escaped}, withdrawn={withdrawn}, frames={frames}, colors={maximum_colors:?}\n{}",
     fs::read_to_string(&log_path).unwrap()
   );
   assert!(
@@ -354,6 +374,6 @@ ShellRoot {
     "revocation killed the Qt host"
   );
   println!(
-    "Qt bridge verified rendering, keyboard, popup, resize/scale/roundtrip, wheel/finger scrolling and revocation after {frames} outer frames"
+    "Qt bridge verified rendering, keyboard/Escape, popup, resize/scale/roundtrip, wheel/finger scrolling and revocation after {frames} outer frames"
   );
 }

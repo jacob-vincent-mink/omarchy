@@ -1,9 +1,10 @@
+#![allow(dead_code)] // shared fixture: each test crate uses a subset of its API
 //! Shared private-display fixture for tests of the trusted Qt host. No fixture
 //! connects to the desktop compositor; only its supervised workers use systemd.
 use omarchy_plugin_host::{
   channel::Channel,
   graphics::Graphics,
-  presentation::{Event, Viewport},
+  presentation::{Event, Region, Viewport},
 };
 use smithay::backend::{
   allocator::{
@@ -70,6 +71,7 @@ pub struct Desktop {
   renderer: GlesRenderer,
   buffers: [Option<Dmabuf>; 2],
   pixels: (i32, i32),
+  last_mask: Vec<Region>,
 }
 
 pub struct Frame {
@@ -84,6 +86,12 @@ impl Frame {
       .filter(|pixel| pixel[..3] == rgb)
       .count()
   }
+  pub fn pixels(&self) -> &[u8] {
+    &self.pixels
+  }
+  pub fn size(&self) -> (i32, i32) {
+    self.size
+  }
   pub fn save(&self, path: impl AsRef<Path>) {
     let mut file = io::BufWriter::new(fs::File::create(path).unwrap());
     write!(file, "P6\n{} {}\n255\n", self.size.0, self.size.1).unwrap();
@@ -92,10 +100,16 @@ impl Frame {
     }
   }
 }
+
 impl Desktop {
+  pub fn mask(&self) -> &[Region] {
+    &self.last_mask
+  }
+
   pub fn new(root: &Path, viewport: Viewport) -> Self {
     let mut graphics = Graphics::new(&root.join("wayland"), viewport).unwrap();
     let (producer, consumer) = Channel::pair().unwrap();
+    let (width, height) = viewport.pixels().unwrap();
     graphics.describe(&producer).unwrap();
     let device = EGLDevice::enumerate()
       .unwrap()
@@ -103,7 +117,6 @@ impl Desktop {
       .unwrap();
     let egl = unsafe { EGLDisplay::new(device).unwrap() };
     let renderer = unsafe { GlesRenderer::new(EGLContext::new(&egl).unwrap()).unwrap() };
-    let (width, height) = viewport.pixels().unwrap();
     Self {
       graphics,
       producer,
@@ -111,6 +124,64 @@ impl Desktop {
       renderer,
       buffers: [None, None],
       pixels: (width as i32, height as i32),
+      last_mask: Vec::new(),
+    }
+  }
+
+  /// Like [`Self::new`] but drives the worker at an explicit (possibly
+  /// fractional) render scale, reallocating the physical canvas to
+  /// `round(width*scale) x round(height*scale)` up front so the readback
+  /// geometry and the advertised `wp_fractional_scale` preference are set
+  /// before the client connects.
+  pub fn new_scaled(root: &Path, viewport: Viewport, render_scale: f64) -> Self {
+    let mut graphics = Graphics::new(&root.join("wayland"), viewport).unwrap();
+    let (producer, consumer) = Channel::pair().unwrap();
+    // Arm the ping-pong frame slots with the integer describe, then drive a
+    // render that reallocates to the fractional canvas and re-describes it
+    // internally. `render()` re-describes after a realloc, so no second
+    // explicit describe is needed.
+    graphics.describe(&producer).unwrap();
+    graphics
+      .configure_scaled(viewport, render_scale, 0)
+      .unwrap();
+    graphics.render(&producer, 0).unwrap();
+    // Drain the setup stream: keep the final (fractional) buffer table and
+    // readback size, and ack the blank realloc frame so `FrameState` is clean.
+    let mut buffers = [None, None];
+    let mut last_size = (0i32, 0i32);
+    while let Ok(packet) = consumer.receive() {
+      match Event::decode(packet).unwrap() {
+        Event::Buffer(buffer) => {
+          let size = (buffer.width as i32, buffer.height as i32);
+          let mut builder = Dmabuf::builder(
+            size,
+            Fourcc::Argb8888,
+            Modifier::Linear,
+            DmabufFlags::empty(),
+          );
+          assert!(builder.add_plane(buffer.fd, 0, 0, buffer.stride));
+          buffers[buffer.slot as usize] = builder.build();
+          last_size = size;
+        }
+        Event::Frame { serial, .. } => graphics.presented(serial).unwrap(),
+        _ => {}
+      }
+    }
+    let pixels = last_size;
+    let device = EGLDevice::enumerate()
+      .unwrap()
+      .find(|device| device.render_device_path().is_ok())
+      .unwrap();
+    let egl = unsafe { EGLDisplay::new(device).unwrap() };
+    let renderer = unsafe { GlesRenderer::new(EGLContext::new(&egl).unwrap()).unwrap() };
+    Self {
+      graphics,
+      producer,
+      consumer,
+      renderer,
+      buffers,
+      pixels,
+      last_mask: Vec::new(),
     }
   }
 
@@ -126,7 +197,11 @@ impl Desktop {
       };
       match Event::decode(packet).unwrap() {
         Event::Buffer(buffer) => {
-          assert_eq!((buffer.width as i32, buffer.height as i32), self.pixels);
+          // A rescale re-describes a new generation at a different physical
+          // size; track the current generation so later Frame readbacks use
+          // the right dimensions. Frame ownership is preserved: the worker
+          // only reallocates after the previous frame is presented.
+          self.pixels = (buffer.width as i32, buffer.height as i32);
           let mut builder = Dmabuf::builder(
             self.pixels,
             Fourcc::Argb8888,
@@ -155,6 +230,7 @@ impl Desktop {
           });
           self.graphics.presented(serial).unwrap();
         }
+        Event::Mask { regions, .. } => self.last_mask = regions,
         _ => (),
       }
     }
