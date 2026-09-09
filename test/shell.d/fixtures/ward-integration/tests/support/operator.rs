@@ -39,6 +39,11 @@ pub fn environment(
     ("OMARCHY_PATH", repo.as_os_str().to_owned()),
     ("OMARCHY_WARD_STORE", root.join("state").into_os_string()),
     ("OMARCHY_WARD_HOST", controller.into_os_string()),
+    (
+      "OMARCHY_WARD_RUNTIME",
+      std::env::var_os("OMARCHY_TEST_WARD_RUNTIME")
+        .expect("select the separately staged Omarchy adapter"),
+    ),
     ("XDG_RUNTIME_DIR", root.as_os_str().to_owned()),
     ("XDG_CONFIG_HOME", root.join("config").into_os_string()),
     ("XDG_CACHE_HOME", root.join("cache").into_os_string()),

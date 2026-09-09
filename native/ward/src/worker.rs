@@ -316,9 +316,6 @@ pub fn spawn(
       descriptors.push(directory.as_raw_fd());
     }
   }
-  if resources.runtime.is_some() {
-    command.args(["--setenv", "OMARCHY_PATH", "/runtime"]);
-  }
   if resources.context.is_some() {
     command.args(["--setenv", "OMARCHY_PLUGIN_CONTEXT", "1"]);
   }

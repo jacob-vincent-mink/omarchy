@@ -30,7 +30,7 @@ public:
   bool panelOpen() const { return m_panelOpen; }
   uint panelSerial() const { return m_panelSerial; }
   QVariantMap widgetSizes() const { return m_widgetSizes; }
-  Q_INVOKABLE void start(const QString &store, const QString &id, const QString &controller, const QString &topology, const QString &context);
+  Q_INVOKABLE void start(const QString &store, const QString &id, const QString &controller, const QString &topology, const QString &context, const QString &runtime = QString());
   Q_INVOKABLE void configure(const QString &topology);
   Q_INVOKABLE void setContext(const QString &context);
   Q_INVOKABLE void stop();

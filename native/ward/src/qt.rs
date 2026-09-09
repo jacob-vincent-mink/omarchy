@@ -70,6 +70,7 @@ mod ffi {
       controller: &str,
       topology: &str,
       context: &str,
+      runtime: &str,
     ) -> Result<Box<Session>>;
     fn configure_streams(session: &Session, topology: &str) -> Result<()>;
     fn target_input(
@@ -276,13 +277,15 @@ fn begin_streams(
   controller: &str,
   topology: &str,
   context: &str,
+  runtime: &str,
 ) -> io::Result<Box<Session>> {
-  Session::start_with_topology(
+  Session::start_with_topology_and_runtime(
     PathBuf::from(root),
     id.into(),
     PathBuf::from(controller),
     crate::topology::Topology::parse(topology.as_bytes())?,
     parse_context(context)?,
+    (!runtime.is_empty()).then(|| PathBuf::from(runtime)),
   )
   .map(Box::new)
 }

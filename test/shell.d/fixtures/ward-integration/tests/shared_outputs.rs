@@ -1,6 +1,5 @@
 //! Real Qt host: per-output bar views, one service and one active own panel.
-#![cfg(feature = "graphics")]
-#[path = "support/desktop.rs"]
+#[path = "../../../../../native/ward/tests/support/desktop.rs"]
 mod desktop;
 use desktop::{Desktop, Frame, Host};
 use omarchy_ward::{
@@ -133,7 +132,7 @@ BarWidget {
   let shell = root.path().join("shell");
   fs::create_dir(&shell).unwrap();
   let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-    .join("../..")
+    .join("../../../..")
     .canonicalize()
     .unwrap();
   for (from, to) in [
@@ -239,6 +238,11 @@ ShellRoot {
     desktop::command(root.path(), &qml, &module)
       .env("OMARCHY_PATH", &repo)
       .env("OMARCHY_WARD_HOST", controller)
+      .env(
+        "OMARCHY_WARD_RUNTIME",
+        std::env::var_os("OMARCHY_TEST_WARD_RUNTIME")
+          .expect("select the separately staged Omarchy adapter"),
+      )
       .env("OMARCHY_WARD_STORE", root.path().join("store"))
       .env("TEST_SETTINGS", &settings)
       .env("TEST_STATE", root.path().join("state.json"))

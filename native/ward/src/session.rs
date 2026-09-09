@@ -51,7 +51,18 @@ impl Session {
     viewport: Viewport,
     context: UiContext,
   ) -> io::Result<Self> {
-    Self::start_inner(root, id, controller, viewport, context, None)
+    Self::start_with_runtime(root, id, controller, viewport, context, None)
+  }
+
+  pub fn start_with_runtime(
+    root: PathBuf,
+    id: String,
+    controller: PathBuf,
+    viewport: Viewport,
+    context: UiContext,
+    runtime: Option<PathBuf>,
+  ) -> io::Result<Self> {
+    Self::start_inner(root, id, controller, viewport, context, None, runtime)
   }
 
   pub fn start_with_topology(
@@ -60,6 +71,17 @@ impl Session {
     controller: PathBuf,
     topology: crate::topology::Topology,
     context: UiContext,
+  ) -> io::Result<Self> {
+    Self::start_with_topology_and_runtime(root, id, controller, topology, context, None)
+  }
+
+  pub fn start_with_topology_and_runtime(
+    root: PathBuf,
+    id: String,
+    controller: PathBuf,
+    topology: crate::topology::Topology,
+    context: UiContext,
+    runtime: Option<PathBuf>,
   ) -> io::Result<Self> {
     topology.validate()?;
     Self::start_inner(
@@ -73,6 +95,7 @@ impl Session {
       },
       context,
       Some(topology),
+      runtime,
     )
   }
 
@@ -83,6 +106,7 @@ impl Session {
     viewport: Viewport,
     context: UiContext,
     topology: Option<crate::topology::Topology>,
+    runtime: Option<PathBuf>,
   ) -> io::Result<Self> {
     viewport.pixels()?;
     crate::grants::validate_id(&id)?;
@@ -95,7 +119,7 @@ impl Session {
       .name("plugin-session".into())
       .spawn(move || {
         if let Err(error) = launch(
-          root, id, controller, viewport, context, topology, receiver, &sender,
+          root, id, controller, viewport, context, topology, runtime, receiver, &sender,
         ) {
           // A full queue or dropped receiver also terminates the session. Never
           // wait for GUI delivery during service cleanup.
@@ -160,9 +184,16 @@ fn launch(
   mut viewport: Viewport,
   mut context: UiContext,
   mut topology: Option<crate::topology::Topology>,
+  worker_runtime: Option<PathBuf>,
   commands: Receiver<Control>,
   updates: &SyncSender<Update>,
 ) -> io::Result<()> {
+  // Filesystem work stays off the GUI thread. Open before launching a service;
+  // selection is explicit host configuration, never a plugin/session command.
+  let worker_runtime = worker_runtime
+    .as_deref()
+    .map(crate::runtime::Runtime::open)
+    .transpose()?;
   let runtime = tempfile::Builder::new()
     .prefix("omarchy-host-")
     .permissions(std::fs::Permissions::from_mode(0o700))
@@ -198,6 +229,9 @@ fn launch(
         Err(error) => return Err(error),
       }
     };
+    if let Some(runtime) = worker_runtime {
+      runtime.send(&channel)?;
+    }
     if let Some(topology) = topology {
       streams::dispatch(channel, topology, context, commands, updates)
     } else {

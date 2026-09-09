@@ -11,6 +11,8 @@ QtObject {
   required property string pluginId
   required property string store
   required property string controller
+  readonly property string runtimeDirectory: Quickshell.env("OMARCHY_WARD_RUNTIME")
+    || Quickshell.env("OMARCHY_PATH") + "/lib/ward-runtime"
   property var settings: ({})
   property var geometrySource: null
   property string overlayOutputs: "owner"
@@ -112,7 +114,7 @@ QtObject {
     const topology = JSON.stringify({version: 1, generation: ++epoch, outputs: JSON.parse(outputSpecJson)})
     if (!started) {
       started = true
-      session.start(store, pluginId, controller, topology, contextJson)
+      session.start(store, pluginId, controller, topology, contextJson, runtimeDirectory)
     } else session.configure(topology)
   }
   function outputFor(screen) { return screenRows.find(row => row.screen === screen) || null }

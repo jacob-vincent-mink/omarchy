@@ -379,6 +379,8 @@ pub fn run(path: &Path, approval: Option<Approval>) -> io::Result<()> {
   #[cfg(feature = "graphics")]
   let mut graphics: Option<RunningGraphics> = None;
   #[cfg(feature = "graphics")]
+  let mut worker_runtime = None;
+  #[cfg(feature = "graphics")]
   let mut context = UiContext::default();
   #[cfg(feature = "graphics")]
   let started = Instant::now();
@@ -413,6 +415,16 @@ pub fn run(path: &Path, approval: Option<Approval>) -> io::Result<()> {
       if records > 2048 {
         return Err(invalid("host control rate exceeded"));
       }
+      #[cfg(feature = "graphics")]
+      if crate::runtime::Runtime::is_record(&packet) {
+        if graphics.is_some() || worker_runtime.is_some() || approval.is_none() {
+          return Err(invalid(
+            "worker runtime requires initial admitted host selection",
+          ));
+        }
+        worker_runtime = Some(crate::runtime::Runtime::receive(packet)?);
+        continue;
+      }
       match Control::decode(packet)? {
         Control::Stop => return Ok(()),
         Control::Ping(serial) if serial > last_serial => {
@@ -426,7 +438,12 @@ pub fn run(path: &Path, approval: Option<Approval>) -> io::Result<()> {
             .as_ref()
             .ok_or_else(|| invalid("graphics requires an admitted plugin revision"))?;
           graphics = Some(RunningGraphics::start(
-            approval, viewport, None, &channel, &context,
+            approval,
+            viewport,
+            None,
+            &channel,
+            &context,
+            worker_runtime.as_ref(),
           )?);
         }
         #[cfg(feature = "graphics")]
@@ -444,6 +461,7 @@ pub fn run(path: &Path, approval: Option<Approval>) -> io::Result<()> {
             Some(topology),
             &channel,
             &context,
+            worker_runtime.as_ref(),
           )?);
         }
         #[cfg(feature = "graphics")]
@@ -579,6 +597,7 @@ impl RunningGraphics {
     topology: Option<crate::topology::Topology>,
     channel: &Channel,
     context: &UiContext,
+    selected_runtime: Option<&crate::runtime::Runtime>,
   ) -> io::Result<Self> {
     use std::{
       fs::{File, OpenOptions},
@@ -624,19 +643,14 @@ impl RunningGraphics {
             None,
           )
         } else {
-          let path = std::env::current_exe()?
-            .parent()
-            .ok_or_else(|| invalid("controller has no installation directory"))?
-            .join("ward-runtime");
-          let directory = File::open(&path).map_err(|error| {
-            std::io::Error::new(
-              error.kind(),
-              format!("shared worker runtime {}: {error}", path.display()),
-            )
-          })?;
+          let runtime = selected_runtime
+            .ok_or_else(|| invalid("shared worker requires a trusted host runtime directory"))?;
           (
-            vec![std::ffi::OsString::from("--omarchy-worker")],
-            Some(directory),
+            vec![
+              std::ffi::OsString::from("--runtime-worker"),
+              runtime.entry.clone().into(),
+            ],
+            Some(&runtime.directory),
           )
         };
         let media = record
@@ -715,7 +729,7 @@ impl RunningGraphics {
             render_node: Some(display.render_node()),
             media: media.as_ref(),
             requests: requests.as_ref(),
-            runtime: worker_runtime.as_ref(),
+            runtime: worker_runtime,
             context: worker_runtime.as_ref().map(|_| &context_directory),
             grants_json: Some(&grants_json),
             storage: storage.as_ref(),

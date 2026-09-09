@@ -6,7 +6,7 @@ Ward's product scope is third-party plugins distributed through the Omarchy plug
 
 Ward's source and tests use synthetic plugins and generic resource fixtures, including for compatibility adapters. Concrete third-party plugin trials are temporary external experiments, not new test harnesses in Omarchy or a plugin repository. Keep their build artifacts outside Ward's target directory and the reviewed plugin bundle. First-party plugins are not sandbox-port targets.
 
-For process boundaries, rendering/input dataflow and resource paths, see the [architecture reference and diagram](ward-architecture.md).
+For process boundaries, rendering/input dataflow and resource paths, see the [architecture reference and diagram](ward-architecture.md). Omarchy separately supplies the [trusted worker runtime](ward-runtime.md); a plugin cannot choose that directory or add runtime configuration to its sandbox declaration.
 
 ## Start here
 

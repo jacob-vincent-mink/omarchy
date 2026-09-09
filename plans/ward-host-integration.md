@@ -10,7 +10,7 @@ The likely distribution path is a separate Ward source repository, with a source
 
 If Ward ships, all new remote Git plugin installations default to Ward unless the user explicitly chooses Yolo mode. This applies to direct Git URLs as well as registry installs. A plugin cannot opt itself out through its manifest.
 
-The remaining immediate implementation scope is the trusted host-selected worker runtime directory. The broader ownership split below records the direction; it does not authorize new environment or host-execution capabilities without discussion.
+The trusted host-selected worker runtime directory is implemented; see its [contract and staging workflow](../docs/ward-runtime.md). The broader ownership split below records the direction; it does not authorize new environment or host-execution capabilities without discussion.
 
 Remote-install provenance/routing, package publication, and disk-budget enforcement remain planned follow-up work. Writing this plan does not authorize implementation of those follow-ups or another live plugin trial.
 
@@ -20,8 +20,8 @@ Existing first-party plugins and explicitly trusted local code keep their in-pro
 
 The [architecture reference](../docs/ward-architecture.md) describes the implemented preview. Important gaps for this plan are:
 
-- The [native build](../native/ward/qt/CMakeLists.txt) installs an `Omarchy.Ward` Qt module and copies Omarchy `shell/Commons`, `shell/Ui`, and `PluginShellApi.qml` into Ward's runtime. The build assumes an Omarchy checkout above it.
-- The [controller](../native/ward/src/controller.rs) selects an adjacent `ward-runtime`, and the [bootstrap](../native/ward/src/main.rs) has an `--omarchy-worker` mode. The [shared worker](../native/ward/runtime/worker.qml) implements the Omarchy plugin facade.
+- The [native build](../native/ward/qt/CMakeLists.txt) installs its `Omarchy.Ward` Qt module and executable only. Omarchy independently stages Commons, Ui, PluginShellApi and its worker adapter through `omarchy-ward-stage-runtime`; the native build does not require an enclosing Omarchy checkout.
+- The [controller](../native/ward/src/controller.rs) receives an explicitly host-selected runtime directory descriptor before graphics starts. The generic bootstrap executes its version-validated entry point inside the sandbox. Omarchy owns the [shared worker](../shell/ward-runtime/worker.qml) and its sandbox-local environment/aliases; there is no adjacent-directory fallback or `--omarchy-worker` mode.
 - The [request broker](../native/ward/src/requests.rs) selects Omarchy host helpers through `OMARCHY_PATH`. Moving only QML files would therefore leave the dependency inverted.
 - [SandboxedPlugins](../shell/services/SandboxedPlugins.qml) now owns one shared session per plugin with per-output native importers and independent bar placements. Mixed-DPI streams, stable identities, owner-only/default roaming, panel transfer, hotplug and shared service state have synthetic coverage. See the [architecture reference](../docs/ward-architecture.md#pixels-input-and-context) for the implemented contract.
 - Install routing still depends on the manifest's `sandbox` declaration or a retained host marker. There is no complete host-owned installation provenance policy yet.
@@ -111,7 +111,7 @@ Investigate filesystem-native quotas or another bounded backing store against Om
 
 ## Order, decisions, and completion
 
-Next: supply the trusted runtime directory without a Ward build dependency on Omarchy assets. Broader host-effect generalization requires its own discussion. B, C, and D remain independent release work with their own review gates. Keep changes atomic rather than combining namespace moves, geometry changes, install routing, and quota enforcement in one commit.
+Completed immediate slice: trusted runtime selection, descriptor transport, bounded version/layout validation, sandbox-local generic bootstrap, separate Omarchy staging, and separate generic/adapter fixtures. This does not finish A: host-effect helpers, product schema/context names, native naming, and the release/update compatibility contract still need work. Broader host-effect generalization requires its own discussion. B, C, and D remain independent release work with their own review gates. Keep changes atomic rather than combining namespace moves, geometry changes, install routing, and quota enforcement in one commit.
 
 Pending discussion:
 

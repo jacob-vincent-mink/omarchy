@@ -1,5 +1,4 @@
-#![cfg(feature = "graphics")]
-#[path = "support/desktop.rs"]
+#[path = "../../../../../native/ward/tests/support/desktop.rs"]
 mod desktop;
 use desktop::{Desktop, Frame, Host};
 use omarchy_ward::{grants::Grants, presentation::Viewport, revision::Revision, store::Store};
@@ -28,7 +27,11 @@ fn missing_or_invalid_shared_runtime_fails_without_presenting() {
   for invalid_directory in [false, true] {
     let root = desktop::runtime();
     let controller = root.path().join("omarchy-ward");
-    fs::copy(env!("CARGO_BIN_EXE_omarchy-ward"), &controller).unwrap();
+    fs::copy(
+      std::env::var_os("OMARCHY_TEST_WARD_HOST").unwrap(),
+      &controller,
+    )
+    .unwrap();
     if invalid_directory {
       fs::write(root.path().join("ward-runtime"), "not a directory").unwrap();
     }
@@ -52,7 +55,7 @@ fn missing_or_invalid_shared_runtime_fails_without_presenting() {
       .0
       .approve(&revision.digest, Grants::default())
       .unwrap();
-    let session = Session::start(
+    let session = Session::start_with_runtime(
       store,
       "test.shared".into(),
       controller,
@@ -61,6 +64,8 @@ fn missing_or_invalid_shared_runtime_fails_without_presenting() {
         height: 240,
         scale_fixed: 120,
       },
+      Default::default(),
+      invalid_directory.then(|| root.path().join("ward-runtime")),
     )
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -71,7 +76,10 @@ fn missing_or_invalid_shared_runtime_fails_without_presenting() {
           break;
         }
         Some(Update::Presentation(omarchy_ward::presentation::Event::Frame { .. }))
-        | Some(Update::Stream(omarchy_ward::presentation::StreamEvent { event: omarchy_ward::presentation::Event::Frame { .. }, .. })) => {
+        | Some(Update::Stream(omarchy_ward::presentation::StreamEvent {
+          event: omarchy_ward::presentation::Event::Frame { .. },
+          ..
+        })) => {
           panic!("invalid runtime produced a frame");
         }
         // Ready acknowledges controller admission, not worker content.
@@ -123,7 +131,9 @@ fn wait_frame(
     }
     std::thread::sleep(Duration::from_millis(5));
   }
-  if let (Some(frame), Some(directory)) = (last_frame, std::env::var_os("OMARCHY_TEST_SURFACE_FRAMES")) {
+  if let (Some(frame), Some(directory)) =
+    (last_frame, std::env::var_os("OMARCHY_TEST_SURFACE_FRAMES"))
+  {
     frame.save(PathBuf::from(directory).join(format!("shared-{name}-failed.ppm")));
   }
   panic!(
@@ -154,10 +164,14 @@ fn shared_runtime(settings_granted: bool) {
     return;
   };
   let controller = PathBuf::from(controller);
-  let runtime = controller.parent().unwrap().join("ward-runtime/shell");
+  let runtime_root = PathBuf::from(
+    std::env::var_os("OMARCHY_TEST_WARD_RUNTIME")
+      .expect("select the separately staged Omarchy adapter"),
+  );
+  let runtime = runtime_root.join("shell");
   assert_eq!(
     fs::read(runtime.join("worker.qml")).unwrap(),
-    include_bytes!("../runtime/worker.qml")
+    include_bytes!("../../../../../shell/ward-runtime/worker.qml")
   );
   let root = desktop::runtime();
   let source = root.path().join("source");
@@ -338,11 +352,9 @@ Item {
   fs::create_dir(root.path().join("shell")).unwrap();
   let host_qml = root.path().join("shell/shell.qml");
   let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-    .parent()
-    .unwrap()
-    .parent()
-    .unwrap()
-    .to_path_buf();
+    .join("../../../..")
+    .canonicalize()
+    .unwrap();
   for module in ["Commons", "Ui"] {
     std::os::unix::fs::symlink(
       repo.join("shell").join(module),
@@ -512,6 +524,7 @@ ShellRoot {
       .env("HOME", root.path().join("home"))
       .env("OMARCHY_WARD_STORE", root.path().join("store"))
       .env("OMARCHY_WARD_HOST", private_controller)
+      .env("OMARCHY_WARD_RUNTIME", &runtime_root)
       .env("OMARCHY_PLUGIN_CONTEXT", "1")
       .env("TEST_CONTEXT", &host_context)
       .stdout(fs::File::create(&log).unwrap())

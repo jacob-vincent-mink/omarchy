@@ -10,12 +10,12 @@ PluginSession::PluginSession(QObject *parent) : QObject(parent) {
 }
 PluginSession::~PluginSession() { stop(); }
 
-void PluginSession::start(const QString &store, const QString &id, const QString &controller, const QString &topology, const QString &context) {
+void PluginSession::start(const QString &store, const QString &id, const QString &controller, const QString &topology, const QString &context, const QString &runtime) {
   if (m_started) { fail("PluginSession cannot be restarted; create a new session"); return; }
   m_started = true;
   try {
-    const auto root = store.toUtf8(), name = id.toUtf8(), program = controller.toUtf8(), layout = topology.toUtf8(), json = context.toUtf8();
-    m_session.emplace(omarchy::begin_streams(root.constData(), name.constData(), program.constData(), layout.constData(), json.constData()));
+    const auto root = store.toUtf8(), name = id.toUtf8(), program = controller.toUtf8(), layout = topology.toUtf8(), json = context.toUtf8(), assets = runtime.toUtf8();
+    m_session.emplace(omarchy::begin_streams(root.constData(), name.constData(), program.constData(), layout.constData(), json.constData(), assets.constData()));
     trackViews(context);
     prepare(topology);
     m_timer.start();

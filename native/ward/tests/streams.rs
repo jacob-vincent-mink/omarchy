@@ -200,6 +200,15 @@ impl Probe {
 
 #[test]
 fn mixed_dpi_output_streams_share_state_and_survive_hotplug_and_zero_outputs() {
+  exercise_streams(false);
+}
+
+#[test]
+fn trusted_runtime_is_host_selected_read_only_and_independent_of_omarchy() {
+  exercise_streams(true);
+}
+
+fn exercise_streams(host_runtime: bool) {
   if std::env::var("OMARCHY_TEST_GRAPHICS").as_deref() != Ok("1")
     || std::env::var("OMARCHY_TEST_SYSTEMD").as_deref() != Ok("1")
   {
@@ -208,10 +217,57 @@ fn mixed_dpi_output_streams_share_state_and_survive_hotplug_and_zero_outputs() {
   let root = tempfile::tempdir().unwrap();
   let source = root.path().join("source");
   fs::create_dir(&source).unwrap();
-  fs::write(source.join("manifest.json"), serde_json::to_vec(&serde_json::json!({
-    "schemaVersion": 1, "id": "test.streams", "name": "Streams", "version": "1", "kinds": ["panel"],
-    "entryPoints": {"panel": "worker.qml"}, "sandbox": {"version": 1, "entryPoint": "worker.qml", "requests": {}}
-  })).unwrap()).unwrap();
+  let manifest = if host_runtime {
+    serde_json::json!({
+      "schemaVersion": 1, "id": "test.streams", "name": "Streams", "version": "1", "kinds": ["bar-widget"],
+      "entryPoints": {"barWidget": "worker.qml"}, "sandbox": {"version": 1, "requests": {}}
+    })
+  } else {
+    serde_json::json!({
+      "schemaVersion": 1, "id": "test.streams", "name": "Streams", "version": "1", "kinds": ["panel"],
+      "entryPoints": {"panel": "worker.qml"}, "sandbox": {"version": 1, "entryPoint": "worker.qml", "requests": {}}
+    })
+  };
+  fs::write(
+    source.join("manifest.json"),
+    serde_json::to_vec(&manifest).unwrap(),
+  )
+  .unwrap();
+  // A bundle can ship these names as ordinary assets, but cannot select them
+  // as trusted runtime code. The actual selection is outside the revision.
+  fs::write(
+    source.join("runtime.json"),
+    r#"{"version":1,"entryPoint":"untrusted"}"#,
+  )
+  .unwrap();
+  fs::write(source.join("untrusted"), "#!/bin/bash\nexit 99\n").unwrap();
+  let runtime = host_runtime.then(|| {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.path().join("host-runtime");
+    fs::create_dir(&path).unwrap();
+    fs::write(
+      path.join("runtime.json"),
+      r#"{"version":1,"entryPoint":"start"}"#,
+    )
+    .unwrap();
+    fs::write(
+      path.join("start"),
+      format!(
+        r#"#!/bin/bash
+set -eu
+[[ -z ${{OMARCHY_PATH:-}} ]]
+[[ ! -e '{}' ]]
+[[ ! -e /runtime/shell/Commons ]]
+if touch /runtime/worker-write-probe 2>/dev/null; then exit 90; fi
+exec /usr/bin/quickshell --no-color -p /plugin/worker.qml
+"#,
+        path.display()
+      ),
+    )
+    .unwrap();
+    fs::set_permissions(path.join("start"), fs::Permissions::from_mode(0o755)).unwrap();
+    path
+  });
   fs::write(
     source.join("worker.qml"),
     r##"
@@ -275,12 +331,13 @@ ShellRoot {
     generation: 1,
     outputs: outputs.clone(),
   };
-  let session = Session::start_with_topology(
+  let session = Session::start_with_topology_and_runtime(
     root.path().join("store"),
     "test.streams".into(),
     PathBuf::from(env!("CARGO_BIN_EXE_omarchy-ward")),
     topology.clone(),
     UiContext::default(),
+    runtime,
   )
   .unwrap();
   let device = EGLDevice::enumerate()

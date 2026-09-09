@@ -7,7 +7,7 @@ run_node_test <<'JS'
 const fs = require('fs')
 const vm = require('vm')
 const scope = vm.createContext({})
-vm.runInContext(fs.readFileSync(path.join(root, 'native/ward/runtime/Ward/RequestFeedback.js'), 'utf8'), scope)
+vm.runInContext(fs.readFileSync(path.join(root, 'shell/ward-runtime/Ward/RequestFeedback.js'), 'utf8'), scope)
 assert(scope.linkError('denied').includes('not approved'), 'only a denial suggests reviewing access')
 assert(scope.linkError('rate_limited').includes('in a moment'), 'burst limiting explains the short wait')
 assert(scope.linkError('busy').includes('already opening'), 'busy reports an in-flight launch')

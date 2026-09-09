@@ -29,6 +29,8 @@ Approval records sign `{ id, revision, enabled, grants }` and verify it on reads
 
 The worker receives a read-only `/plugin` bundle, restricted `/runtime`, private temporary paths and a selected GPU render node. Its Wayland connection is to its own controller, not Hyprland. No host session bus, PipeWire socket, compositor socket or desktop home is exposed by default. A media grant provides a filtered bus proxy, not the host bus. Landlock ABI 9 is required to prevent pathname Unix sockets inside granted directories from turning file access into host IPC; unsupported isolation fails closed.
 
+The shared runtime is a [trusted host-selected directory](ward-runtime.md), supplied over the authenticated host channel by descriptor and mounted read-only. Ward's native build does not package Omarchy assets. Omarchy owns and separately stages the loader and UI compatibility modules; its sandbox-local bootstrap sets `OMARCHY_PATH=/runtime`. Runtime selection never comes from plugin metadata or a worker request.
+
 ## Pixels, input and context
 
 The worker submits ordinary Wayland surfaces to the private compositor. Each admitted output has two bounded DMA-BUF presentation slots and one Qt importer in the existing shell. Versioned records validate output identity, topology epoch, dimensions, generations, frame serials, descriptor counts and input regions. Each stream has independent acknowledgements governing buffer reuse; one slow output cannot make another reuse an in-flight buffer. The host receives pixels and bounded state, not worker QObjects or executable QML.
@@ -62,7 +64,8 @@ The shared loader supports per-placement bar widgets with an optional own servic
 | --- | --- |
 | Review, revisions and grants | [`management.rs`](../native/ward/src/management.rs), [`revision.rs`](../native/ward/src/revision.rs), [`store.rs`](../native/ward/src/store.rs), [`grants.rs`](../native/ward/src/grants.rs) |
 | Admission and process ownership | [`session.rs`](../native/ward/src/session.rs), [`supervisor.rs`](../native/ward/src/supervisor.rs), [`controller.rs`](../native/ward/src/controller.rs) |
-| Worker restrictions and loader | [`worker.rs`](../native/ward/src/worker.rs), [`sandbox.rs`](../native/ward/src/sandbox.rs), [`worker.qml`](../native/ward/runtime/worker.qml) |
+| Worker restrictions and trusted runtime | [`worker.rs`](../native/ward/src/worker.rs), [`sandbox.rs`](../native/ward/src/sandbox.rs), [`runtime.rs`](../native/ward/src/runtime.rs) |
+| Omarchy worker adapter and staging | [`worker.qml`](../shell/ward-runtime/worker.qml), [`omarchy-ward-stage-runtime`](../bin/omarchy-ward-stage-runtime) |
 | Rendering, input and context | [`graphics.rs`](../native/ward/src/graphics.rs), [`topology.rs`](../native/ward/src/topology.rs), [`presentation.rs`](../native/ward/src/presentation.rs), [`pluginsession.cpp`](../native/ward/qt/pluginsession.cpp), [`pluginview.cpp`](../native/ward/qt/pluginview.cpp), [`context.rs`](../native/ward/src/context.rs) |
 | Desktop ownership | [`SandboxedPlugins.qml`](../shell/services/SandboxedPlugins.qml), [`SandboxedPluginSession.qml`](../shell/services/native/SandboxedPluginSession.qml), [`SandboxedOutputSurface.qml`](../shell/services/native/SandboxedOutputSurface.qml), [`SandboxedBarWidget.qml`](../shell/services/SandboxedBarWidget.qml) |
 | Resource effects | [`requests.rs`](../native/ward/src/requests.rs), [`exec_policy.rs`](../native/ward/src/exec_policy.rs), [`host_job.rs`](../native/ward/src/host_job.rs), [`http.rs`](../native/ward/src/http.rs), [`media.rs`](../native/ward/src/media.rs) |

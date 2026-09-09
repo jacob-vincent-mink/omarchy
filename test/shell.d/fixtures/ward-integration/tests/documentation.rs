@@ -6,7 +6,7 @@ use std::fs;
 // separate permissive validator. This test does not launch QML or host jobs.
 #[test]
 fn authoring_examples_match_the_implemented_contract() {
-  let document = include_str!("../../../docs/sandboxed-plugin-authoring.md");
+  let document = include_str!("../../../../../docs/sandboxed-plugin-authoring.md");
   let mut manifests = 0;
   let mut commands = 0;
   for block in document.split("```json\n").skip(1) {

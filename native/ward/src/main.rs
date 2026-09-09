@@ -191,17 +191,25 @@ fn run_internal(args: &[OsString]) -> io::Result<()> {
       browser.to_str().ok_or_else(|| Status::Invalid.error())?,
       url.to_str().ok_or_else(|| Status::Invalid.error())?,
     ),
-    [mode] if mode == "--worker" || mode == "--omarchy-worker" => {
+    [mode, entry] if mode == "--runtime-worker" => {
+      omarchy_ward::worker::restrict_bootstrap()?;
+      let entry = entry
+        .to_str()
+        .filter(|entry| omarchy_ward::runtime::valid_entry(entry))
+        .ok_or_else(|| io::Error::other("invalid runtime entry point"))?;
+      Err(
+        Command::new(std::path::Path::new("/runtime").join(entry))
+          .stdout(io::stderr().as_fd().try_clone_to_owned()?)
+          .exec(),
+      )
+    }
+    [mode] if mode == "--worker" => {
       omarchy_ward::worker::restrict_bootstrap()?;
       Err(
         Command::new("/usr/bin/quickshell")
           .stdout(io::stderr().as_fd().try_clone_to_owned()?)
           .args(["--no-color", "-p"])
-          .arg(if mode == "--omarchy-worker" {
-            "/runtime/shell/worker.qml"
-          } else {
-            "/plugin"
-          })
+          .arg("/plugin")
           .exec(),
       )
     }
