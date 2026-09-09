@@ -19,6 +19,9 @@ ShellRoot {
   property PluginRegistry pluginRegistry: PluginRegistry { }
   property BarWidgetRegistry barWidgetRegistry: BarWidgetRegistry { }
   property AppLibrary appLibrary: AppLibrary { }
+  property SandboxedPlugins sandboxedPlugins: SandboxedPlugins {
+    onChanged: shell.pluginRegistry.pluginsChanged()
+  }
 
   property string home: Quickshell.env("HOME")
 
@@ -68,6 +71,7 @@ ShellRoot {
     if (failedBarId !== "") failedBarId = ""
     pluginRegistry.registryRevision++
     pluginRegistry.pluginsChanged()
+    sandboxedPlugins.sync(Array.isArray(shellConfig.plugins) ? shellConfig.plugins : [])
   }
 
   function applyShellConfig() {
@@ -1141,6 +1145,7 @@ ShellRoot {
   function summon(pluginId, payloadJson) {
     var id = shell.pluginRegistry.resolveEnabledId(pluginId)
     if (!id) return false
+    if (shell.pluginRegistry.isSandboxed(id)) return shell.sandboxedPlugins.show(id)
     var plugins = shell.pluginRegistry.installedPlugins
     if (!plugins[id]) {
       console.warn("summon: unknown plugin", id)
@@ -1181,6 +1186,7 @@ ShellRoot {
   function hide(pluginId) {
     var id = shell.pluginRegistry.resolveEnabledId(pluginId)
     if (!id) return false
+    if (shell.pluginRegistry.isSandboxed(id)) return shell.sandboxedPlugins.hide(id)
     if (shell.isBarWidgetPanelPlugin(id)) {
       var hidden = shell.bar && typeof shell.bar.hideBarWidget === "function"
         && shell.bar.hideBarWidget(id)
@@ -1197,6 +1203,7 @@ ShellRoot {
 
   function isPluginOpen(pluginId) {
     var id = shell.pluginRegistry.resolveEnabledId(pluginId)
+    if (shell.pluginRegistry.isSandboxed(id)) return shell.sandboxedPlugins.isOpen(id)
     if (shell.isBarWidgetPanelPlugin(id)) {
       return shell.bar && typeof shell.bar.isBarWidgetOpen === "function"
         ? shell.bar.isBarWidgetOpen(id)
@@ -1607,17 +1614,37 @@ ShellRoot {
     }
 
     function setPluginEnabled(id: string, enabled: string): string {
+      if (shell.pluginRegistry.isSandboxed(id)) {
+        if (enabled === "true") return "use omarchy plugin enable after approving a revision"
+        shell.sandboxedPlugins.disable(id)
+      }
       return shell.pluginRegistry.setEnabled(id, enabled === "true") ? "ok" : "unknown"
     }
 
     function enablePlugin(id: string, placementJson: string): string {
       try {
         var placement = JSON.parse(placementJson || "{}")
+        if (shell.pluginRegistry.isSandboxed(id)) {
+          if (Object.keys(placement).length !== 0) return "native bar placement is not available yet"
+          var result = shell.sandboxedPlugins.enable(id)
+          if (result === "starting" || result === "ok") {
+            shell.mutateShellConfig(function(config) {
+              if (!Array.isArray(config.plugins)) config.plugins = []
+              config.plugins = config.plugins.filter(function(entry) { return entry.id !== id })
+              config.plugins.push({ id: id, sandbox: true })
+            })
+          }
+          return result
+        }
         if (shell.pluginRegistry.setEnabled(id, true, placement)) return "ok"
         return shell.pluginRegistry.lastEnableError || "unknown"
       } catch (e) {
         return "invalid placement: " + e
       }
+    }
+
+    function pluginStatus(id: string): string {
+      return JSON.stringify(shell.sandboxedPlugins.status(id))
     }
 
     // Enable, but only where the widget is not on the bar already, so a caller
@@ -1667,7 +1694,8 @@ ShellRoot {
           kinds: kinds,
           // What `omarchy plugin enable/disable` toggles: for a widget that is
           // its place in the bar, not whether its component is loadable.
-          enabled: isBarOption ? active
+          enabled: shell.pluginRegistry.isSandboxed(id) ? shell.sandboxedPlugins.status(id).state === "running"
+            : isBarOption ? active
             : (isBarWidget ? shell.pluginRegistry.inBar(id) : shell.pluginRegistry.isEnabled(id)),
           active: active,
           // A bar has no off, only a successor: you leave one by enabling

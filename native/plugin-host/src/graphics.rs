@@ -31,8 +31,9 @@ use smithay::{
     pointer::{AxisFrame, ButtonEvent, CursorImageStatus, MotionEvent},
   },
   output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
+  reexports::wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
   reexports::wayland_server::{
-    Client, Display, ListeningSocket, Resource,
+    Client, Display, ListeningSocket, Resource, Weak,
     backend::{ClientData, ClientId, DisconnectReason},
     protocol::{wl_buffer::WlBuffer, wl_output::WlOutput, wl_seat::WlSeat, wl_surface::WlSurface},
   },
@@ -41,7 +42,8 @@ use smithay::{
     buffer::BufferHandler,
     compositor::{
       CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
-      TraversalAction, get_parent, send_surface_state, with_states, with_surface_tree_downward,
+      TraversalAction, add_pre_commit_hook, get_parent, send_surface_state, with_states,
+      with_surface_tree_downward,
     },
     dmabuf::{DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
     output::{OutputHandler, OutputManagerState},
@@ -59,6 +61,7 @@ use smithay::{
   },
 };
 use std::{
+  cell::RefCell,
   fs::File,
   os::unix::fs::MetadataExt,
   path::{Path, PathBuf},
@@ -66,6 +69,8 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+struct LayerRole(RefCell<Weak<ZwlrLayerSurfaceV1>>);
 
 /// One private compositor in the already resource-limited controller process.
 /// Worker buffers are never forwarded to Qt: only completed controller output.
@@ -222,10 +227,7 @@ impl Graphics {
     if self.app.failed {
       return Err("private surface limits exceeded".into());
     }
-    self
-      .app
-      .layers
-      .retain(|surface| surface.wl_surface().is_alive());
+    self.app.layers.retain(LayerSurface::alive);
     self
       .app
       .popups
@@ -1128,6 +1130,27 @@ impl CompositorHandler for App {
       .0
   }
   fn new_surface(&mut self, surface: &WlSurface) {
+    // Smithay 0.7 keeps its size-validation hook after role destruction:
+    // https://github.com/Smithay/smithay/pull/2071. Register before that hook
+    // and give ONLY a destroyed role inert dimensions. The wl_surface may
+    // legally commit a null buffer after destroying its layer role (Qt does).
+    // A replacement role resets these dimensions below, before client requests;
+    // validation of every live role remains unchanged. Remove with upstream fix.
+    add_pre_commit_hook::<Self, _>(surface, |_, _, surface| {
+      with_states(surface, |states| {
+        if states
+          .data_map
+          .get::<LayerRole>()
+          .is_some_and(|role| role.0.borrow().upgrade().is_err())
+        {
+          states
+            .cached_state
+            .get::<LayerSurfaceCachedState>()
+            .pending()
+            .size = (1, 1).into();
+        }
+      });
+    });
     self.surfaces += 1;
     if self.surfaces > 64 {
       self.failed = true;
@@ -1218,6 +1241,20 @@ impl WlrLayerShellHandler for App {
     &mut self.layer
   }
   fn new_layer_surface(&mut self, surface: LayerSurface, _: Option<WlOutput>, _: Layer, _: String) {
+    with_states(surface.wl_surface(), |states| {
+      if let Some(role) = states.data_map.get::<LayerRole>() {
+        states
+          .cached_state
+          .get::<LayerSurfaceCachedState>()
+          .pending()
+          .size = (0, 0).into();
+        *role.0.borrow_mut() = surface.shell_surface().downgrade();
+      } else {
+        states
+          .data_map
+          .insert_if_missing(|| LayerRole(RefCell::new(surface.shell_surface().downgrade())));
+      }
+    });
     if self.layers.len() >= 16 {
       self.failed = true;
       return;
@@ -1227,6 +1264,10 @@ impl WlrLayerShellHandler for App {
   fn new_popup(&mut self, _: LayerSurface, popup: PopupSurface) {
     let positioner = popup.with_pending_state(|state| state.positioner);
     self.configure_popup(&popup, positioner, None);
+  }
+  fn layer_destroyed(&mut self, _: LayerSurface) {
+    self.layers.retain(LayerSurface::alive);
+    self.dirty = true;
   }
 }
 impl DmabufHandler for App {

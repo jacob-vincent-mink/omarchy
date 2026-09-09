@@ -1,36 +1,15 @@
 #![cfg(feature = "graphics")]
+#[path = "support/desktop.rs"]
+mod desktop;
+use desktop::{Desktop, Host};
 use omarchy_plugin_host::{
-  channel::Channel,
-  controller::Scroll,
-  grants::Grants,
-  graphics::Graphics,
-  presentation::{Event, Viewport},
-  revision::Revision,
-  store::Store,
-};
-use smithay::backend::{
-  allocator::{
-    Fourcc, Modifier,
-    dmabuf::{Dmabuf, DmabufFlags},
-  },
-  egl::{EGLContext, EGLDevice, EGLDisplay},
-  renderer::{ExportMem, ImportDma, gles::GlesRenderer},
+  controller::Scroll, grants::Grants, presentation::Viewport, revision::Revision, store::Store,
 };
 use std::{
   fs,
-  io::{self, Write},
-  os::unix::fs::PermissionsExt,
-  process::{Child, Command},
+  process::Command,
   time::{Duration, Instant},
 };
-
-struct Host(Child);
-impl Drop for Host {
-  fn drop(&mut self) {
-    let _ = self.0.kill();
-    let _ = self.0.wait();
-  }
-}
 
 #[test]
 fn qt_bridge_renders_resizes_and_withdraws_after_revocation() {
@@ -48,18 +27,7 @@ fn qt_bridge_renders_resizes_and_withdraws_after_revocation() {
     );
     return;
   }
-  let root = tempfile::Builder::new()
-    .permissions(fs::Permissions::from_mode(0o700))
-    .tempdir()
-    .unwrap();
-  // systemctl prefers XDG_RUNTIME_DIR/systemd/private over the session bus.
-  // Keep Qt logs/private display here while exposing that one trusted-host socket.
-  fs::create_dir(root.path().join("systemd")).unwrap();
-  std::os::unix::fs::symlink(
-    std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap()).join("systemd/private"),
-    root.path().join("systemd/private"),
-  )
-  .unwrap();
+  let root = desktop::runtime();
   let source = root.path().join("source");
   fs::create_dir(&source).unwrap();
   fs::write(source.join("worker.qml"), r##"
@@ -132,9 +100,7 @@ ShellRoot {
     scale: 1,
   };
   // This outer display is test-owned and never connects to the real compositor.
-  let mut outer = Graphics::new(&root.path().join("wayland"), viewport).unwrap();
-  let (producer, consumer) = Channel::pair().unwrap();
-  outer.describe(&producer).unwrap();
+  let mut outer = Desktop::new(root.path(), viewport);
   let host_qml = root.path().join("host.qml");
   fs::write(&host_qml, r##"
 import QtQuick
@@ -170,26 +136,7 @@ ShellRoot {
 "##).unwrap();
   let log_path = root.path().join("qt.log");
   let mut host = Host(
-    Command::new("quickshell")
-      .args(["--no-color", "-p"])
-      .arg(&host_qml)
-      .env_remove("DISPLAY")
-      // The trusted host uses the user manager only to supervise the fixture.
-      // The inner worker still receives no session-bus address or socket.
-      .env(
-        "DBUS_SESSION_BUS_ADDRESS",
-        std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap(),
-      )
-      .env("XDG_RUNTIME_DIR", root.path())
-      .env("WAYLAND_DISPLAY", "wayland")
-      .env("XDG_CONFIG_HOME", root.path().join("config"))
-      .env("XDG_CACHE_HOME", root.path().join("cache"))
-      .env("QT_QPA_PLATFORM", "wayland")
-      .env("QT_QPA_PLATFORMTHEME", "none")
-      .env("QT_WAYLAND_DISABLE_WINDOWDECORATION", "1")
-      .env("QSG_RHI_BACKEND", "opengl")
-      .env("QSG_RENDER_LOOP", "threaded")
-      .env("QML_IMPORT_PATH", module)
+    desktop::command(root.path(), &host_qml, &module)
       .env("TEST_STORE", &state)
       .env("TEST_CONTROLLER", env!("CARGO_BIN_EXE_omarchy-plugin-host"))
       .stdout(fs::File::create(&log_path).unwrap())
@@ -197,13 +144,6 @@ ShellRoot {
       .spawn()
       .unwrap(),
   );
-  let device = EGLDevice::enumerate()
-    .unwrap()
-    .find(|device| device.render_device_path().is_ok())
-    .unwrap();
-  let egl = unsafe { EGLDisplay::new(device).unwrap() };
-  let mut renderer = unsafe { GlesRenderer::new(EGLContext::new(&egl).unwrap()).unwrap() };
-  let mut buffers: [Option<Dmabuf>; 2] = [None, None];
   let start = Instant::now();
   let mut typed = false;
   let mut focused = false;
@@ -220,215 +160,165 @@ ShellRoot {
   let mut maximum_colors = (0, 0);
   while start.elapsed() < Duration::from_secs(8) {
     let time = start.elapsed().as_millis() as u32;
-    outer.dispatch().unwrap();
-    outer.render(&producer, time).unwrap();
     if !focused && time >= 1200 {
       for kind in [0, 1] {
-        outer.input(kind, 0x110, 200, 230, time).unwrap();
+        outer.graphics.input(kind, 0x110, 200, 230, time).unwrap();
       }
       focused = true;
     }
     if !typed && time >= 1400 {
       for kind in [3, 4] {
-        outer.input(kind, 26, 0, 0, time).unwrap();
+        outer.graphics.input(kind, 26, 0, 0, time).unwrap();
       }
       typed = true;
     }
     if !clicked && time >= 1800 {
       for kind in [0, 1] {
-        outer.input(kind, 0x110, 210, 300, time).unwrap();
+        outer.graphics.input(kind, 0x110, 210, 300, time).unwrap();
       }
       clicked = true;
     }
-    for _ in 0..8 {
-      let packet = match consumer.receive() {
-        Ok(packet) => packet,
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-        Err(error) => panic!("outer channel failed: {error}"),
-      };
-      match Event::decode(packet).unwrap() {
-        Event::Buffer(buffer) => {
-          let mut builder = Dmabuf::builder(
-            (buffer.width as i32, buffer.height as i32),
-            Fourcc::Argb8888,
-            Modifier::Linear,
-            DmabufFlags::empty(),
-          );
-          assert!(builder.add_plane(buffer.fd, 0, 0, buffer.stride));
-          buffers[buffer.slot as usize] = builder.build();
+    for frame in outer.step(time) {
+      frames += 1;
+      let count = |rgb| frame.count(rgb);
+      let green = count([0x44, 0xee, 0x22]);
+      let purple = count([0x8a, 0x2b, 0xe2]);
+      maximum_colors = (maximum_colors.0.max(green), maximum_colors.1.max(purple));
+      if time > next_capture && !verified {
+        next_capture += 2500;
+        if let Some(path) = std::env::var_os("OMARCHY_TEST_QT_CAPTURE") {
+          frame.save(path);
         }
-        Event::Configured { .. } | Event::Mask { .. } => (),
-        Event::Frame { serial, slot, .. } => {
-          frames += 1;
-          let texture = renderer
-            .import_dmabuf(buffers[slot as usize].as_ref().unwrap(), None)
-            .unwrap();
-          let mapping = renderer
-            .copy_texture(
-              &texture,
-              smithay::utils::Rectangle::from_size((800, 480).into()),
-              Fourcc::Abgr8888,
-            )
-            .unwrap();
-          let bytes = renderer.map_texture(&mapping).unwrap();
-          let count = |rgb: [u8; 3]| bytes.chunks_exact(4).filter(|p| p[..3] == rgb).count();
-          let green = count([0x44, 0xee, 0x22]);
-          let purple = count([0x8a, 0x2b, 0xe2]);
-          maximum_colors = (maximum_colors.0.max(green), maximum_colors.1.max(purple));
-          if time > next_capture && !verified {
-            next_capture += 2500;
-            if let Some(path) = std::env::var_os("OMARCHY_TEST_QT_CAPTURE") {
-              let mut file = io::BufWriter::new(fs::File::create(path).unwrap());
-              write!(file, "P6\n800 480\n255\n").unwrap();
-              for pixel in bytes.chunks_exact(4) {
-                file.write_all(&pixel[..3]).unwrap();
-              }
-            }
-          }
-          if green > 500 && purple > 5000 && !verified {
-            verified = true;
-            if let Some(path) = std::env::var_os("OMARCHY_TEST_QT_CAPTURE") {
-              let mut file = io::BufWriter::new(fs::File::create(path).unwrap());
-              write!(file, "P6\n800 480\n255\n").unwrap();
-              for pixel in bytes.chunks_exact(4) {
-                file.write_all(&pixel[..3]).unwrap();
-              }
-            }
-          }
-          if verified && resize_stage == 0 {
-            for kind in [0, 1] {
-              outer.input(kind, 0x110, 770, 20, time).unwrap();
-            }
-            resize_stage = 1;
-            resized_at = time;
-          }
-          if resize_stage == 1
-            && count([0xdd, 0x44, 0xcc]) > 300
-            && purple == 0
-            && time > resized_at + 150
-          {
-            // x=620 is valid in the new 640-wide canvas. A stale 800-wide
-            // coordinate transform would send an out-of-bounds private click.
-            for kind in [0, 1] {
-              outer.input(kind, 0x110, 660, 56, time).unwrap();
-            }
-            resize_stage = 2;
-          }
-          if resize_stage == 2 && count([0xff, 0x77, 0x44]) > 300 {
-            for kind in [0, 1] {
-              outer.input(kind, 0x110, 160, 230, time).unwrap();
-            }
-            resize_stage = 3;
-          }
-          if resize_stage == 3 && count([0xaa, 0xee, 0xff]) > 200 {
-            for kind in [3, 4] {
-              outer.input(kind, 27, 0, 0, time).unwrap();
-            }
-            retyped = true;
-            resize_stage = 4;
-          }
-          if resize_stage == 4 && count([0xff, 0xee, 0x44]) > 500 {
-            for kind in [0, 1] {
-              outer.input(kind, 0x110, 770, 20, time).unwrap();
-            }
-            resize_stage = 5;
-          }
-          if resize_stage == 5 && count([0x55, 0xdd, 0x99]) > 500 {
-            for kind in [0, 1] {
-              outer.input(kind, 0x110, 660, 56, time).unwrap();
-            }
-            resize_stage = 6;
-          }
-          if resize_stage == 6 && count([0xee, 0x55, 0x99]) > 300 && count([0xff, 0xee, 0x44]) > 500
-          {
-            outer
-              .scroll(
-                Scroll {
-                  source: 0,
-                  x: 100,
-                  y: 56,
-                  horizontal: 120,
-                  vertical: -120,
-                },
-                time,
-              )
-              .unwrap();
-            resize_stage = 7;
-          }
-          if resize_stage == 7 && count([0x33, 0xcc, 0x88]) > 500 {
-            outer
-              .scroll(
-                Scroll {
-                  source: 0,
-                  x: 100,
-                  y: 56,
-                  horizontal: 0,
-                  vertical: 60,
-                },
-                time,
-              )
-              .unwrap();
-            resize_stage = 8;
-          }
-          if resize_stage == 8 && count([0xbb, 0x66, 0x33]) > 500 {
-            outer
-              .scroll(
-                Scroll {
-                  source: 1,
-                  x: 100,
-                  y: 56,
-                  horizontal: 7,
-                  vertical: -9,
-                },
-                time,
-              )
-              .unwrap();
-            resize_stage = 9;
-          }
-          if resize_stage == 9 && count([0x77, 0x99, 0xcc]) > 500 {
-            outer
-              .scroll(
-                Scroll {
-                  source: 2,
-                  x: 100,
-                  y: 56,
-                  horizontal: 0,
-                  vertical: 0,
-                },
-                time,
-              )
-              .unwrap();
-            resize_stage = 10;
-          }
-          if resize_stage == 10 && count([0x99, 0xbb, 0x55]) > 500 {
-            resize_ready = true;
-            if let Some(path) = std::env::var_os("OMARCHY_TEST_QT_RESIZE_CAPTURE") {
-              let mut file = io::BufWriter::new(fs::File::create(path).unwrap());
-              write!(file, "P6\n800 480\n255\n").unwrap();
-              for pixel in bytes.chunks_exact(4) {
-                file.write_all(&pixel[..3]).unwrap();
-              }
-            }
-          }
-          if let Some(directory) = std::env::var_os("OMARCHY_TEST_QT_FRAMES") {
-            let mut file = io::BufWriter::new(
-              fs::File::create(std::path::Path::new(&directory).join(format!("{frames:04}.ppm")))
-                .unwrap(),
-            );
-            write!(file, "P6\n800 480\n255\n").unwrap();
-            for pixel in bytes.chunks_exact(4) {
-              file.write_all(&pixel[..3]).unwrap();
-            }
-          }
-          if revoked.is_some_and(|at: Instant| at.elapsed() > Duration::from_millis(150))
-            && green == 0
-            && purple == 0
-            && count([0x17, 0x1c, 0x25]) > 300_000
-          {
-            withdrawn = true;
-          }
-          outer.presented(serial).unwrap();
+      }
+      if green > 500 && purple > 5000 && !verified {
+        verified = true;
+        if let Some(path) = std::env::var_os("OMARCHY_TEST_QT_CAPTURE") {
+          frame.save(path);
         }
+      }
+      if verified && resize_stage == 0 {
+        for kind in [0, 1] {
+          outer.graphics.input(kind, 0x110, 770, 20, time).unwrap();
+        }
+        resize_stage = 1;
+        resized_at = time;
+      }
+      if resize_stage == 1
+        && count([0xdd, 0x44, 0xcc]) > 300
+        && purple == 0
+        && time > resized_at + 150
+      {
+        // x=620 is valid in the new 640-wide canvas. A stale 800-wide
+        // coordinate transform would send an out-of-bounds private click.
+        for kind in [0, 1] {
+          outer.graphics.input(kind, 0x110, 660, 56, time).unwrap();
+        }
+        resize_stage = 2;
+      }
+      if resize_stage == 2 && count([0xff, 0x77, 0x44]) > 300 {
+        for kind in [0, 1] {
+          outer.graphics.input(kind, 0x110, 160, 230, time).unwrap();
+        }
+        resize_stage = 3;
+      }
+      if resize_stage == 3 && count([0xaa, 0xee, 0xff]) > 200 {
+        for kind in [3, 4] {
+          outer.graphics.input(kind, 27, 0, 0, time).unwrap();
+        }
+        retyped = true;
+        resize_stage = 4;
+      }
+      if resize_stage == 4 && count([0xff, 0xee, 0x44]) > 500 {
+        for kind in [0, 1] {
+          outer.graphics.input(kind, 0x110, 770, 20, time).unwrap();
+        }
+        resize_stage = 5;
+      }
+      if resize_stage == 5 && count([0x55, 0xdd, 0x99]) > 500 {
+        for kind in [0, 1] {
+          outer.graphics.input(kind, 0x110, 660, 56, time).unwrap();
+        }
+        resize_stage = 6;
+      }
+      if resize_stage == 6 && count([0xee, 0x55, 0x99]) > 300 && count([0xff, 0xee, 0x44]) > 500 {
+        outer
+          .graphics
+          .scroll(
+            Scroll {
+              source: 0,
+              x: 100,
+              y: 56,
+              horizontal: 120,
+              vertical: -120,
+            },
+            time,
+          )
+          .unwrap();
+        resize_stage = 7;
+      }
+      if resize_stage == 7 && count([0x33, 0xcc, 0x88]) > 500 {
+        outer
+          .graphics
+          .scroll(
+            Scroll {
+              source: 0,
+              x: 100,
+              y: 56,
+              horizontal: 0,
+              vertical: 60,
+            },
+            time,
+          )
+          .unwrap();
+        resize_stage = 8;
+      }
+      if resize_stage == 8 && count([0xbb, 0x66, 0x33]) > 500 {
+        outer
+          .graphics
+          .scroll(
+            Scroll {
+              source: 1,
+              x: 100,
+              y: 56,
+              horizontal: 7,
+              vertical: -9,
+            },
+            time,
+          )
+          .unwrap();
+        resize_stage = 9;
+      }
+      if resize_stage == 9 && count([0x77, 0x99, 0xcc]) > 500 {
+        outer
+          .graphics
+          .scroll(
+            Scroll {
+              source: 2,
+              x: 100,
+              y: 56,
+              horizontal: 0,
+              vertical: 0,
+            },
+            time,
+          )
+          .unwrap();
+        resize_stage = 10;
+      }
+      if resize_stage == 10 && count([0x99, 0xbb, 0x55]) > 500 {
+        resize_ready = true;
+        if let Some(path) = std::env::var_os("OMARCHY_TEST_QT_RESIZE_CAPTURE") {
+          frame.save(path);
+        }
+      }
+      if let Some(directory) = std::env::var_os("OMARCHY_TEST_QT_FRAMES") {
+        frame.save(std::path::Path::new(&directory).join(format!("{frames:04}.ppm")));
+      }
+      if revoked.is_some_and(|at: Instant| at.elapsed() > Duration::from_millis(150))
+        && green == 0
+        && purple == 0
+        && count([0x17, 0x1c, 0x25]) > 300_000
+      {
+        withdrawn = true;
       }
     }
     if resize_ready && revoked.is_none() {

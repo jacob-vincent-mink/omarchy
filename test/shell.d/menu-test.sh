@@ -343,11 +343,11 @@ assertEqual(
 )
 assertDeepEqual(
   defaultItems.filter(item => item.parent === 'setup.plugin').map(item => item.label),
-  ['Enable Plugin', 'Disable Plugin', 'Add Plugin', 'Clone Plugin', 'Remove Plugin'],
+  ['Enable Plugin', 'Review Plugin Access', 'Disable Plugin', 'Add Plugin', 'Clone Plugin', 'Remove Plugin'],
   'menu manages plugins from Setup > Plugins'
 )
 assert(
-  ['enable', 'disable', 'clone', 'remove'].every(
+  ['review', 'enable', 'disable', 'clone', 'remove'].every(
     verb => defaultById[`setup.plugin.${verb}`].action === `omarchy-menu-plugin ${verb}`
   ),
   'menu picks a plugin the way it already picks a theme or a timezone'

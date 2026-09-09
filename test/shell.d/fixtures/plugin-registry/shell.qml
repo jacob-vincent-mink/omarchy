@@ -469,6 +469,11 @@ ShellRoot {
     root.assertTrue(!registry.isEnabled("third.sandbox"), "shell config cannot enable a sandbox in-process")
     root.assertTrue(!registry.setEnabled("third.sandbox", true), "normal enable refuses sandbox entry points")
     root.assertTrue(registry.lastEnableError.indexOf("native host") !== -1, "enable explains the required native host")
+    root.config.plugins = [{ id: "third.sandbox", sandbox: true }]
+    delete sandboxed.sandbox
+    root.assertTrue(registry.isSandboxed("third.sandbox"), "saved native activation survives a changed checkout")
+    root.assertEqual(registry.entryPointUrl(sandboxed, "panel"), "", "saved native activation never loads changed QML in-process")
+    root.assertTrue(!registry.isEnabled("third.sandbox"), "saved native activation is not legacy activation")
 
     root.assertTrue(changeCount > 0, "registry emits change notifications")
     writeResult()

@@ -1,0 +1,89 @@
+import QtQuick
+import Quickshell
+
+// Trusted lifecycle adapter. It selects only a host-owned component; plugin
+// paths and QML never enter this engine. Rust owns admission and supervision.
+QtObject {
+  id: root
+  property var instances: ({})
+  property var component: null
+  property string store: Quickshell.env("OMARCHY_PLUGIN_STORE")
+    || (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state") + "/omarchy/plugin-host"
+  property string controller: Quickshell.env("OMARCHY_PLUGIN_HOST")
+    || Quickshell.env("OMARCHY_PATH") + "/lib/omarchy-plugin-host"
+  signal changed()
+  signal activated(string pluginId)
+
+  function status(id) {
+    var instance = instances[id]
+    if (!instance) return { state: "disabled", error: "" }
+    return { state: instance.state, error: instance.error }
+  }
+
+  function enable(id) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) || id.indexOf("..") !== -1)
+      return "invalid plugin id"
+    var previous = instances[id]
+    if (previous && previous.state !== "error") return previous.state === "running" ? "ok" : "starting"
+    if (!component) component = Qt.createComponent("native/SandboxedPluginSurface.qml")
+    if (component.status !== Component.Ready)
+      return "native plugin host unavailable: " + component.errorString()
+    if (previous) disable(id)
+    if (Object.keys(instances).length >= 16) return "too many active sandbox plugins"
+    var instance = component.createObject(root, { pluginId: id, store: store, controller: controller })
+    if (!instance) return "could not create native plugin host: " + component.errorString()
+    var next = Object.assign({}, instances)
+    next[id] = instance
+    instances = next
+    instance.statusChanged.connect(function() {
+      if (instances[id] !== instance) return
+      changed()
+      if (instance.state === "running") activated(id)
+    })
+    changed()
+    return "starting"
+  }
+
+  function disable(id) {
+    var instance = instances[id]
+    if (!instance) return
+    var next = Object.assign({}, instances)
+    delete next[id]
+    instances = next
+    instance.stop()
+    instance.destroy()
+    changed()
+  }
+
+  function show(id) {
+    var instance = instances[id]
+    if (!instance || instance.state === "error") return false
+    instance.shown = true
+    return true
+  }
+
+  function hide(id) {
+    var instance = instances[id]
+    if (!instance) return false
+    instance.dismiss()
+    instance.shown = false
+    return true
+  }
+
+  function isOpen(id) { return !!instances[id] && instances[id].shown }
+
+  function sync(entries) {
+    var desired = ({})
+    for (var i = 0; i < entries.length; i++) {
+      var entry = entries[i]
+      if (entry && entry.sandbox === true) {
+        desired[String(entry.id)] = true
+        if (!instances[entry.id]) {
+          var result = enable(String(entry.id))
+          if (result !== "starting" && result !== "ok") console.warn(result)
+        }
+      }
+    }
+    for (var id in instances) if (!desired[id]) disable(id)
+  }
+}

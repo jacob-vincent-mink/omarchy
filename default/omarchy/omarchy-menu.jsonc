@@ -173,6 +173,7 @@
   "setup.default.editor.emacs": {"icon":"","label":"Emacs","checked":"[[ \"$(omarchy-default-editor)\" == \"emacs\" ]]","action":"omarchy-default-editor emacs"},
   "setup.plugin": {"icon":"󰐱","label":"Plugins","aliases":["plugin","plugins"]},
   "setup.plugin.enable": {"icon":"󰄬","label":"Enable Plugin","action":"omarchy-menu-plugin enable"},
+  "setup.plugin.review": {"icon":"","label":"Review Plugin Access","action":"omarchy-menu-plugin review"},
   "setup.plugin.disable": {"icon":"󰅖","label":"Disable Plugin","action":"omarchy-menu-plugin disable"},
   "setup.plugin.add": {"icon":"󰖟","label":"Add Plugin","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-plugin-add'"},
   "setup.plugin.clone": {"icon":"󰆏","label":"Clone Plugin","action":"omarchy-menu-plugin clone"},

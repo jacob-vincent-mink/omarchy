@@ -63,6 +63,8 @@ built-ins, while Remove is limited to installed plugins since a built-in has
 no checkout to delete. Add, Clone, and Remove open a terminal so their warning,
 editor, confirmation, and output stay visible.
 
+Sandbox previews additionally appear under **Review Plugin Access**. Choosing Enable for a sandbox plugin opens that same reviewer; it does not approve or start the plugin automatically.
+
 Cloning `omarchy.clock`, for example, creates and switches to
 `~/.config/omarchy/plugins/<username>.clock/` (e.g. `dhh.clock`), names it
 `My Clock`, and preserves the built-in IPC identity so existing shortcuts keep
@@ -96,7 +98,11 @@ The command-first sandbox prototype uses the existing `omarchy plugin add` / `in
 
 `omarchy plugin list` distinguishes approved revisions from enabled sessions. `update` changes the checkout, not its approval or grants, and directs the user to re-review; removing the sandbox declaration through an update is refused. `remove` revokes admission before deleting the checkout, even without a running shell, and retains the reviewed snapshots in the private store. Disabling a never-approved plugin is a no-op. Sandbox installation works without shell IPC; `add --enable` leaves it installed but reports that exact-revision approval is required.
 
-This remains an uninstalled development component. The commands use `$OMARCHY_PATH/lib/omarchy-plugin-host` as the native payload location; `OMARCHY_PLUGIN_HOST` can explicitly select a locally built development binary. State defaults to `$XDG_STATE_HOME/omarchy/plugin-host` (or `~/.local/state/omarchy/plugin-host`); `OMARCHY_PLUGIN_STORE` selects an isolated development/test store. Runtime packaging, `enable`/surface integration, and the graphical reviewer are still unfinished. See [`plans/sandboxed-quickshell.md`](../plans/sandboxed-quickshell.md) for the demo target and remaining gates.
+After explicit approval, `omarchy plugin enable <id>` asks the existing shell to create a trusted native surface and waits for actual worker content to be presented. The shell imports only its own optional `Omarchy.PluginHost` module, never plugin QML. A `{ id, sandbox: true }` config entry preserves that boundary across checkout changes and shell restarts. Missing modules, failed admission, and worker startup errors are reported without falling back to the trusted loader. Disable removes the host surface; the command separately revokes native admission.
+
+`omarchy plugin review <id> --ui` opens the first-party reviewer in the existing shell. It calls the same review, approve, enable, list, and disable commands with argument vectors. Network and notifications start unchecked; folder and exact MPRIS-service fields start empty. Reopening resets the draft, not the saved grants. **Approve selection** saves only the displayed revision and selected access; a separate **Enable plugin** click starts it. **Disable & revoke** is required before changing a running plugin's approval. Refresh reads a new snapshot and resets the draft. Command errors remain visible without dismissing the form.
+
+This remains an uninstalled development component. The commands use `$OMARCHY_PATH/lib/omarchy-plugin-host` as the native payload location and the shell launcher adds `$OMARCHY_PATH/lib/qml` to its module path. `OMARCHY_PLUGIN_HOST` can explicitly select a locally built development binary. State defaults to `$XDG_STATE_HOME/omarchy/plugin-host` (or `~/.local/state/omarchy/plugin-host`); `OMARCHY_PLUGIN_STORE` selects an isolated development/test store. CMake supplies staging/install rules, but no default package or setup step installs the payload yet. The initial host uses a non-exclusive, click-through canvas on the first screen; bar placement, service-only readiness, full multi-output policy, and live-desktop acceptance remain unfinished. See [`plans/sandboxed-quickshell.md`](../plans/sandboxed-quickshell.md) for the demo target and remaining gates.
 
 ## IPC
 

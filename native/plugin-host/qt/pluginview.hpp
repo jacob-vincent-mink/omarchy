@@ -3,6 +3,7 @@
 #include <QQuickItem>
 #include <QRegion>
 #include <QTimer>
+#include <QVariantList>
 #include <QtQml/qqmlregistration.h>
 #include <array>
 #include <optional>
@@ -13,12 +14,16 @@ class PluginView : public QQuickItem {
   QML_ELEMENT
   Q_PROPERTY(bool ready READ ready NOTIFY stateChanged)
   Q_PROPERTY(bool resizing READ resizing NOTIFY stateChanged)
+  Q_PROPERTY(bool presented READ presented NOTIFY stateChanged)
   Q_PROPERTY(QString error READ error NOTIFY stateChanged)
+  Q_PROPERTY(QVariantList inputRegions READ inputRegions NOTIFY stateChanged)
 public:
   explicit PluginView(QQuickItem *parent = nullptr);
   bool ready() const { return m_ready; }
   bool resizing() const { return m_resizing; }
+  bool presented() const { return m_presented; }
   QString error() const { return m_error; }
+  QVariantList inputRegions() const;
   bool contains(const QPointF &) const override;
   Q_INVOKABLE void start(const QString &store, const QString &id, const QString &controller,
     int logicalWidth, int logicalHeight, int scale = 1);
@@ -53,6 +58,8 @@ private:
   QString m_error;
   bool m_started = false;
   bool m_ready = false;
+  bool m_hasSurface = false;
+  bool m_presented = false;
   bool m_resizing = true;
   int m_pending = -1;
   int m_current = -1;
