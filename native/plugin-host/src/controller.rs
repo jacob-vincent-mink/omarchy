@@ -1,5 +1,6 @@
 use crate::{
   channel::{Channel, Packet},
+  context::UiContext,
   presentation::Viewport,
   store::Store,
   supervisor::{self, Limits},
@@ -27,6 +28,7 @@ pub enum Control {
     y: i32,
   },
   Scroll(Scroll),
+  Context(UiContext),
 }
 
 /// Host-local position and Qt-signed deltas. Source 0 is wheel (120 units per
@@ -78,15 +80,20 @@ impl Approval {
       .store
       .with_authority(&self.id, self.epoch, &self.unit, |_| Ok(()))
   }
-  pub(crate) fn with_notifications<T>(
+  pub(crate) fn with_request<T>(
     &self,
+    kind: crate::requests::Kind,
     effect: impl FnOnce(&str) -> io::Result<T>,
   ) -> io::Result<T> {
     self
       .store
       .with_authority(&self.id, self.epoch, &self.unit, |record| {
-        if !record.grants.notifications {
-          return Err(invalid("notification grant is not current"));
+        let granted = match kind {
+          crate::requests::Kind::Notification => record.grants.notifications,
+          crate::requests::Kind::Settings => record.grants.settings,
+        };
+        if !granted {
+          return Err(invalid("host request grant is not current"));
         }
         effect(&self.id)
       })
@@ -95,6 +102,11 @@ impl Approval {
 
 impl Control {
   pub fn send(&self, channel: &Channel) -> io::Result<()> {
+    if let Self::Context(context) = self {
+      use std::os::fd::AsFd;
+      let file = context.seal()?;
+      return channel.send(b"OPH\x01\x09\0\0\0\0\0\0\0\0\0\0\0", &[file.as_fd()]);
+    }
     if let Self::Scroll(scroll) = self {
       scroll.validate()?;
       return send_extended(
@@ -126,7 +138,9 @@ impl Control {
       Self::Pong(serial) => (3, *serial),
       Self::Stop => (4, 0),
       Self::Presented(serial) => (6, *serial),
-      Self::Configure(_) | Self::Input { .. } | Self::Scroll(_) => unreachable!(),
+      Self::Configure(_) | Self::Input { .. } | Self::Scroll(_) | Self::Context(_) => {
+        unreachable!()
+      }
     };
     let mut bytes = [0u8; 16];
     bytes[..4].copy_from_slice(b"OPH\x01");
@@ -135,8 +149,11 @@ impl Control {
     channel.send(&bytes, &[])
   }
 
-  pub fn decode(packet: Packet) -> io::Result<Self> {
+  pub fn decode(mut packet: Packet) -> io::Result<Self> {
     let bytes = packet.bytes;
+    if bytes == b"OPH\x01\x09\0\0\0\0\0\0\0\0\0\0\0" && packet.fds.len() == 1 {
+      return Ok(Self::Context(UiContext::unseal(packet.fds.pop().unwrap())?));
+    }
     if !packet.fds.is_empty() || ![16, 24, 28].contains(&bytes.len()) || &bytes[..4] != b"OPH\x01" {
       return Err(invalid("invalid control record"));
     }
@@ -217,6 +234,8 @@ pub fn run(path: &Path, approval: Option<Approval>) -> io::Result<()> {
   #[cfg(feature = "graphics")]
   let mut graphics: Option<RunningGraphics> = None;
   #[cfg(feature = "graphics")]
+  let mut context = UiContext::default();
+  #[cfg(feature = "graphics")]
   let started = Instant::now();
   loop {
     let now = Instant::now();
@@ -261,7 +280,20 @@ pub fn run(path: &Path, approval: Option<Approval>) -> io::Result<()> {
           let approval = approval
             .as_ref()
             .ok_or_else(|| invalid("graphics requires an admitted plugin revision"))?;
-          graphics = Some(RunningGraphics::start(approval, viewport, &channel)?);
+          graphics = Some(RunningGraphics::start(
+            approval, viewport, &channel, &context,
+          )?);
+        }
+        #[cfg(feature = "graphics")]
+        Control::Context(next) => {
+          approval
+            .as_ref()
+            .ok_or_else(|| invalid("UI context requires admission"))?
+            .check()?;
+          if let Some(graphics) = &graphics {
+            next.publish(&graphics._runtime.path().join("context"))?;
+          }
+          context = next;
         }
         #[cfg(feature = "graphics")]
         Control::Configure(viewport) => graphics
@@ -321,13 +353,18 @@ struct RunningGraphics {
   child: std::process::Child,
   log: Vec<u8>,
   media: Option<crate::media::MediaProxy>,
-  notifications: Option<crate::notification::Broker>,
+  requests: Option<crate::requests::Broker>,
   _runtime: tempfile::TempDir,
 }
 
 #[cfg(feature = "graphics")]
 impl RunningGraphics {
-  fn start(approval: &Approval, viewport: Viewport, channel: &Channel) -> io::Result<Self> {
+  fn start(
+    approval: &Approval,
+    viewport: Viewport,
+    channel: &Channel,
+    context: &UiContext,
+  ) -> io::Result<Self> {
     use std::{
       fs::{File, OpenOptions},
       os::{
@@ -343,6 +380,10 @@ impl RunningGraphics {
           .permissions(std::fs::Permissions::from_mode(0o700))
           .tempdir()?;
         let path = runtime.path().join("wayland");
+        let context_path = runtime.path().join("context");
+        std::fs::create_dir(&context_path)?;
+        context.publish(&context_path)?;
+        let context_directory = File::open(context_path)?;
         let mut display =
           crate::graphics::Graphics::new(&path, viewport).map_err(graphics_error)?;
         let bootstrap = File::open(std::env::current_exe()?)?;
@@ -384,8 +425,8 @@ impl RunningGraphics {
             crate::media::MediaProxy::start(&address, runtime.path(), name, Limits::default())
           })
           .transpose()?;
-        let notifications = if record.grants.notifications {
-          Some(crate::notification::Broker::start(runtime.path())?)
+        let requests = if record.grants.notifications || record.grants.settings {
+          Some(crate::requests::Broker::start(runtime.path())?)
         } else {
           None
         };
@@ -399,8 +440,9 @@ impl RunningGraphics {
           crate::worker::Resources {
             render_node: Some(display.render_node()),
             media: media.as_ref(),
-            notifications: notifications.as_ref(),
+            requests: requests.as_ref(),
             runtime: worker_runtime.as_ref(),
+            context: worker_runtime.as_ref().map(|_| &context_directory),
           },
         )?;
         let fd = child
@@ -417,7 +459,7 @@ impl RunningGraphics {
           child,
           log: Vec::new(),
           media,
-          notifications,
+          requests,
           _runtime: runtime,
         })
       })
@@ -427,8 +469,8 @@ impl RunningGraphics {
     if let Some(media) = &mut self.media {
       media.check()?;
     }
-    if let Some(notifications) = &mut self.notifications {
-      notifications.dispatch(approval)?;
+    if let Some(requests) = &mut self.requests {
+      requests.dispatch(approval)?;
     }
     let mut bytes = [0u8; 4096];
     if let Some(log) = &mut self.child.stderr {
@@ -471,6 +513,49 @@ fn invalid(message: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn context_uses_exact_record_and_one_immutable_descriptor() {
+    let (sender, receiver) = Channel::pair().unwrap();
+    let context = Control::Context(UiContext::default());
+    context.send(&sender).unwrap();
+    let packet = receiver.receive().unwrap();
+    assert_eq!(packet.bytes.len(), 16);
+    assert_eq!(packet.fds.len(), 1);
+    let bytes = packet.bytes.clone();
+    assert_eq!(Control::decode(packet).unwrap(), context);
+    for length in 0..16 {
+      assert!(
+        Control::decode(Packet {
+          bytes: bytes[..length].to_vec(),
+          fds: vec![UiContext::default().seal().unwrap().into()],
+        })
+        .is_err()
+      );
+    }
+    for count in [0, 2] {
+      assert!(
+        Control::decode(Packet {
+          bytes: bytes.clone(),
+          fds: (0..count)
+            .map(|_| UiContext::default().seal().unwrap().into())
+            .collect(),
+        })
+        .is_err()
+      );
+    }
+    for offset in 4..16 {
+      let mut invalid = bytes.clone();
+      invalid[offset] = 255;
+      assert!(
+        Control::decode(Packet {
+          bytes: invalid,
+          fds: vec![UiContext::default().seal().unwrap().into()],
+        })
+        .is_err()
+      );
+    }
+  }
 
   #[test]
   fn scroll_records_are_bounded_and_exact() {

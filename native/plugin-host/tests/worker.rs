@@ -54,14 +54,20 @@ fn worker_child() {
     assert!(std::env::var_os("OMARCHY_WORKER_TEST_ROOT").is_none());
     assert_eq!(fs::read_to_string("/plugin/marker").unwrap(), "approved");
     assert_eq!(std::env::var("OMARCHY_PATH").unwrap(), "/runtime");
-    assert_eq!(fs::read_to_string("/runtime/marker").unwrap(), "runtime");
-    assert!(fs::write("/runtime/marker", "changed").is_err());
-    assert_eq!(
-      UnixStream::connect("/runtime/denied")
-        .unwrap_err()
-        .raw_os_error(),
-      Some(libc::EACCES)
-    );
+    assert_eq!(std::env::var("OMARCHY_PLUGIN_CONTEXT").unwrap(), "1");
+    for directory in ["/runtime", "/context"] {
+      assert_eq!(
+        fs::read_to_string(format!("{directory}/marker")).unwrap(),
+        "runtime"
+      );
+      assert!(fs::write(format!("{directory}/marker"), "changed").is_err());
+      assert_eq!(
+        UnixStream::connect(format!("{directory}/denied"))
+          .unwrap_err()
+          .raw_os_error(),
+        Some(libc::EACCES)
+      );
+    }
     assert!(fs::write("/plugin/marker", "changed").is_err());
     assert!(fs::write("/escape", "changed").is_err());
     fs::write("/home/plugin/private", "private").unwrap();
@@ -254,6 +260,7 @@ fn controller_child() {
     &grants,
     worker::Resources {
       runtime: Some(&runtime),
+      context: Some(&runtime),
       ..Default::default()
     },
   )

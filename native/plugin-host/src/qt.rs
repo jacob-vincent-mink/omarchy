@@ -51,6 +51,7 @@ mod ffi {
       width: u32,
       height: u32,
       scale: u32,
+      context: &str,
     ) -> Result<Box<Session>>;
     fn next(session: &Session) -> Result<NativeEvent>;
     fn input(session: &Session, kind: u32, code: u32, x: i32, y: i32) -> Result<()>;
@@ -64,6 +65,7 @@ mod ffi {
     ) -> Result<()>;
     fn presented(session: &Session, serial: u64) -> Result<()>;
     fn configure(session: &Session, width: u32, height: u32, scale: u32) -> Result<()>;
+    fn context(session: &Session, json: &str) -> Result<()>;
     fn info(self: &NativeBuffer) -> BufferInfo;
   }
 }
@@ -93,8 +95,9 @@ fn begin(
   width: u32,
   height: u32,
   scale: u32,
+  context: &str,
 ) -> io::Result<Box<Session>> {
-  Session::start(
+  Session::start_with_context(
     PathBuf::from(root),
     id.into(),
     PathBuf::from(controller),
@@ -103,8 +106,19 @@ fn begin(
       height,
       scale,
     },
+    parse_context(context)?,
   )
   .map(Box::new)
+}
+fn parse_context(json: &str) -> io::Result<crate::context::UiContext> {
+  if json.is_empty() {
+    Ok(crate::context::UiContext::default())
+  } else {
+    crate::context::UiContext::parse(json.as_bytes())
+  }
+}
+fn context(session: &Session, json: &str) -> io::Result<()> {
+  session.send(Control::Context(parse_context(json)?))
 }
 fn next(session: &Session) -> io::Result<ffi::NativeEvent> {
   let mut event = ffi::NativeEvent {

@@ -20,7 +20,14 @@ QtObject {
     return { state: instance.state, error: instance.error }
   }
 
-  function enable(id) {
+  function ownSettings(entry) {
+    var settings = JSON.parse(JSON.stringify(entry || {}))
+    delete settings.id
+    delete settings.sandbox
+    return settings
+  }
+
+  function enable(id, entry) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) || id.indexOf("..") !== -1)
       return "invalid plugin id"
     var previous = instances[id]
@@ -30,7 +37,9 @@ QtObject {
       return "native plugin host unavailable: " + component.errorString()
     if (previous) disable(id)
     if (Object.keys(instances).length >= 16) return "too many active sandbox plugins"
-    var instance = component.createObject(root, { pluginId: id, store: store, controller: controller })
+    var instance = component.createObject(root, {
+      pluginId: id, store: store, controller: controller, settings: ownSettings(entry)
+    })
     if (!instance) return "could not create native plugin host: " + component.errorString()
     var next = Object.assign({}, instances)
     next[id] = instance
@@ -79,9 +88,9 @@ QtObject {
       if (entry && entry.sandbox === true) {
         desired[String(entry.id)] = true
         if (!instances[entry.id]) {
-          var result = enable(String(entry.id))
+          var result = enable(String(entry.id), entry)
           if (result !== "starting" && result !== "ok") console.warn(result)
-        }
+        } else instances[entry.id].settings = ownSettings(entry)
       }
     }
     for (var id in instances) if (!desired[id]) disable(id)

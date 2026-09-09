@@ -1,8 +1,9 @@
 use omarchy_plugin_host::{
   channel::{Channel, Packet},
-  controller::Approval,
+  context::UiContext,
+  controller::{Approval, Control},
   grants::Grants,
-  notification::Broker,
+  requests::Broker,
   revision::Revision,
   store::Store,
   supervisor::{self, Limits},
@@ -57,7 +58,36 @@ fn notification_worker_child() {
   let mode = fs::read_to_string("/plugin/mode").unwrap();
   if mode == "denied" {
     assert!(!Path::new("/run/plugin/notify").exists());
+    assert!(!Path::new("/run/plugin/settings").exists());
     assert!(omarchy_plugin_host::notification::request("test".into(), "body".into()).is_err());
+    assert!(omarchy_plugin_host::requests::save_settings("{}").is_err());
+  } else if mode.starts_with("settings") {
+    assert!(!Path::new("/run/plugin/notify").exists());
+    let channel = Channel::connect(Path::new("/run/plugin/settings")).unwrap();
+    channel
+      .send(br#"{"version":1,"title":"wrong grant","body":""}"#, &[])
+      .unwrap();
+    assert_eq!(
+      receive(&channel),
+      "denied",
+      "settings alias bypassed the notification grant"
+    );
+    if mode == "settings" {
+      for json in [r#"{"id":"other.plugin"}"#, r#"{"sandbox":false}"#] {
+        assert!(omarchy_plugin_host::requests::save_settings(json).is_err());
+      }
+      omarchy_plugin_host::requests::save_settings(r#"{"id":"test.notification","width":80}"#)
+        .unwrap();
+      omarchy_plugin_host::requests::save_settings(r#"{"width":100}"#).unwrap();
+    } else {
+      let started = Instant::now();
+      assert!(omarchy_plugin_host::requests::save_settings("{}").is_err());
+      assert!(started.elapsed() < Duration::from_secs(2));
+      assert_ne!(
+        mode, "settings-revoke",
+        "revocation allowed the worker to continue"
+      );
+    }
   } else if mode == "timeout" {
     let started = Instant::now();
     assert_eq!(
@@ -72,6 +102,16 @@ fn notification_worker_child() {
     assert_ne!(receive(&channel), "delivered");
     panic!("revocation should terminate the worker before it continues");
   } else {
+    assert!(!Path::new("/run/plugin/settings").exists());
+    let channel = Channel::connect(Path::new("/run/plugin/notify")).unwrap();
+    Control::Context(UiContext::default())
+      .send(&channel)
+      .unwrap();
+    assert_eq!(
+      receive(&channel),
+      "denied",
+      "notification alias bypassed the settings grant"
+    );
     for bytes in [
       b"malformed".as_slice(),
       br#"{"version":1,"title":"x","body":"","id":"other"}"#,
@@ -122,7 +162,7 @@ fn notification_controller_child() {
     .unwrap()
     .read("test.notification")
     .unwrap();
-  let mut broker = if record.grants.notifications {
+  let mut broker = if record.grants.notifications || record.grants.settings {
     Some(Broker::start(root).unwrap())
   } else {
     None
@@ -153,7 +193,7 @@ fn notification_controller_child() {
     Limits::default(),
     &record.grants,
     worker::Resources {
-      notifications: broker.as_ref(),
+      requests: broker.as_ref(),
       ..Default::default()
     },
   )
@@ -204,7 +244,15 @@ fn notification_authority_is_bounded_and_revocation_stops_inflight_delivery() {
   if std::env::var("OMARCHY_TEST_SYSTEMD").as_deref() != Ok("1") {
     return;
   }
-  for mode in ["denied", "allowed", "timeout", "revoke"] {
+  for mode in [
+    "denied",
+    "allowed",
+    "timeout",
+    "revoke",
+    "settings",
+    "settings-timeout",
+    "settings-revoke",
+  ] {
     let root = tempfile::Builder::new()
       .permissions(fs::Permissions::from_mode(0o700))
       .tempdir()
@@ -219,7 +267,7 @@ fn notification_authority_is_bounded_and_revocation_stops_inflight_delivery() {
     fs::write(source.join("mode"), mode).unwrap();
     fs::write(source.join("manifest.json"), serde_json::to_vec(&serde_json::json!({
       "schemaVersion": 1, "id": "test.notification", "name": "Test", "version": "1", "kinds": ["panel"],
-      "entryPoints": {"panel": "worker.qml"}, "sandbox": {"version": 1, "entryPoint": "worker.qml", "requests": {"notifications": true}}
+      "entryPoints": {"panel": "worker.qml"}, "sandbox": {"version": 1, "entryPoint": "worker.qml", "requests": {"notifications": true, "settings": true}}
     })).unwrap()).unwrap();
     let store = Store::initialize(&root.path().join("state")).unwrap();
     let revision = Revision::import(&source, &store.revisions()).unwrap();
@@ -227,7 +275,8 @@ fn notification_authority_is_bounded_and_revocation_stops_inflight_delivery() {
       .approve(
         &revision.digest,
         Grants {
-          notifications: mode != "denied",
+          notifications: mode != "denied" && !mode.starts_with("settings"),
+          settings: mode.starts_with("settings"),
           ..Default::default()
         },
       )
@@ -237,6 +286,11 @@ fn notification_authority_is_bounded_and_revocation_stops_inflight_delivery() {
     fs::write(&helper, format!("#!/bin/bash\nprintf '%s\\0' \"$@\" >> {}\nif [[ $7 == 'Plugin test.notification: revoke' || $7 == 'Plugin test.notification: timeout' ]]; then\n  touch {}\n  sleep 30\nelse\n  sleep 0.2\nfi\n",
       quote(root.path().join("record").to_str().unwrap()), quote(root.path().join("inflight").to_str().unwrap()))).unwrap();
     fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    let settings_helper = root.path().join("bin/omarchy-plugin-settings-apply");
+    fs::write(&settings_helper, format!(
+      "#!/bin/bash\nprintf '%s\\0' \"$@\" >> {}\nif [[ {} != 'settings' ]]; then\n  touch {}\n  sleep 30\nfi\n",
+      quote(root.path().join("record").to_str().unwrap()), quote(mode), quote(root.path().join("inflight").to_str().unwrap()))).unwrap();
+    fs::set_permissions(&settings_helper, fs::Permissions::from_mode(0o700)).unwrap();
     let controller = root.path().join("controller");
     fs::write(&controller, format!("#!/bin/bash\nexport OMARCHY_PATH={}\nexport OMARCHY_NOTIFICATION_TEST_ROOT={}\nexport OMARCHY_NOTIFICATION_TEST_EPOCH=\"$5\"\nexec {} --exact notification_controller_child --nocapture\n",
       quote(root.path().to_str().unwrap()), quote(root.path().to_str().unwrap()), quote(std::env::current_exe().unwrap().to_str().unwrap()))).unwrap();
@@ -260,7 +314,7 @@ fn notification_authority_is_bounded_and_revocation_stops_inflight_delivery() {
           .unwrap();
         spoofed = true;
       }
-      if mode == "revoke" && root.path().join("inflight").exists() {
+      if mode.ends_with("revoke") && root.path().join("inflight").exists() {
         store.revoke("test.notification").unwrap();
         break;
       }
@@ -268,7 +322,7 @@ fn notification_authority_is_bounded_and_revocation_stops_inflight_delivery() {
     }
     unit.stop().unwrap();
     assert!(!unit.running().unwrap());
-    if mode == "revoke" {
+    if mode.ends_with("revoke") {
       assert!(root.path().join("inflight").exists());
       assert!(!root.path().join("passed").exists());
       assert!(!store.read("test.notification").unwrap().enabled);
@@ -316,6 +370,16 @@ fn notification_authority_is_bounded_and_revocation_stops_inflight_delivery() {
         assert_eq!(args[15], "Message: line one\nline two");
       }
       "revoke" | "timeout" => assert_eq!(args.len(), 8),
+      "settings" => assert_eq!(
+        args,
+        [
+          "test.notification",
+          r#"{"width":80}"#,
+          "test.notification",
+          r#"{"width":100}"#
+        ]
+      ),
+      "settings-revoke" | "settings-timeout" => assert_eq!(args, ["test.notification", "{}"]),
       _ => unreachable!(),
     }
   }

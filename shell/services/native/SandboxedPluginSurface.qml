@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Wayland
 import Omarchy.PluginHost
+import qs.Commons
 
 // One private desktop canvas, hosted by the existing trusted shell. A worker's
 // layer-shell requests affect only its private display, never this window.
@@ -10,6 +11,18 @@ PanelWindow {
   required property string pluginId
   required property string store
   required property string controller
+  property var settings: ({})
+  readonly property string contextJson: JSON.stringify({
+    settings: settings,
+    theme: {
+      foreground: String(Color.foreground), background: String(Color.background),
+      accent: String(Color.accent), urgent: String(Color.urgent), muted: String(Color.muted),
+      shellValues: Color.shellValues, cornerRadius: Style.cornerRadius,
+      gapsOut: Style.gapsOut, fontFamily: Style.resolvedFontFamily
+    }
+  })
+  function updateContext() { if (started && !error) view.setContext(contextJson) }
+  onContextJsonChanged: Qt.callLater(updateContext)
   property bool shown: true
   readonly property string error: view.error
   readonly property string state: error ? "error" : view.presented ? "running" : "starting"
@@ -53,7 +66,7 @@ PanelWindow {
     if (width <= 0 || height <= 0 || !targetScreen || error) return
     if (!started) {
       started = true
-      view.start(store, pluginId, controller, width, height, renderScale)
+      view.start(store, pluginId, controller, width, height, renderScale, contextJson)
     } else {
       view.configure(width, height, renderScale)
     }

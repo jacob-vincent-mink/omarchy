@@ -117,6 +117,15 @@ Item {
               checked: review.notifications
               onClicked: review.notifications = !review.notifications
             }
+            Toggle {
+              width: parent.width
+              visible: !!review.revision && review.revision.requests.settings
+              label: "Save own settings"
+              objectName: "review-settings"
+              description: "Update this plugin's settings only. No configuration-file or other-plugin access."
+              checked: review.settings
+              onClicked: review.settings = !review.settings
+            }
             Column {
               width: parent.width
               visible: !!review.revision && review.revision.requests.media
@@ -153,7 +162,7 @@ Item {
               color: Color.urgent; width: parent.width
             }
             Label {
-              visible: !!review.revision && !review.revision.requests.network && !review.revision.requests.notifications
+              visible: !!review.revision && !review.revision.requests.network && !review.revision.requests.notifications && !review.revision.requests.settings
                 && !review.revision.requests.media && !review.revision.requests.storage && review.revision.requests.read.length === 0
               text: "This revision requests no additional access."
               color: Color.muted; width: parent.width

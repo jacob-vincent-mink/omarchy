@@ -17,6 +17,7 @@ pub struct Requests {
   pub network: bool,
   pub media: bool,
   pub notifications: bool,
+  pub settings: bool,
   pub storage: bool,
 }
 
@@ -27,6 +28,7 @@ pub struct Grants {
   pub network: bool,
   pub media: Option<String>,
   pub notifications: bool,
+  pub settings: bool,
   pub storage: bool,
 }
 
@@ -156,6 +158,7 @@ impl Grants {
     if self.read.len() > 8
       || self.network && !requests.network
       || self.notifications && !requests.notifications
+      || self.settings && !requests.settings
       || self.storage && !requests.storage
       || self.media.is_some() && !requests.media
     {
@@ -321,11 +324,22 @@ mod tests {
       network: true,
       media: true,
       notifications: true,
+      settings: true,
       storage: true,
     };
     let grants = Grants::default();
     grants.validate(&requests).unwrap();
     assert!(!grants.network && grants.read.is_empty() && grants.media.is_none());
+    assert!(!grants.notifications && !grants.settings && !grants.storage);
+    assert!(!serde_json::from_str::<Grants>("{}").unwrap().settings);
+    assert!(
+      Grants {
+        settings: true,
+        ..Default::default()
+      }
+      .validate(&Requests::default())
+      .is_err()
+    );
     assert!(
       Grants {
         network: true,

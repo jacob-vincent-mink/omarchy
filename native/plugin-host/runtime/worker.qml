@@ -10,6 +10,10 @@ import "Services"
 ShellRoot {
   id: root
   property var manifest: null
+  property var context: null
+  property bool loaded: false
+  property string pendingSettings: ""
+  property string settingsError: ""
   readonly property var panel: overlayLoader.item || widgetLoader.item
   readonly property bool opened: panel && panel.opened === true
   readonly property string section: manifest && manifest.barWidget
@@ -32,14 +36,45 @@ ShellRoot {
     }
   }
 
+  function loadEntries() {
+    if (loaded || !manifest || !context) return
+    loaded = true
+    var entries = manifest.entryPoints
+    if (entries.service) serviceLoader.source = entryUrl(entries.service)
+    if (entries.overlay) overlayLoader.source = entryUrl(entries.overlay)
+    widgetLoader.setSource(entryUrl(entries.barWidget), { bar: barApi, settings: JSON.parse(JSON.stringify(context.settings)) })
+  }
+
+  FileView {
+    path: "/context/state.json"
+    watchChanges: true
+    onFileChanged: reload()
+    onLoaded: {
+      root.context = JSON.parse(text())
+      var theme = root.context.theme
+      if (theme) {
+        Color.foreground = theme.foreground
+        Color.background = theme.background
+        Color.accent = theme.accent
+        Color.urgent = theme.urgent
+        Color.muted = theme.muted
+        Color.shellValues = theme.shellValues
+        Style.applyShellValues(theme.shellValues)
+        Style.cornerRadius = theme.cornerRadius
+        Style.gapsOut = theme.gapsOut
+        Style.resolvedFontFamily = theme.fontFamily
+      }
+      if (widgetLoader.item) widgetLoader.item.settings = JSON.parse(JSON.stringify(root.context.settings))
+      root.loadEntries()
+    }
+    onLoadFailed: Qt.quit()
+  }
+
   FileView {
     path: "/plugin/manifest.json"
     onLoaded: {
       root.manifest = JSON.parse(text())
-      var entries = root.manifest.entryPoints
-      if (entries.service) serviceLoader.source = root.entryUrl(entries.service)
-      if (entries.overlay) overlayLoader.source = root.entryUrl(entries.overlay)
-      widgetLoader.setSource(root.entryUrl(entries.barWidget), { bar: barApi, settings: {} })
+      root.loadEntries()
     }
     onLoadFailed: Qt.quit()
   }
@@ -60,6 +95,64 @@ ShellRoot {
     }
     _toggle: (id, payload) => root.opened ? _hide(id) : _summon(id, payload)
     _isOpen: id => id === pluginId && root.opened
+    _updateSettings: (id, settings) => {
+      if (id !== pluginId || !settings || typeof settings !== "object" || Array.isArray(settings)) return false
+      root.pendingSettings = JSON.stringify(settings)
+      settingsTimer.restart()
+      return true
+    }
+  }
+
+  Timer {
+    id: settingsTimer
+    interval: 300
+    onTriggered: {
+      if (settingsProcess.running || !root.pendingSettings) return
+      settingsProcess.command = ["/bootstrap", "--settings", root.pendingSettings]
+      root.pendingSettings = ""
+      root.settingsError = ""
+      settingsProcess.running = true
+    }
+  }
+  Process {
+    id: settingsProcess
+    onExited: function(code) {
+      if (code !== 0) {
+        root.settingsError = "Settings were not saved. Review plugin access or retry."
+        if (widgetLoader.item) widgetLoader.item.settings = JSON.parse(JSON.stringify(root.context.settings))
+        errorTimer.restart()
+      }
+      if (root.pendingSettings) settingsTimer.restart()
+    }
+  }
+  Timer { id: errorTimer; interval: 5000; onTriggered: root.settingsError = "" }
+  PanelWindow {
+    visible: root.settingsError !== ""
+    anchors { bottom: true; right: true }
+    margins { bottom: Style.gapsOut; right: Style.gapsOut }
+    implicitWidth: Math.min(Style.space(340), screen ? screen.width - 2 * Style.gapsOut : 340)
+    implicitHeight: saveError.implicitHeight + 2 * Style.spacing.popupPadding
+    color: "transparent"
+    exclusionMode: ExclusionMode.Ignore
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+    mask: Region {}
+    BorderSurface {
+      anchors.fill: parent
+      color: Color.popups.background
+      radius: Style.cornerRadius
+      borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, 1)
+      Text {
+        id: saveError
+        anchors.centerIn: parent
+        width: parent.width - 2 * Style.spacing.popupPadding
+        text: root.settingsError
+        color: Color.popups.text
+        font.family: Style.font.family
+        font.pixelSize: Style.font.body
+        wrapMode: Text.WordWrap
+      }
+    }
   }
 
   Item {

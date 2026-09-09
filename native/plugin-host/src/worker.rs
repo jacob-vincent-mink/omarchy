@@ -22,8 +22,9 @@ use std::{
 pub struct Resources<'a> {
   pub render_node: Option<&'a Path>,
   pub media: Option<&'a MediaProxy>,
-  pub notifications: Option<&'a crate::notification::Broker>,
+  pub requests: Option<&'a crate::requests::Broker>,
   pub runtime: Option<&'a File>,
+  pub context: Option<&'a File>,
 }
 
 /// Launch only from a resource-limited trusted controller. All arguments and
@@ -67,12 +68,12 @@ pub fn spawn(
     (None, None) => None,
     _ => return Err(io::Error::other("media grant and prepared proxy disagree")),
   };
-  let notifications = match (grants.notifications, resources.notifications) {
+  let requests = match (grants.notifications || grants.settings, resources.requests) {
     (true, Some(broker)) => Some(broker.socket()),
     (false, None) => None,
     _ => {
       return Err(io::Error::other(
-        "notification grant and prepared broker disagree",
+        "host request grants and prepared broker disagree",
       ));
     }
   };
@@ -196,19 +197,29 @@ pub fn spawn(
   for (file, destination) in mounts {
     command.args(["--ro-bind-fd", &file.as_raw_fd().to_string(), destination]);
   }
-  if let Some(runtime) = resources.runtime {
-    if !runtime.metadata()?.is_dir() {
-      return Err(io::Error::other("shared worker runtime is not a directory"));
+  for (directory, destination) in [
+    (resources.runtime, "/runtime"),
+    (resources.context, "/context"),
+  ] {
+    if let Some(directory) = directory {
+      if !directory.metadata()?.is_dir() {
+        return Err(io::Error::other(
+          "shared worker resource is not a directory",
+        ));
+      }
+      command.args([
+        "--ro-bind-fd",
+        &directory.as_raw_fd().to_string(),
+        destination,
+      ]);
+      descriptors.push(directory.as_raw_fd());
     }
-    command.args([
-      "--ro-bind-fd",
-      &runtime.as_raw_fd().to_string(),
-      "/runtime",
-      "--setenv",
-      "OMARCHY_PATH",
-      "/runtime",
-    ]);
-    descriptors.push(runtime.as_raw_fd());
+  }
+  if resources.runtime.is_some() {
+    command.args(["--setenv", "OMARCHY_PATH", "/runtime"]);
+  }
+  if resources.context.is_some() {
+    command.args(["--setenv", "OMARCHY_PLUGIN_CONTEXT", "1"]);
   }
   for (name, file) in &directories {
     command.args([
@@ -229,13 +240,25 @@ pub fn spawn(
     ]);
     descriptors.push(file.as_raw_fd());
   }
-  if let Some(file) = notifications {
-    command.args([
-      "--ro-bind-fd",
-      &file.as_raw_fd().to_string(),
-      "/run/plugin/notify",
-    ]);
-    descriptors.push(file.as_raw_fd());
+  // Bubblewrap consumes each --ro-bind-fd descriptor, including aliases.
+  let request_alias = requests
+    .filter(|_| grants.notifications && grants.settings)
+    .map(File::try_clone)
+    .transpose()?;
+  if let Some(file) = requests {
+    for (granted, destination, socket) in [
+      (grants.notifications, "/run/plugin/notify", file),
+      (
+        grants.settings,
+        "/run/plugin/settings",
+        request_alias.as_ref().unwrap_or(file),
+      ),
+    ] {
+      if granted {
+        command.args(["--ro-bind-fd", &socket.as_raw_fd().to_string(), destination]);
+        descriptors.push(socket.as_raw_fd());
+      }
+    }
   }
   for (name, value) in [
     ("HOME", "/home/plugin"),
@@ -292,7 +315,11 @@ pub fn restrict_bootstrap() -> io::Result<()> {
     .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
     .open("/run/plugin/wayland")?;
   let mut sockets = vec![socket];
-  for path in ["/run/plugin/media", "/run/plugin/notify"] {
+  for path in [
+    "/run/plugin/media",
+    "/run/plugin/notify",
+    "/run/plugin/settings",
+  ] {
     match OpenOptions::new()
       .read(true)
       .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
