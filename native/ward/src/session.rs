@@ -14,12 +14,16 @@ use std::{
   sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
   time::{Duration, Instant},
 };
+mod streams;
 
 pub enum Update {
   Ready,
   Presentation(Event),
+  Stream(crate::presentation::StreamEvent),
+  TopologyReady(u32),
   PanelState { serial: u32, open: bool },
   WidgetSize { width: u32, height: u32 },
+  ViewSize { view: u32, width: u32, height: u32 },
   PanelSwitch { forward: bool },
   Failed(String),
 }
@@ -47,17 +51,52 @@ impl Session {
     viewport: Viewport,
     context: UiContext,
   ) -> io::Result<Self> {
+    Self::start_inner(root, id, controller, viewport, context, None)
+  }
+
+  pub fn start_with_topology(
+    root: PathBuf,
+    id: String,
+    controller: PathBuf,
+    topology: crate::topology::Topology,
+    context: UiContext,
+  ) -> io::Result<Self> {
+    topology.validate()?;
+    Self::start_inner(
+      root,
+      id,
+      controller,
+      Viewport {
+        width: 1,
+        height: 1,
+        scale_fixed: 120,
+      },
+      context,
+      Some(topology),
+    )
+  }
+
+  fn start_inner(
+    root: PathBuf,
+    id: String,
+    controller: PathBuf,
+    viewport: Viewport,
+    context: UiContext,
+    topology: Option<crate::topology::Topology>,
+  ) -> io::Result<Self> {
     viewport.pixels()?;
     crate::grants::validate_id(&id)?;
     if !root.is_absolute() || !controller.is_absolute() {
       return Err(io::Error::other("session paths must be absolute"));
     }
     let (commands, receiver) = mpsc::sync_channel(64);
-    let (sender, updates) = mpsc::sync_channel(8);
+    let (sender, updates) = mpsc::sync_channel(if topology.is_some() { 128 } else { 8 });
     std::thread::Builder::new()
       .name("plugin-session".into())
       .spawn(move || {
-        if let Err(error) = launch(root, id, controller, viewport, context, receiver, &sender) {
+        if let Err(error) = launch(
+          root, id, controller, viewport, context, topology, receiver, &sender,
+        ) {
           // A full queue or dropped receiver also terminates the session. Never
           // wait for GUI delivery during service cleanup.
           let _ = sender.try_send(Update::Failed(
@@ -84,6 +123,8 @@ impl Session {
         | Control::Key(_)
         | Control::Presented(_)
         | Control::Configure(_)
+        | Control::Topology(_)
+        | Control::Targeted(_)
         | Control::Context(_)
         | Control::Stop
     ) {
@@ -91,6 +132,12 @@ impl Session {
     }
     if let Control::Configure(viewport) = command {
       viewport.pixels()?;
+    }
+    if let Control::Topology(ref topology) = command {
+      topology.validate()?;
+    }
+    if let Control::Targeted(target) = command {
+      target.words()?;
     }
     if let Control::Scroll(scroll) = command {
       scroll.validate()?;
@@ -105,12 +152,14 @@ impl Session {
   }
 }
 
+#[allow(clippy::too_many_arguments)] // Initial presentation/context and the two bounded channels.
 fn launch(
   root: PathBuf,
   id: String,
   controller: PathBuf,
   mut viewport: Viewport,
   mut context: UiContext,
+  mut topology: Option<crate::topology::Topology>,
   commands: Receiver<Control>,
   updates: &SyncSender<Update>,
 ) -> io::Result<()> {
@@ -131,6 +180,10 @@ fn launch(
           next.pixels()?;
           viewport = next;
         }
+        Ok(Control::Topology(next)) if topology.is_some() => {
+          next.validate()?;
+          topology = Some(next);
+        }
         Ok(Control::Context(next)) => context = next,
         _ => return Err(io::Error::other("session cancelled before admission")),
       }
@@ -145,7 +198,11 @@ fn launch(
         Err(error) => return Err(error),
       }
     };
-    dispatch(channel, viewport, context, commands, updates)
+    if let Some(topology) = topology {
+      streams::dispatch(channel, topology, context, commands, updates)
+    } else {
+      dispatch(channel, viewport, context, commands, updates)
+    }
   })();
   // Unit::Drop also retries cleanup on failure. No manager work runs on GUI Drop.
   let stopped = unit.stop();
@@ -344,7 +401,7 @@ mod tests {
         Viewport {
           width: 80,
           height: 48,
-          scale: 1,
+          scale_fixed: 120,
         },
         UiContext::default(),
         receiver,
@@ -403,7 +460,7 @@ mod tests {
       Viewport {
         width: 80,
         height: 48,
-        scale: 1,
+        scale_fixed: 120,
       },
     );
   }
@@ -472,7 +529,7 @@ mod tests {
     let target = Viewport {
       width: 140,
       height: 90,
-      scale: 2,
+      scale_fixed: 240,
     };
     commands
       .send(Control::Configure(Viewport {
@@ -561,7 +618,7 @@ mod tests {
       let viewport = Viewport {
         width: 80,
         height: 48,
-        scale: 1,
+        scale_fixed: 120,
       };
       match mode {
         0 => Event::Configured {

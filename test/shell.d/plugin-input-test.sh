@@ -27,4 +27,22 @@ for (const position of ['top', 'bottom', 'left', 'right']) {
 }
 assertDeepEqual(scope.barMask(full, null, 800, 500), full, 'unplaced workers keep their mask')
 pass('host bar input isolation on all four edges')
+const bars = [
+  {position: 'top', visible: true, size: 26, x: 100, y: 0, width: 40, height: 26},
+  {position: 'top', visible: true, size: 26, x: 200, y: 0, width: 40, height: 26},
+  {position: 'right', visible: true, size: 26, x: 0, y: 100, width: 26, height: 40},
+  {position: 'bottom', visible: false, size: 26, x: 300, y: 0, width: 40, height: 26}
+]
+for (const allowed of [true, false]) {
+  const masks = scope.barMasks(full, bars, 800, 500, allowed)
+  assert(contains(masks, 120, 13) && contains(masks, 220, 13) && contains(masks, 787, 120), 'multiple own placements form a union')
+  assert(!contains(masks, 170, 13) && !contains(masks, 787, 170), 'all neighboring bar slots remain click-through')
+  assertEqual(contains(masks, 400, 250), allowed, 'non-owner output suppresses panel input unless roaming is approved')
+  assertEqual(scope.barMasks([], bars, 800, 500, allowed).length, 0, 'multiple slots cannot invent worker input')
+}
+assertEqual(scope.barMasks(full, [], 800, 500, false).length, 0, 'unplaced non-owner output has no input')
+assertDeepEqual(JSON.parse(JSON.stringify(scope.barMasks(full, [], 800, 500, true))), full, 'unplaced approved output preserves worker input')
+const outside = [{...bars[0], x: -10, width: 20}]
+assertDeepEqual(JSON.parse(JSON.stringify(scope.barSlots(outside, 800, 500))), [{x: 0, y: 0, width: 10, height: 26}], 'slots clip to output bounds')
+assertEqual(scope.barMasks(Array(513).fill(full[0]), [], 800, 500, true).length, 0, 'mask complexity fails closed')
 JS

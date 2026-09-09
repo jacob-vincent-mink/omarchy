@@ -386,7 +386,7 @@ fn whitebox_presentation_record_attacks_fail_decode() {
   // A well-formed Configured round-trips.
   Event::Configured {
     generation: 1,
-    viewport: Viewport { width: 100, height: 100, scale: 1 },
+    viewport: Viewport { width: 100, height: 100, scale_fixed: 120 },
   }
   .send(&a)
   .unwrap();
@@ -396,7 +396,7 @@ fn whitebox_presentation_record_attacks_fail_decode() {
   for (w, h, s) in [(0, 100, 1), (4097, 100, 1), (100, 100, 0), (100, 100, 5)] {
     assert!(Event::Configured {
       generation: 1,
-      viewport: Viewport { width: w, height: h, scale: s },
+      viewport: Viewport { width: w, height: h, scale_fixed: s },
     }
     .send(&a)
     .is_err());

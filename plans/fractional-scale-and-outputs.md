@@ -1,5 +1,7 @@
 # Fractional scaling and multiple outputs — proposed geometry contract
 
+Historical worker-only proposal and checkpoint. The later per-output stream implementation supersedes the single-canvas host proposal below; see the [current architecture](../docs/ward-architecture.md#pixels-input-and-context) and [remaining release validation](ward-host-integration.md#order-decisions-and-completion). Installed-VM and physical-monitor acceptance remain unclaimed.
+
 ## Integration checkpoint
 
 The worker commits through `1e998ea4` are integrated into `rust-plugin-sandbox`, retaining the host-activation-gated keyboard focus fixes. Independent review reproduced and then verified fixes for integer output resize, rescale buffer allocation, physical-budget checks through both scaling entry points, output bounds, xdg-output logical size, and same-scale layer reconfiguration. The combined tree passes the GPU/Qt activation, focus, surface, shared-runtime and isolation suites, plus fractional/output-wall tests and strict all-target Clippy. A separate actual Quickshell `Variants`/`PanelWindow` experiment passes two outputs, addition of a third with owner resizing, removal, and 1.5-to-2.0 rescaling; private-display captures were inspected.

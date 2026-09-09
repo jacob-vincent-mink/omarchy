@@ -403,7 +403,7 @@ fn quickshell_panel_lives_on_second_output_and_survives_wall_changes() {
   let viewport = Viewport {
     width: VIEWPORT_W,
     height: VIEWPORT_H,
-    scale: 1,
+    scale_fixed: 120,
   };
   let mut outer = Desktop::new_scaled(root.path(), viewport, RENDER_SCALE);
 

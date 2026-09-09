@@ -65,7 +65,7 @@ use smithay::{
   },
 };
 use std::{
-  cell::RefCell,
+  cell::{Cell, RefCell},
   collections::BTreeMap,
   fs::File,
   os::unix::fs::MetadataExt,
@@ -74,6 +74,7 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+mod streams;
 
 /// One sub-rect of the single composite canvas surfaced as its own
 /// `wl_output`/`xdg-output` global (the "monitor wall" model). Coordinates
@@ -91,6 +92,7 @@ pub struct OutputSpec {
 /// The wire state backing one wall output: its logical sub-rect plus the
 /// bound `wl_output` global (owned for enter/leave and global lifetime).
 struct OutputFlow {
+  id: u32,
   spec: OutputSpec,
   output: Output,
   global: GlobalId,
@@ -110,11 +112,13 @@ struct LayerRole(RefCell<Weak<ZwlrLayerSurfaceV1>>);
 /// Which wall output a layer surface was created against, stored in the
 /// surface's data map so layer geometry is constrained to that output's
 /// logical rect rather than the whole canvas.
-struct LayerOutput(usize);
+struct LayerOutput(Cell<u32>);
 
 /// One private compositor in the already resource-limited controller process.
 /// Worker buffers are never forwarded to Qt: only completed controller output.
 pub struct Graphics {
+  streams: Option<streams::Streams>,
+  input_output: Option<u32>,
   display: Display<App>,
   socket: ListeningSocket,
   app: App,
@@ -171,7 +175,7 @@ impl Graphics {
     output.change_current_state(
       Some(mode),
       Some(Transform::Normal),
-      Some(Scale::Integer(viewport.scale as i32)),
+      Some(Scale::Fractional(f64::from(viewport.scale_fixed) / 120.0)),
       Some((0, 0).into()),
     );
     output.set_preferred(mode);
@@ -179,12 +183,13 @@ impl Graphics {
     // canvas at the integer start scale (fractional is set later via
     // `configure_scaled`).
     let primary = OutputFlow {
+      id: 1,
       spec: OutputSpec {
         x: 0,
         y: 0,
         width: viewport.width,
         height: viewport.height,
-        scale_fixed: viewport.scale * 120,
+        scale_fixed: viewport.scale_fixed,
       },
       output,
       global,
@@ -201,9 +206,10 @@ impl Graphics {
       seats,
       renderer,
       outputs: vec![primary],
+      default_output: None,
       live_surfaces: Vec::new(),
       viewport,
-      render_scale: viewport.scale as f64,
+      render_scale: f64::from(viewport.scale_fixed) / 120.0,
       layers: Vec::new(),
       popups: Vec::new(),
       surfaces: 0,
@@ -215,6 +221,8 @@ impl Graphics {
     let mut allocator = GbmAllocator::new(gbm, GbmBufferFlags::RENDERING);
     let buffers = allocate(&mut allocator, pixels)?;
     Ok(Self {
+      streams: None,
+      input_output: None,
       display,
       socket,
       app,
@@ -241,6 +249,9 @@ impl Graphics {
   }
 
   pub fn describe(&mut self, channel: &Channel) -> Result<()> {
+    if self.streams.is_some() {
+      return self.describe_streams(channel);
+    }
     self.frames.configure(self.generation)?;
     Event::Configured {
       generation: self.generation,
@@ -342,7 +353,7 @@ impl Graphics {
 
   pub fn configure(&mut self, viewport: Viewport, time: u32) -> Result<()> {
     viewport.pixels()?;
-    let scale = f64::from(viewport.scale);
+    let scale = f64::from(viewport.scale_fixed) / 120.0;
     self.requested = Some(viewport);
     self.app.render_scale = scale;
     // The primary (full-canvas) output's spec tracks the resized canvas so
@@ -466,6 +477,7 @@ impl Graphics {
       let global = output.create_global::<App>(&dh);
       let spec = &specs[idx];
       self.app.outputs.push(OutputFlow {
+        id: idx as u32 + 1,
         spec: OutputSpec {
           x: spec.x,
           y: spec.y,
@@ -542,6 +554,9 @@ impl Graphics {
   }
 
   pub fn render(&mut self, channel: &Channel, time: u32) -> Result<()> {
+    if self.streams.is_some() {
+      return self.render_streams(channel, time);
+    }
     let Some(mut slot) = self.frames.writable_slot() else {
       return Ok(());
     };
@@ -656,6 +671,10 @@ impl Graphics {
 
   pub fn scroll(&mut self, scroll: Scroll, time: u32) -> Result<()> {
     scroll.validate()?;
+    self.scroll_global(scroll, time)
+  }
+
+  fn scroll_global(&mut self, scroll: Scroll, time: u32) -> Result<()> {
     // Re-hit-test at the event position; scrolling does not acquire keyboard focus.
     self.input(2, 0, scroll.x, scroll.y, time)?;
     let mut frame = AxisFrame::new(time).source(if scroll.source == 0 {
@@ -729,13 +748,19 @@ impl Graphics {
 
   pub fn input(&mut self, kind: u32, code: u32, x: i32, y: i32, time: u32) -> Result<()> {
     if kind <= 2 {
-      if x < 0
-        || y < 0
-        || x >= self.app.viewport.width as i32
-        || y >= self.app.viewport.height as i32
-        || (kind < 2 && !(0x110..=0x117).contains(&code))
-        || (kind == 2 && code != 0)
-      {
+      let in_output = if self.streams.is_some() {
+        self
+          .app
+          .outputs
+          .iter()
+          .any(|flow| flow.logical_rect().contains((x, y)))
+      } else {
+        x >= 0
+          && y >= 0
+          && x < self.app.viewport.width as i32
+          && y < self.app.viewport.height as i32
+      };
+      if !in_output || (kind < 2 && !(0x110..=0x117).contains(&code)) || (kind == 2 && code != 0) {
         return Err("invalid host pointer input".into());
       }
       let point = (x as f64, y as f64).into();
@@ -922,6 +947,7 @@ struct App {
   // (monitor wall). `outputs[0]` is the primary/degenerate full-canvas output;
   // `configure_outputs` reconciles the list over the same single buffer.
   outputs: Vec<OutputFlow>,
+  default_output: Option<u32>,
   live_surfaces: Vec<Weak<WlSurface>>,
   viewport: Viewport,
   render_scale: f64,
@@ -960,11 +986,77 @@ impl App {
     (self.render_scale.floor() as i32).max(1)
   }
 
+  fn default_rect(&self) -> Rectangle<i32, Logical> {
+    self
+      .outputs
+      .iter()
+      .find(|output| Some(output.id) == self.default_output)
+      .or_else(|| self.outputs.first())
+      .map(OutputFlow::logical_rect)
+      .unwrap_or_else(|| {
+        Rectangle::from_size((self.viewport.width as i32, self.viewport.height as i32).into())
+      })
+  }
+
+  fn surface_output(&self, surface: &WlSurface) -> Option<&OutputFlow> {
+    let mut root = surface.clone();
+    for _ in 0..64 {
+      let owner = with_states(&root, |states| {
+        states
+          .data_map
+          .get::<LayerOutput>()
+          .map(|owner| owner.0.get())
+      });
+      if let Some(owner) = owner {
+        return self.outputs.iter().find(|flow| flow.id == owner);
+      }
+      let parent = get_parent(&root).or_else(|| {
+        self
+          .popups
+          .iter()
+          .find(|popup| popup.wl_surface() == &root)
+          .and_then(PopupSurface::get_parent_surface)
+      });
+      match parent {
+        Some(parent) => root = parent,
+        None => break,
+      }
+    }
+    let rect = self.surface_logical_rect(surface);
+    self
+      .outputs
+      .iter()
+      .filter(|flow| flow.logical_rect().intersection(rect).is_some())
+      .max_by_key(|flow| flow.spec.scale_fixed)
+      .or_else(|| self.outputs.first())
+  }
+
+  fn preferred_scale(&self, surface: &WlSurface) -> f64 {
+    self
+      .surface_output(surface)
+      .map_or(self.render_scale, |flow| {
+        f64::from(flow.spec.scale_fixed) / 120.0
+      })
+  }
+
+  fn send_preferred_scale(&self, surface: &WlSurface) {
+    let scale = self.preferred_scale(surface);
+    with_states(surface, |states| {
+      with_fractional_scale(states, |state| state.set_preferred_scale(scale));
+      send_surface_state(
+        surface,
+        states,
+        (scale.floor() as i32).max(1),
+        Transform::Normal,
+      );
+    });
+  }
+
   /// Reconcile every `wl_output` global's mode/scale/location to its spec's
   /// physical size (rounded from the uniform render scale) and logical origin.
   fn sync_outputs(&mut self) {
-    let scale = self.render_scale;
     for flow in &self.outputs {
+      let scale = f64::from(flow.spec.scale_fixed) / 120.0;
       let (w, h) = (
         f64::round(f64::from(flow.spec.width) * scale) as i32,
         f64::round(f64::from(flow.spec.height) * scale) as i32,
@@ -985,8 +1077,8 @@ impl App {
         Some(mode),
         Some(Transform::Normal),
         Some(Scale::Custom {
-          advertised_integer: self.surface_scale(),
-          fractional: self.render_scale,
+          advertised_integer: (scale.floor() as i32).max(1),
+          fractional: scale,
         }),
         Some((flow.spec.x, flow.spec.y).into()),
       );
@@ -1014,12 +1106,14 @@ impl App {
     let Some(pos) = position else {
       // Not yet placed; fall back to centering in the logical canvas.
       let pos = (
-        ((self.viewport.width as i32 - bbox.size.w) / 2)
+        ((self.default_rect().size.w - bbox.size.w) / 2)
           .max(0)
-          .saturating_sub(bbox.loc.x),
-        ((self.viewport.height as i32 - bbox.size.h) / 2)
+          .saturating_sub(bbox.loc.x)
+          .saturating_add(self.default_rect().loc.x),
+        ((self.default_rect().size.h - bbox.size.h) / 2)
           .max(0)
-          .saturating_sub(bbox.loc.y),
+          .saturating_sub(bbox.loc.y)
+          .saturating_add(self.default_rect().loc.y),
       );
       return Rectangle::new(pos.into(), bbox.size);
     };
@@ -1041,6 +1135,7 @@ impl App {
         flow.output.leave(surface);
       }
     }
+    self.send_preferred_scale(surface);
   }
 
   /// Re-run per-output enter/leave for every live surface (after the wall is
@@ -1077,11 +1172,12 @@ impl App {
       states
         .data_map
         .get::<LayerOutput>()
-        .map(|LayerOutput(index)| *index)
+        .map(|LayerOutput(id)| id.get())
     });
     let output_rect = self
       .outputs
-      .get(output.unwrap_or(0))
+      .iter()
+      .find(|flow| Some(flow.id) == output)
       .map(|flow| flow.logical_rect())
       .unwrap_or_else(|| {
         Rectangle::from_size((self.viewport.width as i32, self.viewport.height as i32).into())
@@ -1113,12 +1209,14 @@ impl App {
         &mut roots,
         top.wl_surface(),
         (
-          ((self.viewport.width as i32 - bbox.size.w) / 2)
+          ((self.default_rect().size.w - bbox.size.w) / 2)
             .max(0)
-            .saturating_sub(bbox.loc.x),
-          ((self.viewport.height as i32 - bbox.size.h) / 2)
+            .saturating_sub(bbox.loc.x)
+            .saturating_add(self.default_rect().loc.x),
+          ((self.default_rect().size.h - bbox.size.h) / 2)
             .max(0)
-            .saturating_sub(bbox.loc.y),
+            .saturating_sub(bbox.loc.y)
+            .saturating_add(self.default_rect().loc.y),
         ),
       );
     }
@@ -1134,6 +1232,15 @@ impl App {
       .iter()
       .filter(|layer| layer_state(layer).layer == level)
     {
+      let owner = with_states(layer.wl_surface(), |states| {
+        states
+          .data_map
+          .get::<LayerOutput>()
+          .map(|owner| owner.0.get())
+      });
+      if owner.is_some_and(|id| !self.outputs.iter().any(|flow| flow.id == id)) {
+        continue;
+      }
       let rect = self.layer_rect(layer);
       self.append_root(roots, layer.wl_surface(), (rect.loc.x, rect.loc.y));
     }
@@ -1149,7 +1256,7 @@ impl App {
     if roots.iter().any(|(seen, _)| seen == surface) {
       return;
     }
-    let pos = (pos.0.clamp(-8192, 8192), pos.1.clamp(-8192, 8192));
+    let pos = (pos.0.clamp(-65536, 65536), pos.1.clamp(-65536, 65536));
     roots.push((surface.clone(), pos));
     let origin = window_origin(surface);
     for popup in &self.popups {
@@ -1203,9 +1310,17 @@ impl App {
       return;
     };
     let origin = window_origin(&parent);
+    let output = self
+      .surface_output(&parent)
+      .map(OutputFlow::logical_rect)
+      .unwrap_or_else(|| self.default_rect());
     let target = Rectangle::new(
-      (-pos.0 - origin.0, -pos.1 - origin.1).into(),
-      (self.viewport.width as i32, self.viewport.height as i32).into(),
+      (
+        output.loc.x - pos.0 - origin.0,
+        output.loc.y - pos.1 - origin.1,
+      )
+        .into(),
+      output.size,
     );
     let Some(geometry) = popup_geometry(positioner, target) else {
       self.failed = true;
@@ -1222,9 +1337,17 @@ impl App {
     }
   }
   fn mask(&self, roots: &[(WlSurface, (i32, i32))]) -> Result<Vec<Region>> {
+    self.mask_in(roots, self.viewport.width, self.viewport.height)
+  }
+
+  fn mask_in(
+    &self,
+    roots: &[(WlSurface, (i32, i32))],
+    width: u32,
+    height: u32,
+  ) -> Result<Vec<Region>> {
     let mut result = Ok(Vec::new());
-    let viewport =
-      Rectangle::from_size((self.viewport.width as i32, self.viewport.height as i32).into());
+    let viewport = Rectangle::from_size((width as i32, height as i32).into());
     for (surface, pos) in roots {
       // Match Smithay's hit testing: each mapped subsurface has its own local
       // input region, clipped to its own view, not the whole tree's bounding box.
@@ -1445,7 +1568,7 @@ mod tests {
     let viewport = Viewport {
       width: 400,
       height: 300,
-      scale: 1,
+      scale_fixed: 120,
     };
     let full_canvas = Rectangle::from_size((viewport.width as i32, viewport.height as i32).into());
     let mut state = LayerSurfaceCachedState {
@@ -1558,7 +1681,7 @@ mod tests {
     let initial = Viewport {
       width: 64,
       height: 48,
-      scale: 1,
+      scale_fixed: 120,
     };
     let mut graphics = Graphics::new(&root.path().join("display"), initial).unwrap();
     let (producer, consumer) = Channel::pair().unwrap();
@@ -1584,7 +1707,7 @@ mod tests {
     let next = Viewport {
       width: 80,
       height: 60,
-      scale: 2,
+      scale_fixed: 240,
     };
     graphics.configure(next, 2).unwrap();
     assert!(graphics.keyboard.pressed_keys().is_empty());
@@ -1674,7 +1797,7 @@ mod tests {
     let viewport = Viewport {
       width: 2048,
       height: 2048,
-      scale: 1,
+      scale_fixed: 120,
     };
     let mut graphics = Graphics::new(&root.path().join("display"), viewport).unwrap();
     // Scale 1.0 leaves the canvas at 2048x2048 (within budget). Raising the
@@ -1724,9 +1847,7 @@ impl FractionalScaleHandler for App {
     // Tell the surface the current preferred scale as soon as it binds the
     // fractional-scale protocol, so a fractional-aware client (Quickshell)
     // renders at the precise resolution without waiting for a commit.
-    with_states(&surface, |states| {
-      with_fractional_scale(states, |s| s.set_preferred_scale(self.render_scale));
-    });
+    self.send_preferred_scale(&surface);
   }
 }
 impl CompositorHandler for App {
@@ -1762,14 +1883,12 @@ impl CompositorHandler for App {
       });
     });
     self.surfaces += 1;
-    if self.surfaces > 64 {
+    // Up to 32 bar placements plus bounded panel, tooltip and roaming views.
+    if self.surfaces > 128 {
       self.failed = true;
     }
     self.live_surfaces.push(surface.downgrade());
-    with_states(surface, |states| {
-      with_fractional_scale(states, |s| s.set_preferred_scale(self.render_scale));
-      send_surface_state(surface, states, self.surface_scale(), Transform::Normal)
-    });
+    self.send_preferred_scale(surface);
   }
   fn destroyed(&mut self, surface: &WlSurface) {
     self.surfaces = self.surfaces.saturating_sub(1);
@@ -1779,10 +1898,7 @@ impl CompositorHandler for App {
     self.dirty = true;
   }
   fn commit(&mut self, surface: &WlSurface) {
-    with_states(surface, |states| {
-      with_fractional_scale(states, |s| s.set_preferred_scale(self.render_scale));
-      send_surface_state(surface, states, self.surface_scale(), Transform::Normal)
-    });
+    self.send_preferred_scale(surface);
     on_commit_buffer_handler::<Self>(surface);
     self.reconcile_outputs_for(surface);
     self.dirty = true;
@@ -1855,15 +1971,29 @@ impl WlrLayerShellHandler for App {
   ) {
     // Keep the layer pinned to the wall output it was created against so its
     // geometry is constrained to that output's rect, not the whole canvas.
-    let output_index = output
+    let output_id = output
       .as_ref()
       .and_then(Output::from_resource)
-      .and_then(|out| self.outputs.iter().position(|flow| flow.output == out))
+      .and_then(|out| {
+        self
+          .outputs
+          .iter()
+          .find(|flow| flow.output == out)
+          .map(|flow| flow.id)
+      })
+      .or(self.default_output)
+      .or_else(|| self.outputs.first().map(|flow| flow.id))
       .unwrap_or(0);
     with_states(surface.wl_surface(), |states| {
       states
         .data_map
-        .insert_if_missing(|| LayerOutput(output_index));
+        .insert_if_missing(|| LayerOutput(Cell::new(output_id)));
+      states
+        .data_map
+        .get::<LayerOutput>()
+        .unwrap()
+        .0
+        .set(output_id);
     });
     with_states(surface.wl_surface(), |states| {
       if let Some(role) = states.data_map.get::<LayerRole>() {
@@ -1879,7 +2009,7 @@ impl WlrLayerShellHandler for App {
           .insert_if_missing(|| LayerRole(RefCell::new(surface.shell_surface().downgrade())));
       }
     });
-    if self.layers.len() >= 16 {
+    if self.layers.len() >= 64 {
       self.failed = true;
       return;
     }

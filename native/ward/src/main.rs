@@ -174,6 +174,13 @@ fn run_internal(args: &[OsString]) -> io::Result<()> {
       width.to_str().ok_or_else(|| Status::Invalid.error())?,
       height.to_str().ok_or_else(|| Status::Invalid.error())?,
     ),
+    [mode, view, width, height] if mode == "--widget-size" => {
+      omarchy_ward::requests::report_view_size(
+        view.to_str().ok_or_else(|| Status::Invalid.error())?,
+        width.to_str().ok_or_else(|| Status::Invalid.error())?,
+        height.to_str().ok_or_else(|| Status::Invalid.error())?,
+      )
+    }
     [mode, settings] if mode == "--settings" => omarchy_ward::requests::save_settings(
       settings.to_str().ok_or_else(|| Status::Invalid.error())?,
     ),

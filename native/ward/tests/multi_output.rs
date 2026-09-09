@@ -99,7 +99,7 @@ fn output_wall_enter_leave_reassign_remove_and_logical_input() {
   let viewport = Viewport {
     width: VIEWPORT_W,
     height: VIEWPORT_H,
-    scale: 1,
+    scale_fixed: 120,
   };
   let mut outer = Desktop::new_scaled(root.path(), viewport, RENDER_SCALE);
 

@@ -10,6 +10,7 @@ mod ffi {
   enum EventKind {
     Empty,
     Ready,
+    TopologyReady,
     Configured,
     Buffer,
     Frame,
@@ -34,10 +35,13 @@ mod ffi {
   }
   struct NativeEvent {
     kind: EventKind,
+    output: u32,
+    epoch: u32,
+    view: u32,
     generation: u64,
     width: u32,
     height: u32,
-    scale: u32,
+    scale_fixed: u32,
     serial: u64,
     slot: u32,
     panel_serial: u32,
@@ -60,6 +64,43 @@ mod ffi {
       context: &str,
     ) -> Result<Box<Session>>;
     fn next(session: &Session) -> Result<NativeEvent>;
+    fn begin_streams(
+      root: &str,
+      id: &str,
+      controller: &str,
+      topology: &str,
+      context: &str,
+    ) -> Result<Box<Session>>;
+    fn configure_streams(session: &Session, topology: &str) -> Result<()>;
+    fn target_input(
+      session: &Session,
+      output: u32,
+      epoch: u32,
+      kind: u32,
+      code: u32,
+      x: i32,
+      y: i32,
+    ) -> Result<()>;
+    fn target_key(
+      session: &Session,
+      output: u32,
+      epoch: u32,
+      code: u32,
+      symbol: u32,
+      pressed: bool,
+    ) -> Result<()>;
+    #[allow(clippy::too_many_arguments)] // Fixed scalar CXX wire fields.
+    fn target_scroll(
+      session: &Session,
+      output: u32,
+      epoch: u32,
+      source: u32,
+      x: i32,
+      y: i32,
+      horizontal: i32,
+      vertical: i32,
+    ) -> Result<()>;
+    fn target_presented(session: &Session, output: u32, epoch: u32, serial: u64) -> Result<()>;
     fn input(session: &Session, kind: u32, code: u32, x: i32, y: i32) -> Result<()>;
     fn key(session: &Session, code: u32, symbol: u32, pressed: bool) -> Result<()>;
     fn scroll(
@@ -111,7 +152,9 @@ fn begin(
     presentation::Viewport {
       width,
       height,
-      scale,
+      scale_fixed: scale
+        .checked_mul(120)
+        .ok_or_else(|| io::Error::other("invalid scale"))?,
     },
     parse_context(context)?,
   )
@@ -130,10 +173,13 @@ fn context(session: &Session, json: &str) -> io::Result<()> {
 fn next(session: &Session) -> io::Result<ffi::NativeEvent> {
   let mut event = ffi::NativeEvent {
     kind: ffi::EventKind::Empty,
+    output: 0,
+    epoch: 0,
+    view: 0,
     generation: 0,
     width: 0,
     height: 0,
-    scale: 0,
+    scale_fixed: 0,
     serial: 0,
     slot: 0,
     panel_serial: 0,
@@ -143,9 +189,22 @@ fn next(session: &Session) -> io::Result<ffi::NativeEvent> {
     regions: Vec::new(),
     error: String::new(),
   };
-  match session.poll()? {
+  let update = match session.poll()? {
+    Some(Update::Stream(stream)) => {
+      event.output = stream.output;
+      event.epoch = stream.epoch;
+      Some(Update::Presentation(stream.event))
+    }
+    update => update,
+  };
+  match update {
     None => (),
     Some(Update::Ready) => event.kind = ffi::EventKind::Ready,
+    Some(Update::TopologyReady(epoch)) => {
+      event.kind = ffi::EventKind::TopologyReady;
+      event.epoch = epoch;
+    }
+    Some(Update::Stream(_)) => unreachable!(),
     Some(Update::PanelState { serial, open }) => {
       event.kind = ffi::EventKind::PanelState;
       event.panel_serial = serial;
@@ -153,6 +212,16 @@ fn next(session: &Session) -> io::Result<ffi::NativeEvent> {
     }
     Some(Update::WidgetSize { width, height }) => {
       event.kind = ffi::EventKind::WidgetSize;
+      event.width = width;
+      event.height = height;
+    }
+    Some(Update::ViewSize {
+      view,
+      width,
+      height,
+    }) => {
+      event.kind = ffi::EventKind::WidgetSize;
+      event.view = view;
       event.width = width;
       event.height = height;
     }
@@ -168,7 +237,7 @@ fn next(session: &Session) -> io::Result<ffi::NativeEvent> {
       event.generation = generation;
       event.width = viewport.width;
       event.height = viewport.height;
-      event.scale = viewport.scale;
+      event.scale_fixed = viewport.scale_fixed;
     }
     Some(Update::Failed(error)) => {
       event.kind = ffi::EventKind::Failed;
@@ -199,6 +268,109 @@ fn next(session: &Session) -> io::Result<ffi::NativeEvent> {
     }
   }
   Ok(event)
+}
+
+fn begin_streams(
+  root: &str,
+  id: &str,
+  controller: &str,
+  topology: &str,
+  context: &str,
+) -> io::Result<Box<Session>> {
+  Session::start_with_topology(
+    PathBuf::from(root),
+    id.into(),
+    PathBuf::from(controller),
+    crate::topology::Topology::parse(topology.as_bytes())?,
+    parse_context(context)?,
+  )
+  .map(Box::new)
+}
+
+fn configure_streams(session: &Session, topology: &str) -> io::Result<()> {
+  session.send(Control::Topology(crate::topology::Topology::parse(
+    topology.as_bytes(),
+  )?))
+}
+
+fn targeted(
+  session: &Session,
+  output: u32,
+  epoch: u32,
+  event: crate::topology::Input,
+) -> io::Result<()> {
+  session.send(Control::Targeted(crate::topology::Targeted {
+    output,
+    epoch,
+    event,
+  }))
+}
+fn target_input(
+  session: &Session,
+  output: u32,
+  epoch: u32,
+  kind: u32,
+  code: u32,
+  x: i32,
+  y: i32,
+) -> io::Result<()> {
+  targeted(
+    session,
+    output,
+    epoch,
+    crate::topology::Input::Pointer { kind, code, x, y },
+  )
+}
+fn target_key(
+  session: &Session,
+  output: u32,
+  epoch: u32,
+  code: u32,
+  symbol: u32,
+  pressed: bool,
+) -> io::Result<()> {
+  targeted(
+    session,
+    output,
+    epoch,
+    crate::topology::Input::Key(crate::controller::Key {
+      code,
+      symbol,
+      pressed,
+    }),
+  )
+}
+#[allow(clippy::too_many_arguments)] // Mirrors the fixed scalar CXX wire fields.
+fn target_scroll(
+  session: &Session,
+  output: u32,
+  epoch: u32,
+  source: u32,
+  x: i32,
+  y: i32,
+  horizontal: i32,
+  vertical: i32,
+) -> io::Result<()> {
+  targeted(
+    session,
+    output,
+    epoch,
+    crate::topology::Input::Scroll(crate::controller::Scroll {
+      source,
+      x,
+      y,
+      horizontal,
+      vertical,
+    }),
+  )
+}
+fn target_presented(session: &Session, output: u32, epoch: u32, serial: u64) -> io::Result<()> {
+  targeted(
+    session,
+    output,
+    epoch,
+    crate::topology::Input::Presented(serial),
+  )
 }
 fn input(session: &Session, kind: u32, code: u32, x: i32, y: i32) -> io::Result<()> {
   if kind > 6 {
@@ -236,6 +408,8 @@ fn configure(session: &Session, width: u32, height: u32, scale: u32) -> io::Resu
   session.send(Control::Configure(presentation::Viewport {
     width,
     height,
-    scale,
+    scale_fixed: scale
+      .checked_mul(120)
+      .ok_or_else(|| io::Error::other("invalid scale"))?,
   }))
 }

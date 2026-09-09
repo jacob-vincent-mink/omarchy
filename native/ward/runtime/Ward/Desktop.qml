@@ -24,11 +24,14 @@ QtObject {
   onToplevelsChanged: changed()
 
   function monitorFor(screen) {
-    // The current worker has one private output. Host output names are never
-    // exported; viewport explicitly associates that output with its host.
-    if (!available || !screen || Quickshell.screens.length !== 1
-      || screen !== Quickshell.screens[0]) return null
-    const output = context.snapshot.outputs.find(output => output.id === context.snapshot.viewport)
+    if (!available || !screen || !Quickshell.screens.some(candidate => candidate === screen)) return null
+    // Association is stripped with the observation grant. Private names alone
+    // confer presentation geometry, never windows or workspace observations.
+    const privateId = /^ward-([1-9][0-9]*)$/.exec(screen.name)
+    const observedId = privateId ? context.outputs[privateId[1]]
+      : Quickshell.screens.length === 1 ? context.snapshot.viewport : null
+    const output = context.snapshot.outputs.find(output => output.id === observedId)
+    if (!output) return null
     return {
       id: output.id, x: output.rect.x, y: output.rect.y,
       width: output.rect.width, height: output.rect.height, scale: output.scale,
@@ -45,13 +48,16 @@ QtObject {
   }
   property FileView context: FileView {
     property var snapshot: null
+    property var outputs: ({})
     path: "/context/state.json"
     watchChanges: true
     onFileChanged: reload()
     onLoaded: {
-      const next = JSON.parse(text()).geometry || null
+      const state = JSON.parse(text())
+      const next = state.geometry || null
+      outputs = state.geometryOutputs || {}
       if (JSON.stringify(next) !== JSON.stringify(snapshot)) snapshot = next
     }
-    onLoadFailed: snapshot = null
+    onLoadFailed: { snapshot = null; outputs = {} }
   }
 }

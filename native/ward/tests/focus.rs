@@ -70,7 +70,7 @@ fn private_layer_focus_obeys_activation_mode_and_unmapping() {
     Viewport {
       width: 400,
       height: 200,
-      scale: 1,
+      scale_fixed: 120,
     },
   );
   let mut client = Host(
@@ -207,7 +207,7 @@ ShellRoot {
       Viewport {
         width: 400,
         height: 200,
-        scale: 1,
+        scale_fixed: 120,
       },
     );
     let _client = Host(

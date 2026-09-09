@@ -59,7 +59,7 @@ fn missing_or_invalid_shared_runtime_fails_without_presenting() {
       Viewport {
         width: 400,
         height: 240,
-        scale: 1,
+        scale_fixed: 120,
       },
     )
     .unwrap();
@@ -70,13 +70,17 @@ fn missing_or_invalid_shared_runtime_fails_without_presenting() {
           assert!(!error.is_empty());
           break;
         }
-        Some(Update::Presentation(omarchy_ward::presentation::Event::Frame { .. })) => {
+        Some(Update::Presentation(omarchy_ward::presentation::Event::Frame { .. }))
+        | Some(Update::Stream(omarchy_ward::presentation::StreamEvent { event: omarchy_ward::presentation::Event::Frame { .. }, .. })) => {
           panic!("invalid runtime produced a frame");
         }
         // Ready acknowledges controller admission, not worker content.
         Some(
           Update::Ready
           | Update::Presentation(_)
+          | Update::Stream(_)
+          | Update::TopologyReady(_)
+          | Update::ViewSize { .. }
           | Update::PanelState { .. }
           | Update::WidgetSize { .. }
           | Update::PanelSwitch { .. },
@@ -106,6 +110,7 @@ fn wait_frame(
     } else {
       3
     });
+  let mut last_frame = None;
   while Instant::now() < deadline {
     for frame in display.step(start.elapsed().as_millis() as u32) {
       if ready(&frame) {
@@ -114,12 +119,17 @@ fn wait_frame(
         }
         return;
       }
+      last_frame = Some(frame);
     }
     std::thread::sleep(Duration::from_millis(5));
   }
+  if let (Some(frame), Some(directory)) = (last_frame, std::env::var_os("OMARCHY_TEST_SURFACE_FRAMES")) {
+    frame.save(PathBuf::from(directory).join(format!("shared-{name}-failed.ppm")));
+  }
   panic!(
-    "shared runtime did not reach {name}: {}",
-    fs::read_to_string(log).unwrap()
+    "shared runtime did not reach {name}: {}\n{}",
+    fs::read_to_string(log).unwrap(),
+    fs::read_to_string(log.parent().unwrap().join("controller.log")).unwrap_or_default()
   );
 }
 
@@ -358,7 +368,7 @@ Item {
   let quote =
     |path: &std::path::Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
   fs::write(&private_controller, format!(
-    "#!/bin/bash\nexport OMARCHY_PATH={0} XDG_RUNTIME_DIR={0} WAYLAND_DISPLAY=wayland PATH={0}/bin:/usr/bin\nexec {1} \"$@\"\n",
+    "#!/bin/bash\nexport OMARCHY_PATH={0} XDG_RUNTIME_DIR={0} WAYLAND_DISPLAY=wayland PATH={0}/bin:/usr/bin\nexec {1} \"$@\" 2>>{0}/controller.log\n",
     quote(root.path()), quote(&controller))).unwrap();
   fs::set_permissions(&private_controller, fs::Permissions::from_mode(0o700)).unwrap();
   let host_context = root.path().join("host-context.json");
@@ -494,7 +504,7 @@ ShellRoot {
     Viewport {
       width: 400,
       height: 240,
-      scale: 1,
+      scale_fixed: 120,
     },
   );
   let _host = Host(

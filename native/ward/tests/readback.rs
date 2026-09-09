@@ -66,7 +66,7 @@ fn repeated_readbacks_release_gpu_allocations() {
   let viewport = Viewport {
     width: 256,
     height: 256,
-    scale: 1,
+    scale_fixed: 120,
   };
   let mut desktop = desktop::Desktop::new(root.path(), viewport);
   let outputs = [OutputSpec {

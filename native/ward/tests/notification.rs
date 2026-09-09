@@ -597,7 +597,7 @@ ShellRoot {
     Viewport {
       width: 64,
       height: 64,
-      scale: 1,
+      scale_fixed: 120,
     },
   )
   .unwrap();

@@ -76,7 +76,7 @@ fn fractional_scale_advertises_preferred_and_renders_crisp_with_logical_input() 
   let viewport = Viewport {
     width: VIEWPORT_W,
     height: VIEWPORT_H,
-    scale: 1,
+    scale_fixed: 120,
   };
   // Drives the worker at render scale 1.5 -> physical canvas 600x450.
   let mut outer = Desktop::new_scaled(root.path(), viewport, RENDER_SCALE);

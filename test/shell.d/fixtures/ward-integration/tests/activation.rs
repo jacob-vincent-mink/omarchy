@@ -135,6 +135,7 @@ ShellRoot {{
       var review = reviewer.review
       var scroll = find(window.contentItem, "review-scroll")
       var folder = find(window.contentItem, "review-folder-notes")
+      var execChoice = find(window.contentItem, "review-exec-helper-session")
       var scrollTop = scroll.mapToItem(null, 0, 0).y
       return JSON.stringify({{visible: window.visible, busy: review.busy, error: review.error, revision: review.revision,
         scrollY: scroll.contentItem.contentY, scrollMoving: scroll.contentItem.moving,
@@ -147,7 +148,7 @@ ShellRoot {{
         desktopGeometry: review.desktopGeometry, geometryButton: point("review-desktop-geometry"),
         http: review.http, httpButton: point("review-http-catalog"),
         exec: review.exec, execButton: point("review-exec-helper-session"),
-        execDescription: find(window.contentItem, "review-exec-helper-session").description,
+        execDescription: execChoice ? execChoice.description : "",
         httpDetails: point("review-http-scope-catalog"),
         notificationButton: point("review-notifications"), approvalButton: point("review-approve"), revokeButton: point("review-revoke"), closeButton: point("review-close")}})
     }}
@@ -160,7 +161,7 @@ ShellRoot {{
     Viewport {
       width: 800,
       height: 480,
-      scale: 1,
+      scale_fixed: 120,
     },
   );
   let log = root.path().join("host.log");

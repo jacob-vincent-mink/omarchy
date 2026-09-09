@@ -5,15 +5,21 @@
 #include <QPointer>
 #include <QQuickWindow>
 #include <QSGSimpleTextureNode>
+#include <QSGClipNode>
+#include <QSGGeometry>
 #include <QSGTexture>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <cmath>
 
 namespace {
-class BufferNode : public QSGSimpleTextureNode {
+class BufferNode : public QSGClipNode {
 public:
   explicit BufferNode(PluginView *view, quint64 generation) : generation(generation), view(view) {
+    textureNode = new QSGSimpleTextureNode;
+    appendChildNode(textureNode);
+    setGeometry(new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), 0));
+    setFlag(OwnsGeometry);
     auto window = view->window();
     before = QObject::connect(window, &QQuickWindow::beforeRendering, window, [this] {
       if (!fence) return;
@@ -24,8 +30,8 @@ public:
         fence = nullptr;
         const auto completed = serial;
         serial = 0;
-        QMetaObject::invokeMethod(this->view, [owner = this->view, completed] {
-          if (owner) owner->acknowledge(completed);
+        QMetaObject::invokeMethod(this->view, [owner = this->view, completed, completedGeneration = this->generation] {
+          if (owner) owner->acknowledge(completed, completedGeneration);
         }, Qt::QueuedConnection);
       } else if (result == GL_WAIT_FAILED) {
         report("GPU completion check failed");
@@ -41,6 +47,27 @@ public:
       }
       QMetaObject::invokeMethod(this->view, &QQuickItem::update, Qt::QueuedConnection);
     }, Qt::DirectConnection);
+  }
+  void setTexture(QSGTexture *texture) { textureNode->setTexture(texture); textureNode->markDirty(QSGNode::DirtyMaterial); }
+  void setRect(QRectF rect) { textureNode->setRect(rect); }
+  void setClipRegion(const QRegion &region) {
+    if (region.rectCount() <= 1) {
+      setIsRectangular(true);
+      setClipRect(region.boundingRect());
+    } else {
+      setIsRectangular(false);
+      auto mesh = geometry();
+      mesh->setDrawingMode(QSGGeometry::DrawTriangles);
+      mesh->allocate(region.rectCount() * 6);
+      auto points = mesh->vertexDataAsPoint2D();
+      int index = 0;
+      for (const auto &rect : region) {
+        const float x = rect.x(), y = rect.y(), right = x + rect.width(), bottom = y + rect.height();
+        points[index++].set(x, y); points[index++].set(right, y); points[index++].set(x, bottom);
+        points[index++].set(right, y); points[index++].set(right, bottom); points[index++].set(x, bottom);
+      }
+    }
+    markDirty(QSGNode::DirtyGeometry);
   }
   ~BufferNode() override {
     QObject::disconnect(before);
@@ -93,6 +120,7 @@ public:
   const quint64 generation;
   quint64 serial = 0;
 private:
+  QSGSimpleTextureNode *textureNode;
   QPointer<PluginView> view;
   QMetaObject::Connection before, after;
   std::array<GLuint, 2> ids{};
@@ -119,14 +147,67 @@ PluginView::PluginView(QQuickItem *parent) : QQuickItem(parent) {
   connect(&m_timer, &QTimer::timeout, this, &PluginView::poll);
 }
 
+PluginView::~PluginView() { if (m_hostSession) m_hostSession->detach(this); }
+void PluginView::setSession(PluginSession *session) {
+  if (m_hostSession == session) return;
+  if (m_session) { fail("A standalone view cannot attach to a shared session"); return; }
+  if (m_hostSession) m_hostSession->detach(this);
+  m_hostSession = session;
+  if (session) session->attach(this);
+  emit sessionChanged();
+}
+void PluginView::setOutputId(uint output) {
+  if (m_outputId == output) return;
+  if (m_hostSession) m_hostSession->detach(this);
+  stop();
+  m_outputId = output;
+  m_epoch = 0;
+  m_generation = 0;
+  if (m_hostSession) m_hostSession->attach(this);
+  emit sessionChanged();
+}
+void PluginView::setRenderRegions(const QVariantList &regions) {
+  if (m_hasRenderRegions && m_renderRegions == regions) return;
+  if (regions.size() > 128) { fail("Too many host render regions"); return; }
+  QRegion mask;
+  for (const auto &value : regions) {
+    const auto rect = value.toMap();
+    const double x = rect.value("x").toDouble(), y = rect.value("y").toDouble();
+    const double w = rect.value("width").toDouble(), h = rect.value("height").toDouble();
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(w) || !std::isfinite(h)
+        || x < 0 || y < 0 || w < 0 || h < 0 || x + w > 4096 || y + h > 4096) {
+      fail("Invalid host render region"); return;
+    }
+    if (w > 0 && h > 0) mask += QRectF(x, y, w, h).toAlignedRect();
+  }
+  m_hasRenderRegions = true;
+  m_renderRegions = regions;
+  m_renderMask = mask;
+  emit renderRegionsChanged();
+  emit stateChanged();
+  update();
+}
+const omarchy::Session *PluginView::connection() const {
+  if (m_hostSession) return m_hostSession->connection();
+  return m_session ? &**m_session : nullptr;
+}
+void PluginView::prepare(uint epoch, const QJsonObject &allocation) {
+  m_requestedEpoch = epoch;
+  m_requestedViewport = QSize(allocation.value("width").toInt(), allocation.value("height").toInt());
+  m_requestedScale = allocation.value("scaleFixed").toInt();
+  m_resizing = true;
+  setFocus(false);
+  emit stateChanged();
+}
+
 void PluginView::start(const QString &store, const QString &id, const QString &controller, int w, int h, int scale, const QString &context) {
-  if (m_started) { fail("PluginView cannot be restarted; create a new host item"); return; }
+  if (m_started || m_hostSession) { fail("PluginView cannot be restarted; create a new host item"); return; }
   m_started = true;
   try {
     const auto root = store.toUtf8(), name = id.toUtf8(), program = controller.toUtf8(), json = context.toUtf8();
     m_session.emplace(omarchy::begin(root.constData(), name.constData(), program.constData(), w, h, scale, json.constData()));
     m_requestedViewport = QSize(w, h);
-    m_requestedScale = scale;
+    m_requestedScale = scale * 120;
     m_timer.start();
   } catch (const rust::Error &error) { fail(QString::fromUtf8(error.what())); }
 }
@@ -141,11 +222,11 @@ void PluginView::setContext(const QString &context) {
 
 void PluginView::configure(int w, int h, int scale) {
   if (!m_session) return;
-  if (m_requestedViewport == QSize(w, h) && m_requestedScale == scale) return;
+  if (m_requestedViewport == QSize(w, h) && m_requestedScale == scale * 120) return;
   try {
     omarchy::configure(**m_session, w, h, scale);
     m_requestedViewport = QSize(w, h);
-    m_requestedScale = scale;
+    m_requestedScale = scale * 120;
     m_resizing = true;
     m_requestedAfter = m_generation;
     setFocus(false);
@@ -175,14 +256,25 @@ void PluginView::stop() {
   emit panelChanged();
   emit widgetSizeChanged();
 }
-void PluginView::fail(const QString &message) { m_error = message; stop(); }
+void PluginView::fail(const QString &message) {
+  if (m_hostSession) m_hostSession->fail(message);
+  else { m_error = message; stop(); }
+}
 
 void PluginView::poll() {
   if (!m_session) return;
   try {
     for (int count = 0; count < 8; ++count) {
       auto event = omarchy::next(**m_session);
-      switch (event.kind) {
+      if (event.kind == omarchy::EventKind::Empty) return;
+      receive(std::move(event));
+      if (!m_session) return;
+    }
+  } catch (const rust::Error &error) { fail(QString::fromUtf8(error.what())); }
+}
+void PluginView::receive(omarchy::NativeEvent event) {
+  if (event.output && event.epoch < m_epoch) return;
+  switch (event.kind) {
         case omarchy::EventKind::Empty: return;
         case omarchy::EventKind::Ready: m_ready = true; emit stateChanged(); break;
         case omarchy::EventKind::PanelState:
@@ -204,9 +296,11 @@ void PluginView::poll() {
           break;
         }
         case omarchy::EventKind::Configured:
-          m_generation = event.generation;
+          m_epoch = event.epoch;
+          m_generation = (quint64(m_epoch) << 32) | event.generation;
+          m_ready = true;
           m_viewport = QSize(event.width, event.height);
-          m_scale = event.scale;
+          m_scale = event.scale_fixed;
           m_mask = QRegion();
           m_hasSurface = false;
           for (auto &buffer : m_buffers) buffer.reset();
@@ -237,17 +331,17 @@ void PluginView::poll() {
         }
         case omarchy::EventKind::Failed: fail(QString::fromUtf8(event.error.data(), event.error.size())); return;
         default: fail("Unknown native event"); return;
-      }
-    }
-  } catch (const rust::Error &error) { fail(QString::fromUtf8(error.what())); }
+  }
 }
-void PluginView::acknowledge(quint64 serial) {
-  if (!m_session || serial != m_serial) return;
+void PluginView::acknowledge(quint64 serial, quint64 generation) {
+  const auto session = connection();
+  if (!session || serial != m_serial || generation != m_generation) return;
   try {
-    omarchy::presented(**m_session, serial);
+    if (m_hostSession) omarchy::target_presented(*session, m_outputId, m_epoch, serial);
+    else omarchy::presented(*session, serial);
     m_serial = 0;
     if (!m_presented && m_hasSurface) { m_presented = true; emit stateChanged(); }
-    if (m_resizing && m_generation != m_requestedAfter && m_viewport == m_requestedViewport && m_scale == m_requestedScale) {
+    if (m_resizing && (m_hostSession ? m_epoch == m_requestedEpoch : m_generation != m_requestedAfter) && m_viewport == m_requestedViewport && m_scale == m_requestedScale) {
       m_resizing = false;
       emit stateChanged();
       // The host window's input mask changes on readiness. Schedule a frame
@@ -261,24 +355,34 @@ void PluginView::acknowledge(quint64 serial) {
 bool PluginView::contains(const QPointF &point) const {
   return m_ready && !m_resizing && width() > 0 && height() > 0 && std::isfinite(point.x()) && std::isfinite(point.y())
     && boundingRect().contains(point)
-    && m_mask.contains(QPoint(point.x() * m_viewport.width() / width(), point.y() * m_viewport.height() / height()));
+    && (m_hasRenderRegions ? m_mask.intersected(m_renderMask) : m_mask).contains(QPoint(point.x() * m_viewport.width() / width(), point.y() * m_viewport.height() / height()));
 }
 QVariantList PluginView::inputRegions() const {
   QVariantList regions;
   if (!m_ready || m_resizing) return regions;
-  for (const auto &rect : m_mask) regions.append(rect);
+  for (const auto &rect : (m_hasRenderRegions ? m_mask.intersected(m_renderMask) : m_mask)) regions.append(rect);
   return regions;
 }
 void PluginView::input(uint32_t kind, uint32_t code, QPointF point) {
-  if (!m_ready || m_resizing || !m_session || width() <= 0 || height() <= 0) return;
+  const auto session = connection();
+  if (!m_ready || m_resizing || !session || width() <= 0 || height() <= 0) return;
   if (!std::isfinite(point.x()) || !std::isfinite(point.y())) return;
   // Mouse grabs can deliver releases outside the item. Keep private coordinates bounded.
   const auto x = qBound(0.0, point.x() * m_viewport.width() / width(), double(m_viewport.width() - 1));
   const auto y = qBound(0.0, point.y() * m_viewport.height() / height(), double(m_viewport.height() - 1));
-  try { omarchy::input(**m_session, kind, code, int(x), int(y)); }
+  try {
+    if (m_hostSession) omarchy::target_input(*session, m_outputId, m_epoch, kind, code, int(x), int(y));
+    else omarchy::input(*session, kind, code, int(x), int(y));
+  }
   catch (const rust::Error &error) { fail(QString::fromUtf8(error.what())); }
 }
-void PluginView::mousePressEvent(QMouseEvent *event) { m_panelSwitchDirection = 0; emit focusRequested(); forceActiveFocus(); input(0, buttonCode(event->button()), event->position()); event->accept(); }
+void PluginView::mousePressEvent(QMouseEvent *event) {
+  m_panelSwitchDirection = 0;
+  emit focusRequested(QPointF(event->position().x() * m_viewport.width() / width(), event->position().y() * m_viewport.height() / height()));
+  forceActiveFocus();
+  input(0, buttonCode(event->button()), event->position());
+  event->accept();
+}
 void PluginView::mouseReleaseEvent(QMouseEvent *event) { input(1, buttonCode(event->button()), event->position()); event->accept(); }
 void PluginView::mouseMoveEvent(QMouseEvent *event) { input(2, 0, event->position()); event->accept(); }
 void PluginView::hoverEnterEvent(QHoverEvent *event) { input(2, 0, event->position()); event->accept(); }
@@ -287,7 +391,8 @@ void PluginView::hoverLeaveEvent(QHoverEvent *event) { input(6, 0); event->accep
 void PluginView::wheelEvent(QWheelEvent *event) {
   // Unlike button releases, wheels have no implicit grab. Do not redirect an
   // event outside the worker's current mask (including during a resize).
-  if (!m_session || !contains(event->position())) { event->ignore(); return; }
+  const auto session = connection();
+  if (!session || !contains(event->position())) { event->ignore(); return; }
   const auto pixels = event->pixelDelta();
   const auto delta = pixels.isNull() ? event->angleDelta() : pixels;
   const bool ended = event->phase() == Qt::ScrollEnd;
@@ -300,15 +405,23 @@ void PluginView::wheelEvent(QWheelEvent *event) {
     // Qt has already applied the user's natural-scroll direction; do not invert twice.
     const int horizontal = qRound(qBound(-4096.0, source == 1 ? double(delta.x()) * m_viewport.width() / width() : double(delta.x()), 4096.0));
     const int vertical = qRound(qBound(-4096.0, source == 1 ? double(delta.y()) * m_viewport.height() / height() : double(delta.y()), 4096.0));
-    if (horizontal || vertical) omarchy::scroll(**m_session, source, x, y, horizontal, vertical);
-    if (ended) omarchy::scroll(**m_session, 2, x, y, 0, 0);
+    const auto send = [&](uint source, int horizontal, int vertical) {
+      if (m_hostSession) omarchy::target_scroll(*session, m_outputId, m_epoch, source, x, y, horizontal, vertical);
+      else omarchy::scroll(*session, source, x, y, horizontal, vertical);
+    };
+    if (horizontal || vertical) send(source, horizontal, vertical);
+    if (ended) send(2, 0, 0);
   } catch (const rust::Error &error) { fail(QString::fromUtf8(error.what())); }
   event->accept();
 }
 void PluginView::key(QKeyEvent *event, bool pressed) {
-  if (m_ready && !m_resizing && m_session && !event->isAutoRepeat()
+  const auto session = connection();
+  if (m_ready && !m_resizing && session && !event->isAutoRepeat()
       && event->nativeScanCode() >= 8 && (!pressed || event->nativeVirtualKey() != 0)) {
-    try { omarchy::key(**m_session, event->nativeScanCode(), event->nativeVirtualKey(), pressed); }
+    try {
+      if (m_hostSession) omarchy::target_key(*session, m_outputId, m_epoch, event->nativeScanCode(), event->nativeVirtualKey(), pressed);
+      else omarchy::key(*session, event->nativeScanCode(), event->nativeVirtualKey(), pressed);
+    }
     catch (const rust::Error &error) { fail(QString::fromUtf8(error.what())); }
   }
   event->accept();
@@ -346,6 +459,14 @@ QSGNode *PluginView::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
     node->serial = m_serial;
     m_pending = -1;
   }
-  if (node) node->setRect(boundingRect());
+  if (node) {
+    node->setRect(boundingRect());
+    QRegion clip;
+    if (m_hasRenderRegions && m_viewport.width() > 0 && m_viewport.height() > 0) {
+      for (const auto &rect : m_renderMask) clip += QRectF(rect.x() * width() / m_viewport.width(), rect.y() * height() / m_viewport.height(),
+        rect.width() * width() / m_viewport.width(), rect.height() * height() / m_viewport.height()).toAlignedRect();
+    } else clip = boundingRect().toAlignedRect();
+    node->setClipRegion(clip.intersected(boundingRect().toAlignedRect()));
+  }
   return node;
 }

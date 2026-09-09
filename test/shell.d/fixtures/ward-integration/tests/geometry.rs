@@ -61,7 +61,7 @@ ShellRoot {{
     Viewport {
       width: 400,
       height: 240,
-      scale: 1,
+      scale_fixed: 120,
     },
   );
   let _host = Host(

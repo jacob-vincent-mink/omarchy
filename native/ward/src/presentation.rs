@@ -13,7 +13,7 @@ pub const MAX_REGIONS: usize = 128;
 pub struct Viewport {
   pub width: u32,
   pub height: u32,
-  pub scale: u32,
+  pub scale_fixed: u32,
 }
 impl Viewport {
   pub fn pixels(self) -> io::Result<(u32, u32)> {
@@ -21,11 +21,14 @@ impl Viewport {
       || self.height == 0
       || self.width > 4096
       || self.height > 4096
-      || !(1..=4).contains(&self.scale)
+      || !(120..=480).contains(&self.scale_fixed)
     {
       return Err(invalid("invalid presentation viewport"));
     }
-    let size = (self.width * self.scale, self.height * self.scale);
+    let size = (
+      (self.width * self.scale_fixed + 60) / 120,
+      (self.height * self.scale_fixed + 60) / 120,
+    );
     validate_size(size.0, size.1)?;
     Ok(size)
   }
@@ -70,7 +73,11 @@ pub enum Event {
 
 impl Event {
   pub fn send(&self, channel: &Channel) -> io::Result<()> {
-    let mut bytes = Vec::new();
+    self.send_prefixed(channel, &[])
+  }
+
+  fn send_prefixed(&self, channel: &Channel, prefix: &[u8]) -> io::Result<()> {
+    let mut bytes = prefix.to_vec();
     bytes.extend_from_slice(b"OPH\x01");
     let mut fds = Vec::new();
     match self {
@@ -84,7 +91,7 @@ impl Event {
         }
         put32(&mut bytes, 19);
         put64(&mut bytes, *generation);
-        for value in [viewport.width, viewport.height, viewport.scale, 0] {
+        for value in [viewport.width, viewport.height, viewport.scale_fixed, 0] {
           put32(&mut bytes, value);
         }
       }
@@ -157,7 +164,7 @@ impl Event {
         let viewport = Viewport {
           width: get32(bytes, 16),
           height: get32(bytes, 20),
-          scale: get32(bytes, 24),
+          scale_fixed: get32(bytes, 24),
         };
         viewport.pixels()?;
         Ok(Self::Configured {
@@ -215,6 +222,45 @@ impl Event {
       }
       _ => Err(invalid("unknown presentation record or descriptor count")),
     }
+  }
+}
+
+/// Independent output stream inside one worker session. The topology epoch
+/// prevents an old imported buffer or input mask from reaching a new output.
+#[derive(Debug)]
+pub struct StreamEvent {
+  pub output: u32,
+  pub epoch: u32,
+  pub event: Event,
+}
+
+impl StreamEvent {
+  pub fn send(&self, channel: &Channel) -> io::Result<()> {
+    if self.output == 0 || self.epoch == 0 {
+      return Err(invalid("invalid presentation stream identity"));
+    }
+    let mut prefix = b"OPS\x01".to_vec();
+    put32(&mut prefix, self.output);
+    put32(&mut prefix, self.epoch);
+    put32(&mut prefix, 0);
+    self.event.send_prefixed(channel, &prefix)
+  }
+
+  pub fn decode(mut packet: Packet) -> io::Result<Self> {
+    if packet.bytes.len() < 32 || &packet.bytes[..4] != b"OPS\x01" {
+      return Err(invalid("invalid presentation stream record"));
+    }
+    let output = get32(&packet.bytes, 4);
+    let epoch = get32(&packet.bytes, 8);
+    if output == 0 || epoch == 0 || get32(&packet.bytes, 12) != 0 {
+      return Err(invalid("invalid presentation stream identity"));
+    }
+    packet.bytes.drain(..16);
+    Ok(Self {
+      output,
+      epoch,
+      event: Event::decode(packet)?,
+    })
   }
 }
 
@@ -347,6 +393,73 @@ fn invalid(message: &str) -> io::Error {
 mod tests {
   use super::*;
   #[test]
+  fn stream_envelope_rejects_truncation_identity_reserved_fields_and_descriptor_mismatch() {
+    let (producer, consumer) = Channel::pair().unwrap();
+    StreamEvent {
+      output: 7,
+      epoch: 9,
+      event: Event::Frame {
+        generation: 1,
+        serial: 2,
+        slot: 0,
+      },
+    }
+    .send(&producer)
+    .unwrap();
+    let packet = consumer.receive().unwrap();
+    let bytes = packet.bytes;
+    for length in 0..bytes.len() {
+      assert!(
+        StreamEvent::decode(Packet {
+          bytes: bytes[..length].to_vec(),
+          fds: vec![]
+        })
+        .is_err(),
+        "length {length}"
+      );
+    }
+    for (offset, value) in [(0, 0), (4, 0), (8, 0), (12, 1), (16, 0), (20, 255), (44, 1)] {
+      let mut bad = bytes.clone();
+      bad[offset..offset + 4].copy_from_slice(&u32::to_le_bytes(value));
+      assert!(
+        StreamEvent::decode(Packet {
+          bytes: bad,
+          fds: vec![]
+        })
+        .is_err(),
+        "offset {offset}"
+      );
+    }
+    assert!(
+      StreamEvent::decode(Packet {
+        bytes: bytes.clone(),
+        fds: vec![std::fs::File::open("/dev/null").unwrap().into()]
+      })
+      .is_err()
+    );
+    let event = StreamEvent::decode(Packet { bytes, fds: vec![] }).unwrap();
+    assert_eq!((event.output, event.epoch), (7, 9));
+    assert!(matches!(event.event, Event::Frame { serial: 2, .. }));
+    StreamEvent {
+      output: 7,
+      epoch: 9,
+      event: Event::Buffer(Buffer {
+        generation: 1,
+        slot: 0,
+        width: 80,
+        height: 48,
+        stride: 320,
+        fd: std::fs::File::open("/dev/null").unwrap().into(),
+      }),
+    }
+    .send(&producer)
+    .unwrap();
+    let mut packet = consumer.receive().unwrap();
+    packet.fds.clear();
+    assert!(StreamEvent::decode(packet).is_err());
+  }
+
+  #[test]
   fn frame_ownership_rejects_replays_and_writes_to_displayed_buffer() {
     let mut frames = Frames::default();
     assert!(frames.frame(1, 1, 0).is_err());
@@ -393,7 +506,7 @@ mod tests {
       Viewport {
         width: 4096,
         height: 4096,
-        scale: 4
+        scale_fixed: 480
       }
       .pixels()
       .is_err()
@@ -402,7 +515,7 @@ mod tests {
       Viewport {
         width: 800,
         height: 480,
-        scale: 2
+        scale_fixed: 240
       }
       .pixels()
       .unwrap(),

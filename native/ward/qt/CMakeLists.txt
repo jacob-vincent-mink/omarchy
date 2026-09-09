@@ -11,7 +11,7 @@ if(NOT EXISTS "${RUST_TARGET_DIR}/${RUST_PROFILE}/libomarchy_ward.a")
 endif()
 qt_add_qml_module(omarchy_plugin_view SHARED URI Omarchy.Ward VERSION 1.0
   OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/Omarchy/Ward
-  SOURCES pluginview.hpp pluginview.cpp)
+  SOURCES pluginview.hpp pluginview.cpp pluginsession.hpp pluginsession.cpp)
 target_include_directories(omarchy_plugin_view PRIVATE "${RUST_TARGET_DIR}/cxxbridge")
 target_link_libraries(omarchy_plugin_view PRIVATE Qt6::Quick Qt6::OpenGL EGL gbm
   "${RUST_TARGET_DIR}/${RUST_PROFILE}/libomarchy_ward.a" dl pthread m)
@@ -24,7 +24,7 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/Omarchy/Ward/qmldir
   DESTINATION lib/qml/Omarchy/Ward)
 install(PROGRAMS "${RUST_TARGET_DIR}/${RUST_PROFILE}/omarchy-ward" DESTINATION lib)
 get_filename_component(OMARCHY_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
-install(FILES ../runtime/worker.qml DESTINATION lib/ward-runtime/shell)
+install(FILES ../runtime/worker.qml ../runtime/WidgetView.qml DESTINATION lib/ward-runtime/shell)
 install(DIRECTORY ../runtime/Ward DESTINATION lib/ward-runtime/shell)
 install(PROGRAMS ../runtime/open-url DESTINATION lib/ward-runtime/bin RENAME omarchy-launch-browser)
 install(PROGRAMS ../runtime/open-url DESTINATION lib/ward-runtime/bin RENAME omarchy-launch-webapp)

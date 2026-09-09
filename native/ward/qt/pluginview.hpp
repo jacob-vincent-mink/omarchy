@@ -1,5 +1,6 @@
 #pragma once
 #include "omarchy-ward/src/qt.rs.h"
+#include "pluginsession.hpp"
 #include <QElapsedTimer>
 #include <QQuickItem>
 #include <QRegion>
@@ -13,6 +14,9 @@
 class PluginView : public QQuickItem {
   Q_OBJECT
   QML_ELEMENT
+  Q_PROPERTY(PluginSession *session READ session WRITE setSession NOTIFY sessionChanged)
+  Q_PROPERTY(uint outputId READ outputId WRITE setOutputId NOTIFY sessionChanged)
+  Q_PROPERTY(QVariantList renderRegions READ renderRegions WRITE setRenderRegions NOTIFY renderRegionsChanged)
   Q_PROPERTY(bool ready READ ready NOTIFY stateChanged)
   Q_PROPERTY(bool resizing READ resizing NOTIFY stateChanged)
   Q_PROPERTY(bool presented READ presented NOTIFY stateChanged)
@@ -23,6 +27,13 @@ class PluginView : public QQuickItem {
   Q_PROPERTY(QSize widgetSize READ widgetSize NOTIFY widgetSizeChanged)
 public:
   explicit PluginView(QQuickItem *parent = nullptr);
+  ~PluginView() override;
+  PluginSession *session() const { return m_hostSession; }
+  void setSession(PluginSession *session);
+  uint outputId() const { return m_outputId; }
+  void setOutputId(uint output);
+  QVariantList renderRegions() const { return m_renderRegions; }
+  void setRenderRegions(const QVariantList &regions);
   bool ready() const { return m_ready; }
   bool resizing() const { return m_resizing; }
   bool presented() const { return m_presented; }
@@ -38,13 +49,15 @@ public:
   Q_INVOKABLE void stop();
   Q_INVOKABLE void configure(int logicalWidth, int logicalHeight, int scale = 1);
   Q_INVOKABLE void dismiss();
-  void acknowledge(quint64 serial);
+  void acknowledge(quint64 serial, quint64 generation);
   void fail(const QString &message);
 signals:
+  void sessionChanged();
+  void renderRegionsChanged();
   void stateChanged();
   void panelChanged();
   void widgetSizeChanged();
-  void focusRequested();
+  void focusRequested(QPointF point);
   void panelSwitchRequested(int direction);
 protected:
   QSGNode *updatePaintNode(QSGNode *, UpdatePaintNodeData *) override;
@@ -59,10 +72,18 @@ protected:
   void keyReleaseEvent(QKeyEvent *) override;
   void focusOutEvent(QFocusEvent *) override;
 private:
+  friend class PluginSession;
+  void receive(omarchy::NativeEvent event);
+  void prepare(uint epoch, const QJsonObject &allocation);
+  const omarchy::Session *connection() const;
   void poll();
   void input(uint32_t kind, uint32_t code, QPointF point = {});
   void key(QKeyEvent *event, bool pressed);
   std::optional<rust::Box<omarchy::Session>> m_session;
+  QPointer<PluginSession> m_hostSession;
+  uint m_outputId = 0;
+  uint m_epoch = 0;
+  uint m_requestedEpoch = 0;
   std::array<std::optional<rust::Box<omarchy::NativeBuffer>>, 2> m_buffers;
   QTimer m_timer;
   QElapsedTimer m_panelSwitchAge;
@@ -73,6 +94,9 @@ private:
   int m_scale = 1;
   int m_requestedScale = 1;
   QRegion m_mask;
+  QRegion m_renderMask;
+  QVariantList m_renderRegions;
+  bool m_hasRenderRegions = false;
   QString m_error;
   bool m_started = false;
   bool m_panelOpen = false;

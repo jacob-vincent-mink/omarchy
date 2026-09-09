@@ -43,7 +43,16 @@ impl Grant {
     }
     for key in self.read.iter().chain(&self.write) {
       validate_id(key)?;
-      if ["id", "sandbox", "__proto__", "constructor", "prototype"].contains(&key.as_str()) {
+      if [
+        "id",
+        "sandbox",
+        "sandboxPresentation",
+        "__proto__",
+        "constructor",
+        "prototype",
+      ]
+      .contains(&key.as_str())
+      {
         return Err(invalid("setting scope cannot name host structure"));
       }
     }
@@ -118,6 +127,7 @@ mod tests {
       "*",
       "id",
       "sandbox",
+      "sandboxPresentation",
       "constructor",
       "__proto__",
       "prototype",

@@ -14,8 +14,22 @@ pub struct UiContext {
   /// Desired own-panel state. Repeated context updates do not replay an action.
   pub panel: Option<PanelCommand>,
   pub geometry: Option<crate::geometry::Snapshot>,
+  /// Private presentation output -> opaque observed output. Filtered with geometry.
+  #[serde(default, rename = "geometryOutputs")]
+  pub geometry_outputs: BTreeMap<u32, u32>,
   /// Host allocation inside the bar on this worker's output. Not desktop observation.
   pub bar: Option<BarPlacement>,
+  /// Distinct host placements sharing one service. None is the single-view
+  /// conformance fixture; an empty list intentionally creates no bar widgets.
+  pub views: Option<Vec<BarView>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BarView {
+  pub id: u32,
+  pub output: u32,
+  pub bar: BarPlacement,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -45,6 +59,10 @@ pub struct PanelCommand {
   pub serial: u32,
   pub open: bool,
   pub payload: String,
+  #[serde(default)]
+  pub view: u32,
+  #[serde(default)]
+  pub output: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,7 +88,20 @@ impl UiContext {
     if let Some(geometry) = &context.geometry {
       geometry.validate()?;
     }
-    if context.bar.as_ref().is_some_and(|bar| {
+    if context.geometry_outputs.len() > crate::topology::MAX_OUTPUTS
+      || context.geometry_outputs.iter().any(|(private, observed)| {
+        *private == 0
+          || context
+            .geometry
+            .as_ref()
+            .is_none_or(|geometry| !geometry.outputs.iter().any(|output| output.id == *observed))
+      })
+    {
+      return Err(io::Error::other(
+        "invalid presentation observation association",
+      ));
+    }
+    let invalid_bar = |bar: &BarPlacement| {
       ![bar.x, bar.y]
         .into_iter()
         .all(|v| v.is_finite() && v.abs() <= 4096.)
@@ -78,11 +109,32 @@ impl UiContext {
           .into_iter()
           .all(|v| v.is_finite() && (0.0..=1024.).contains(&v))
         || !(1..=1024).contains(&bar.size)
-    }) {
+    };
+    if context.bar.as_ref().is_some_and(invalid_bar) {
       return Err(io::Error::other("invalid bar allocation"));
     }
+    if let Some(views) = &context.views {
+      let mut ids = std::collections::BTreeSet::new();
+      if views.len() > 32
+        || views.iter().any(|view| {
+          view.id == 0 || view.output == 0 || !ids.insert(view.id) || invalid_bar(&view.bar)
+        })
+      {
+        return Err(io::Error::other("invalid widget view allocations"));
+      }
+    }
     if context.panel.as_ref().is_some_and(|panel| {
-      panel.serial == 0 || panel.payload.len() > 4096 || (!panel.open && !panel.payload.is_empty())
+      panel.serial == 0
+        || panel.payload.len() > 4096
+        || (!panel.open && !panel.payload.is_empty())
+        || (panel.view == 0) != (panel.output == 0)
+        || (panel.open
+          && panel.view != 0
+          && context.views.as_ref().is_none_or(|views| {
+            !views
+              .iter()
+              .any(|view| view.id == panel.view && view.output == panel.output)
+          }))
     }) {
       return Err(io::Error::other("invalid own-panel command"));
     }
@@ -94,6 +146,7 @@ impl UiContext {
     grants.settings.filter(&mut self.settings);
     if !grants.desktop_geometry {
       self.geometry = None;
+      self.geometry_outputs.clear();
     }
   }
 
@@ -126,6 +179,90 @@ impl UiContext {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn views_are_bounded_unique_and_panel_ownership_must_match() {
+    let bar = BarPlacement {
+      x: 0.,
+      y: 0.,
+      width: 40.,
+      height: 32.,
+      size: 32,
+      position: BarPosition::Top,
+      visible: true,
+    };
+    let mut context = UiContext {
+      views: Some(
+        (1..=32)
+          .map(|id| BarView {
+            id,
+            output: 1,
+            bar: bar.clone(),
+          })
+          .collect(),
+      ),
+      ..Default::default()
+    };
+    assert!(context.seal().is_ok());
+    context.views.as_mut().unwrap().push(BarView {
+      id: 33,
+      output: 1,
+      bar: bar.clone(),
+    });
+    assert!(context.seal().is_err());
+    context.views.as_mut().unwrap().pop();
+    for (id, output) in [(0, 1), (2, 1), (1, 0)] {
+      context.views.as_mut().unwrap()[0] = BarView {
+        id,
+        output,
+        bar: bar.clone(),
+      };
+      assert!(context.seal().is_err());
+    }
+    context.views.as_mut().unwrap()[0] = BarView {
+      id: 1,
+      output: 1,
+      bar,
+    };
+    for (view, output, valid) in [
+      (1, 1, true),
+      (1, 2, false),
+      (33, 1, false),
+      (0, 1, false),
+      (1, 0, false),
+    ] {
+      context.panel = Some(PanelCommand {
+        serial: 1,
+        open: true,
+        payload: String::new(),
+        view,
+        output,
+      });
+      assert_eq!(context.seal().is_ok(), valid);
+    }
+    context.panel = None;
+    context.views = Some(vec![]);
+    assert!(context.seal().is_ok());
+  }
+
+  #[test]
+  fn observation_associations_require_geometry_and_are_filtered_without_removing_placements() {
+    let mut context = UiContext::parse(br#"{"settings":{},"views":[{"id":1,"output":3,"bar":{"x":0,"y":0,"width":40,"height":32,"size":32,"position":"top","visible":true}}],"geometryOutputs":{"3":7},"geometry":{"viewport":7,"outputs":[{"id":7,"rect":{"x":-100,"y":0,"width":80,"height":48},"scale":1.25,"reserved":[0,0,0,0],"activeWorkspaces":[]}],"workspaces":[],"windows":[]}}"#).unwrap();
+    assert!(context.seal().is_ok());
+    context.geometry_outputs.insert(4, 8);
+    assert!(context.seal().is_err());
+    context.geometry_outputs.remove(&4);
+    context.geometry_outputs.insert(0, 7);
+    assert!(context.seal().is_err());
+    context.geometry_outputs.remove(&0);
+    let placements = context.views.clone();
+    context.filter(&crate::grants::Grants::default());
+    assert!(context.geometry.is_none());
+    assert!(context.geometry_outputs.is_empty());
+    assert_eq!(context.views, placements);
+    context.geometry_outputs.insert(3, 7);
+    assert!(context.seal().is_err());
+  }
 
   #[test]
   fn bar_allocation_is_host_owned_bounded_and_independent_of_grants() {
@@ -163,6 +300,8 @@ mod tests {
       serial: u32::MAX,
       open: true,
       payload: "value".into(),
+      view: 0,
+      output: 0,
     });
     assert_eq!(
       UiContext::unseal(context.seal().unwrap().into()).unwrap(),

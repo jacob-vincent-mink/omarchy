@@ -83,12 +83,14 @@ impl Request {
           if context.theme.is_none()
             && context.panel.is_none()
             && context.geometry.is_none()
+            && context.views.is_none()
             && context.bar.is_none() =>
         {
           Ok(Self::Settings(context))
         }
         state @ (Control::PanelState { .. }
         | Control::WidgetSize { .. }
+        | Control::ViewSize { .. }
         | Control::PanelSwitch { .. }) => Ok(Self::UiMetadata(state)),
         _ => Err(invalid("invalid worker UI request")),
       }
@@ -174,6 +176,7 @@ pub struct Broker {
   // it within the existing authenticated, rate-limited request boundary.
   pub(crate) panel_state: Option<Control>,
   pub(crate) widget_size: Option<Control>,
+  pub(crate) view_sizes: std::collections::BTreeMap<u32, Control>,
   pub(crate) panel_switch: Option<Control>,
   listener: Listener,
   socket: File,
@@ -252,6 +255,7 @@ impl Broker {
     Ok(Self {
       panel_state: None,
       widget_size: None,
+      view_sizes: std::collections::BTreeMap::new(),
       panel_switch: None,
       listener,
       socket,
@@ -432,7 +436,14 @@ impl Broker {
       let Some(kind) = request.kind() else {
         if let Request::UiMetadata(state) = request {
           approval.check()?;
-          if matches!(state, Control::WidgetSize { .. }) {
+          if let Control::ViewSize { view, .. } = state {
+            if self.view_sizes.len() < 32 || self.view_sizes.contains_key(&view) {
+              self.view_sizes.insert(view, state);
+            } else {
+              let _ = reply(&client, Status::Busy);
+              continue;
+            }
+          } else if matches!(state, Control::WidgetSize { .. }) {
             self.widget_size = Some(state);
           } else if matches!(state, Control::PanelSwitch { .. }) {
             self.panel_switch = Some(state);
@@ -535,6 +546,17 @@ pub fn report_panel_state(serial: &str, open: &str) -> io::Result<()> {
 
 pub fn report_widget_size(width: &str, height: &str) -> io::Result<()> {
   let size = Control::WidgetSize {
+    width: width.parse().map_err(|_| Status::Invalid.error())?,
+    height: height.parse().map_err(|_| Status::Invalid.error())?,
+  };
+  let channel = Channel::connect(Path::new("/run/plugin/ui"))?;
+  size.send(&channel)?;
+  crate::operation::await_reply(&channel)
+}
+
+pub fn report_view_size(view: &str, width: &str, height: &str) -> io::Result<()> {
+  let size = Control::ViewSize {
+    view: view.parse().map_err(|_| Status::Invalid.error())?,
     width: width.parse().map_err(|_| Status::Invalid.error())?,
     height: height.parse().map_err(|_| Status::Invalid.error())?,
   };

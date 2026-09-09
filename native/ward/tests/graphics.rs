@@ -102,7 +102,7 @@ ShellRoot {
   Control::Configure(Viewport {
     width: 800,
     height: 480,
-    scale: 1,
+    scale_fixed: 120,
   })
   .send(&channel)
   .unwrap();

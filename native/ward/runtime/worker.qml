@@ -16,7 +16,10 @@ ShellRoot {
   property bool loaded: false
   property string pendingSettings: ""
   property string requestError: ""
-  readonly property var panel: overlayLoader.item || widgetLoader.item
+  property var views: []
+  property var activeView: null
+  readonly property var api: shellApi
+  readonly property var panel: overlayLoader.item || (activeView ? activeView.item : null)
   readonly property bool opened: panel && panel.opened === true
   property int panelSerial: 0
   property string sentPanelState: ""
@@ -24,28 +27,42 @@ ShellRoot {
   onPanelStateChanged: Qt.callLater(reportPanelState)
   readonly property string section: manifest && manifest.barWidget
     ? (manifest.barWidget.defaultSection || "center") : "center"
-  readonly property var barPlacement: context ? context.bar : null
-  readonly property int widgetWidth: widgetLoader.item && widgetLoader.item.visible
-    ? Math.max(0, Math.min(1024, Math.ceil(widgetLoader.item.implicitWidth))) : 0
-  readonly property int widgetHeight: widgetLoader.item && widgetLoader.item.visible
-    ? Math.max(0, Math.min(1024, Math.ceil(widgetLoader.item.implicitHeight))) : 0
-  readonly property string widgetSize: widgetWidth + ":" + widgetHeight
-  property string sentWidgetSize: ""
-  onWidgetSizeChanged: widgetSizeTimer.restart()
+  readonly property var barPlacement: activeView ? activeView.placement : null
+  Component { id: widgetViewComponent; WidgetView {} }
 
-  function reportWidgetSize() {
-    if (!loaded || widgetSizeProcess.running || sentWidgetSize === widgetSize) return
-    sentWidgetSize = widgetSize
-    widgetSizeProcess.command = ["/bootstrap", "--widget-size", String(widgetWidth), String(widgetHeight)]
-    widgetSizeProcess.running = true
-  }
-  Timer { id: widgetSizeTimer; interval: 100; onTriggered: root.reportWidgetSize() }
-  Process {
-    id: widgetSizeProcess
-    onExited: function(code) {
-      if (code !== 0) root.sentWidgetSize = ""
-      widgetSizeTimer.restart()
+  function syncViews() {
+    if (!loaded) return
+    const legacy = !Array.isArray(context.views)
+    const desired = legacy ? [{id: 1, output: 0, bar: context.bar}] : context.views
+    const previous = views.slice()
+    const next = []
+    for (const allocation of desired) {
+      let view = previous.find(view => view.allocation.id === allocation.id)
+      if (view) view.allocation = allocation
+      else view = widgetViewComponent.createObject(root, {runtime: root, allocation: allocation, legacy: legacy})
+      if (!view) { console.error("Could not create plugin widget view"); Qt.quit(); return }
+      next.push(view)
     }
+    for (const view of previous) {
+      if (next.indexOf(view) !== -1) continue
+      view.close()
+      if (activeView === view) activeView = null
+      view.destroy()
+    }
+    views = next
+    if (!activeView && next.length) activeView = next[0]
+  }
+  function syncSettings() { for (const view of views) view.syncSettings() }
+  function claimView(view) {
+    if (activeView !== view && overlayLoader.item && typeof overlayLoader.item.close === "function") overlayLoader.item.close()
+    activeView = view
+    for (const other of views) if (other !== view) other.close()
+  }
+  function switchPanel(direction) {
+    if (!opened || panelSwitchProcess.running) return false
+    panelSwitchProcess.command = ["/bootstrap", "--switch-panel", direction < 0 ? "-1" : "1"]
+    panelSwitchProcess.running = true
+    return true
   }
 
   function entryUrl(path) {
@@ -71,15 +88,20 @@ ShellRoot {
     var entries = manifest.entryPoints
     if (entries.service) serviceLoader.source = entryUrl(entries.service)
     if (entries.overlay) overlayLoader.source = entryUrl(entries.overlay)
-    widgetLoader.setSource(entryUrl(entries.barWidget), { bar: barApi, settings: JSON.parse(JSON.stringify(context.settings)) })
+    syncViews()
     Qt.callLater(applyPanel)
     Qt.callLater(reportPanelState)
-    Qt.callLater(reportWidgetSize)
   }
 
   function applyPanel() {
     var command = context ? context.panel : null
-    if (!loaded || !panel || !command || command.serial === panelSerial) return
+    if (!loaded || !command || command.serial === panelSerial) return
+    if (command.open && command.view) {
+      const view = views.find(view => view.allocation.id === command.view && view.allocation.output === command.output)
+      if (!view || (!view.item && !overlayLoader.item) || !view.screen) return
+      claimView(view)
+    }
+    if (!panel) return
     panelSerial = command.serial
     if (command.open) shellApi._summon(shellApi.pluginId, command.payload)
     else shellApi._hide(shellApi.pluginId)
@@ -122,8 +144,9 @@ ShellRoot {
         Style.gapsOut = theme.gapsOut
         Style.resolvedFontFamily = theme.fontFamily
       }
-      if (widgetLoader.item) widgetLoader.item.settings = JSON.parse(JSON.stringify(root.context.settings))
       root.loadEntries()
+      root.syncViews()
+      root.syncSettings()
       root.applyPanel()
     }
     onLoadFailed: Qt.quit()
@@ -170,7 +193,7 @@ ShellRoot {
         if (writable.indexOf(key) !== -1) patch[key] = settings[key]
         else if (JSON.stringify(settings[key]) !== JSON.stringify(root.context.settings[key])) {
           root.requestError = "Setting is not writable: " + key
-          if (widgetLoader.item) widgetLoader.item.settings = JSON.parse(JSON.stringify(root.context.settings))
+          root.syncSettings()
           errorTimer.restart()
           return false
         }
@@ -197,7 +220,7 @@ ShellRoot {
     onExited: function(code) {
       if (code !== 0) {
         root.requestError = "Settings were not saved. Review plugin access or retry."
-        if (widgetLoader.item) widgetLoader.item.settings = JSON.parse(JSON.stringify(root.context.settings))
+        root.syncSettings()
         errorTimer.restart()
       }
       if (root.pendingSettings) settingsTimer.restart()
@@ -255,100 +278,4 @@ ShellRoot {
     }
   }
 
-  PluginBarApi {
-    id: barApi
-    pluginId: shellApi.pluginId
-    moduleName: pluginId
-    shell: shellApi
-    foreground: Color.bar.text
-    barForeground: Color.bar.text
-    background: Color.bar.background
-    urgent: Color.urgent
-    fontFamily: Style.font.family
-    position: root.barPlacement ? root.barPlacement.position : "top"
-    vertical: position === "left" || position === "right"
-    barSize: root.barPlacement ? root.barPlacement.size : Style.bar.sizeHorizontal
-    _showTooltip: (target, text) => tooltip.showFor(target, text)
-    _hideTooltip: target => { if (tooltip.target === target) tooltip.clear() }
-    _registerClickTarget: target => { clickTargets = clickTargets.concat([target]) }
-    _unregisterClickTarget: target => { clickTargets = clickTargets.filter(value => value !== target) }
-    _requestPopout: owner => { activePopout = owner }
-    _releasePopout: owner => { if (activePopout === owner) activePopout = null }
-    _switchPanelFrom: (owner, direction) => {
-      if (!root.opened || panelSwitchProcess.running) return false
-      panelSwitchProcess.command = ["/bootstrap", "--switch-panel", direction < 0 ? "-1" : "1"]
-      panelSwitchProcess.running = true
-      return true
-    }
-    _targetBelongsToWindow: (target, window) => target.QsWindow.window === window
-    _moduleWidgets: id => id === pluginId && widgetLoader.item ? [widgetLoader.item] : []
-    _setCenterHoverRevealSuppressed: value => { _centerHoverRevealSuppressed = value }
-  }
-
-  // Mirror only the host-owned allocation. The private bar stays mapped while
-  // hidden so measuring a widget does not depend on its ancestor visibility.
-  PanelWindow {
-    id: privateBar
-    anchors {
-      top: barApi.position === "top" || barApi.vertical
-      bottom: barApi.position === "bottom" || barApi.vertical
-      left: barApi.position === "left" || !barApi.vertical
-      right: barApi.position === "right" || !barApi.vertical
-    }
-    implicitWidth: barApi.vertical ? barApi.barSize : 0
-    implicitHeight: barApi.vertical ? 0 : barApi.barSize
-    color: "transparent"
-    exclusionMode: ExclusionMode.Ignore
-    WlrLayershell.layer: WlrLayer.Top
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
-    WlrLayershell.namespace: "omarchy-private-bar"
-    mask: Region { item: !root.barPlacement || root.barPlacement.visible ? widgetLoader : null }
-
-    Loader {
-      id: widgetLoader
-      x: root.barPlacement ? root.barPlacement.x : root.section === "left" ? Style.gapsOut
-        : root.section === "right" ? parent.width - width - Style.gapsOut
-        : (parent.width - width) / 2
-      y: root.barPlacement ? root.barPlacement.y : (parent.height - height) / 2
-      width: root.barPlacement ? root.barPlacement.width : root.widgetWidth
-      height: root.barPlacement ? root.barPlacement.height : root.widgetHeight
-      opacity: !root.barPlacement || root.barPlacement.visible ? 1 : 0
-      clip: true
-      onStatusChanged: root.checkLoader(this)
-    }
-
-    BarToolTip {
-      id: tooltip
-      ownerWindow: privateBar
-      position: barApi.position
-      readonly property bool hovered: target !== null && target.visible !== false
-        && target.opacity !== 0 && target.tooltipHovered === true
-        && (!root.barPlacement || root.barPlacement.visible)
-      property bool shown: false
-      visible: shown && hovered && text !== ""
-      onHoveredChanged: if (!hovered) clear()
-
-      function clear() {
-        tooltipTimer.stop()
-        shown = false
-        target = null
-        text = ""
-      }
-      function showFor(item, value) {
-        clear()
-        if (!item || item.QsWindow.window !== privateBar || !value) return
-        target = item
-        text = value
-        // MouseArea emits entered before dependent hover bindings settle.
-        Qt.callLater(function() {
-          if (tooltip.target === item && tooltip.hovered) tooltipTimer.restart()
-        })
-      }
-    }
-  }
-  Timer {
-    id: tooltipTimer
-    interval: 400
-    onTriggered: tooltip.shown = tooltip.hovered
-  }
 }

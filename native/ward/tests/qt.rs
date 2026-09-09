@@ -117,7 +117,7 @@ ShellRoot {
   let viewport = Viewport {
     width: 800,
     height: 480,
-    scale: 1,
+    scale_fixed: 120,
   };
   // This outer display is test-owned and never connects to the real compositor.
   let mut outer = Desktop::new(root.path(), viewport);

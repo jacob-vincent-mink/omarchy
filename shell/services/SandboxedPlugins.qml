@@ -42,6 +42,7 @@ QtObject {
     var settings = JSON.parse(JSON.stringify(entry || {}))
     delete settings.id
     delete settings.sandbox
+    delete settings.sandboxPresentation
     return settings
   }
 
@@ -59,14 +60,14 @@ QtObject {
       return "invalid plugin id"
     var previous = instances[id]
     if (previous && previous.state !== "error") return previous.state === "running" ? "ok" : "starting"
-    if (!component) component = Qt.createComponent("native/SandboxedPluginSurface.qml")
+    if (!component) component = Qt.createComponent("native/SandboxedPluginSession.qml")
     if (component.status !== Component.Ready)
       return "native plugin host unavailable: " + component.errorString()
     if (previous) disable(id)
     if (Object.keys(instances).length >= 16) return "too many active sandbox plugins"
     var instance = component.createObject(root, {
       pluginId: id, store: store, controller: controller, settings: ownSettings(entry), geometrySource: geometrySource,
-      barPlacement: placed ? { x: 0, y: 0, width: 0, height: 0, size: 32, position: "top", visible: false } : null
+      overlayOutputs: entry && entry.sandboxPresentation && entry.sandboxPresentation.overlayOutputs === "all" ? "all" : "owner"
     })
     if (!instance) return "could not create native plugin host: " + component.errorString()
     var next = Object.assign({}, instances)
@@ -83,6 +84,12 @@ QtObject {
     }
     instance.openedChanged.connect(coordinate)
     instance.focusHeldChanged.connect(coordinate)
+    let lastOwner = instance.barOwner || instance
+    instance.barOwnerChanged.connect(function() {
+      if (bar && typeof bar.releasePopout === "function") bar.releasePopout(lastOwner)
+      lastOwner = instance.barOwner || instance
+      coordinate()
+    })
     instance.panelSwitchRequested.connect(function(direction) {
       if (instances[id] === instance && instance.barOwner && bar && typeof bar.switchPanelFrom === "function")
         bar.switchPanelFrom(instance.barOwner, direction)
@@ -103,10 +110,10 @@ QtObject {
     changed()
   }
 
-  function show(id, payload) {
+  function show(id, payload, owner) {
     var instance = instances[id]
     if (!instance || instance.state === "error") return false
-    return instance.setPanel(true, payload)
+    return instance.setPanel(true, payload, owner || null)
   }
 
   function hide(id) {
@@ -145,7 +152,10 @@ QtObject {
         if (!instances[entry.id]) {
           var result = enable(String(entry.id), entry, placedIds.indexOf(entry.id) !== -1)
           if (result !== "starting" && result !== "ok") console.warn(result)
-        } else instances[entry.id].settings = ownSettings(entry)
+        } else {
+          instances[entry.id].settings = ownSettings(entry)
+          instances[entry.id].overlayOutputs = entry.sandboxPresentation && entry.sandboxPresentation.overlayOutputs === "all" ? "all" : "owner"
+        }
       }
     }
     for (var id in instances) if (!desired[id]) disable(id)

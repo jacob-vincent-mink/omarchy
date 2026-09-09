@@ -23,6 +23,9 @@ pub enum Control {
   Pong(u64),
   Stop,
   Configure(Viewport),
+  Topology(crate::topology::Topology),
+  TopologyReady(u32),
+  Targeted(crate::topology::Targeted),
   Presented(u64),
   Input {
     kind: u32,
@@ -38,6 +41,11 @@ pub enum Control {
     open: bool,
   },
   WidgetSize {
+    width: u32,
+    height: u32,
+  },
+  ViewSize {
+    view: u32,
     width: u32,
     height: u32,
   },
@@ -152,6 +160,25 @@ impl Approval {
 
 impl Control {
   pub fn send(&self, channel: &Channel) -> io::Result<()> {
+    if let Self::ViewSize {
+      view,
+      width,
+      height,
+    } = self
+    {
+      if *view == 0 || *width > 1024 || *height > 1024 {
+        return Err(invalid("invalid widget view size"));
+      }
+      return send_extended(channel, 21, [*view, *width, *height, 0]);
+    }
+    if let Self::Topology(topology) = self {
+      use std::os::fd::AsFd;
+      let file = topology.seal()?;
+      return channel.send(b"OPH\x01\x0f\0\0\0\0\0\0\0\0\0\0\0", &[file.as_fd()]);
+    }
+    if let Self::Targeted(target) = self {
+      return send_extended(channel, 20, target.words()?);
+    }
     if let Self::Context(context) = self {
       use std::os::fd::AsFd;
       let file = context.seal()?;
@@ -176,7 +203,7 @@ impl Control {
       return send_extended(
         channel,
         5,
-        [viewport.width, viewport.height, viewport.scale, 0],
+        [viewport.width, viewport.height, viewport.scale_fixed, 0],
       );
     }
     if let Self::Input { kind, code, x, y } = self {
@@ -196,6 +223,8 @@ impl Control {
       Self::Pong(serial) => (3, *serial),
       Self::Stop => (4, 0),
       Self::Presented(serial) => (6, *serial),
+      Self::TopologyReady(epoch) if *epoch != 0 => (14, u64::from(*epoch)),
+      Self::TopologyReady(_) => return Err(invalid("invalid topology acknowledgement")),
       Self::PanelState { serial, open } => (10, u64::from(*serial) | (u64::from(*open) << 32)),
       Self::PanelSwitch { forward } => (13, u64::from(*forward)),
       Self::WidgetSize { width, height } => {
@@ -205,6 +234,9 @@ impl Control {
         (11, u64::from(*width) | (u64::from(*height) << 32))
       }
       Self::Configure(_)
+      | Self::Topology(_)
+      | Self::Targeted(_)
+      | Self::ViewSize { .. }
       | Self::Input { .. }
       | Self::Scroll(_)
       | Self::Key(_)
@@ -221,6 +253,19 @@ impl Control {
 
   pub fn decode(mut packet: Packet) -> io::Result<Self> {
     let bytes = packet.bytes;
+    if bytes == b"OPH\x01\x0f\0\0\0\0\0\0\0\0\0\0\0" && packet.fds.len() == 1 {
+      return Ok(Self::Topology(crate::topology::Topology::unseal(
+        packet.fds.pop().unwrap(),
+      )?));
+    }
+    if bytes.len() == 40 && &bytes[..8] == b"OPH\x01\x14\0\0\0" && packet.fds.is_empty() {
+      let words = std::array::from_fn(|index| {
+        u32::from_le_bytes(bytes[8 + index * 4..12 + index * 4].try_into().unwrap())
+      });
+      return Ok(Self::Targeted(crate::topology::Targeted::from_words(
+        words,
+      )?));
+    }
     if bytes == b"OPH\x01\x09\0\0\0\0\0\0\0\0\0\0\0" && packet.fds.len() == 1 {
       return Ok(Self::Context(UiContext::unseal(packet.fds.pop().unwrap())?));
     }
@@ -245,15 +290,24 @@ impl Control {
     }
     if bytes.len() == 24 {
       let values = bytes[8..]
-        .chunks_exact(4)
-        .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| u32::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
       return match kind {
+        21 if values[0] != 0 && values[1] <= 1024 && values[2] <= 1024 && values[3] == 0 => {
+          Ok(Self::ViewSize {
+            view: values[0],
+            width: values[1],
+            height: values[2],
+          })
+        }
         5 if values[3] == 0 => {
           let viewport = Viewport {
             width: values[0],
             height: values[1],
-            scale: values[2],
+            scale_fixed: values[2],
           };
           viewport.pixels()?;
           Ok(Self::Configure(viewport))
@@ -283,6 +337,7 @@ impl Control {
       (3, 1..) => Ok(Self::Pong(serial)),
       (4, 0) => Ok(Self::Stop),
       (6, 1..) => Ok(Self::Presented(serial)),
+      (14, 1..=0xffff_ffff) => Ok(Self::TopologyReady(serial as u32)),
       (10, value) if value >> 32 <= 1 => Ok(Self::PanelState {
         serial: value as u32,
         open: value >> 32 == 1,
@@ -371,9 +426,46 @@ pub fn run(path: &Path, approval: Option<Approval>) -> io::Result<()> {
             .as_ref()
             .ok_or_else(|| invalid("graphics requires an admitted plugin revision"))?;
           graphics = Some(RunningGraphics::start(
-            approval, viewport, &channel, &context,
+            approval, viewport, None, &channel, &context,
           )?);
         }
+        #[cfg(feature = "graphics")]
+        Control::Topology(topology) if graphics.is_none() => {
+          let approval = approval
+            .as_ref()
+            .ok_or_else(|| invalid("graphics requires an admitted plugin revision"))?;
+          graphics = Some(RunningGraphics::start(
+            approval,
+            Viewport {
+              width: 1,
+              height: 1,
+              scale_fixed: 120,
+            },
+            Some(topology),
+            &channel,
+            &context,
+          )?);
+        }
+        #[cfg(feature = "graphics")]
+        Control::Topology(topology) => {
+          let display = &mut graphics.as_mut().unwrap().display;
+          display
+            .configure_topology(topology, started.elapsed().as_millis() as u32)
+            .map_err(graphics_error)?;
+          display.describe(&channel).map_err(graphics_error)?;
+          if let Some(panel) = context.panel.as_ref().filter(|panel| panel.open) {
+            display
+              .activate_output(panel.output, started.elapsed().as_millis() as u32)
+              .map_err(graphics_error)?;
+          }
+        }
+        #[cfg(feature = "graphics")]
+        Control::Targeted(target) => graphics
+          .as_mut()
+          .ok_or_else(|| invalid("input before configuration"))?
+          .display
+          .targeted(target, started.elapsed().as_millis() as u32)
+          .map_err(graphics_error)?,
         #[cfg(feature = "graphics")]
         Control::Context(mut next) => {
           let approval = approval
@@ -390,10 +482,23 @@ pub fn run(path: &Path, approval: Option<Approval>) -> io::Result<()> {
             next.publish(&graphics._runtime.path().join("context"))?;
           }
           if next.panel != context.panel
-            && next.panel.as_ref().is_some_and(|panel| panel.open)
             && let Some(graphics) = &mut graphics
           {
-            graphics.display.activate();
+            if let Some(panel) = next.panel.as_ref().filter(|panel| panel.open) {
+              if panel.output == 0 {
+                graphics.display.activate();
+              } else {
+                graphics
+                  .display
+                  .activate_output(panel.output, started.elapsed().as_millis() as u32)
+                  .map_err(graphics_error)?;
+              }
+            } else {
+              graphics
+                .display
+                .input(5, 0, 0, 0, started.elapsed().as_millis() as u32)
+                .map_err(graphics_error)?;
+            }
           }
           context = next;
         }
@@ -471,6 +576,7 @@ impl RunningGraphics {
   fn start(
     approval: &Approval,
     viewport: Viewport,
+    topology: Option<crate::topology::Topology>,
     channel: &Channel,
     context: &UiContext,
   ) -> io::Result<Self> {
@@ -498,8 +604,12 @@ impl RunningGraphics {
         context.filter(&record.grants);
         context.publish(&context_path)?;
         let context_directory = File::open(context_path)?;
-        let mut display =
-          crate::graphics::Graphics::new(&path, viewport).map_err(graphics_error)?;
+        let mut display = if let Some(topology) = topology {
+          crate::graphics::Graphics::new_topology(&path, topology)
+        } else {
+          crate::graphics::Graphics::new(&path, viewport)
+        }
+        .map_err(graphics_error)?;
         let bootstrap = File::open(std::env::current_exe()?)?;
         let bundle = File::open(approval.store.revisions().join(&record.revision))?;
         let socket = OpenOptions::new()
@@ -620,8 +730,14 @@ impl RunningGraphics {
         if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
           return Err(io::Error::last_os_error());
         }
-        if context.panel.as_ref().is_some_and(|panel| panel.open) {
-          display.activate();
+        if let Some(panel) = context.panel.as_ref().filter(|panel| panel.open) {
+          if panel.output == 0 {
+            display.activate();
+          } else {
+            display
+              .activate_output(panel.output, 0)
+              .map_err(graphics_error)?;
+          }
         }
         display.describe(channel).map_err(graphics_error)?;
         Ok(Self {
@@ -647,6 +763,9 @@ impl RunningGraphics {
       if let Some(size) = requests.widget_size.take() {
         size.send(channel)?;
       }
+      for (_, size) in std::mem::take(&mut requests.view_sizes) {
+        size.send(channel)?;
+      }
       if let Some(switch) = requests.panel_switch.take() {
         switch.send(channel)?;
       }
@@ -655,8 +774,10 @@ impl RunningGraphics {
     if let Some(log) = &mut self.child.stderr {
       match log.read(&mut bytes) {
         Ok(count) if count > 0 => {
-          self.log.clear();
           self.log.extend_from_slice(&bytes[..count]);
+          if self.log.len() > 4096 {
+            self.log.drain(..self.log.len() - 4096);
+          }
         }
         Ok(_) => (),
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => (),

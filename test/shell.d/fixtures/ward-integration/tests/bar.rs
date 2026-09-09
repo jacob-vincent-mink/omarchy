@@ -176,7 +176,7 @@ Panel {{
     Viewport {
       width: 800,
       height: 500,
-      scale: 1,
+      scale_fixed: 120,
     },
   );
   let _host = Host(

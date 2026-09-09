@@ -56,7 +56,7 @@ fn private_layers_preserve_focus_and_constrain_committed_popups() {
     Viewport {
       width: 400,
       height: 300,
-      scale: 1,
+      scale_fixed: 120,
     },
   )
   .unwrap();

@@ -91,7 +91,7 @@ fn viewport_crops_scales_and_hit_tests_transformed_surface() {
   let viewport = Viewport {
     width: VIEWPORT_W,
     height: VIEWPORT_H,
-    scale: 1,
+    scale_fixed: 120,
   };
   let mut outer = Desktop::new(root.path(), viewport);
 
