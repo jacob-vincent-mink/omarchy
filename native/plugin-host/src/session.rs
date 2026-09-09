@@ -1,0 +1,648 @@
+//! Host-side connection owner. Manager calls, admission, and cleanup run on a
+//! dedicated thread; the GUI only exchanges bounded, non-blocking messages.
+use crate::{
+  channel::{Channel, Listener},
+  controller::Control,
+  presentation::{Event, Frames, Viewport},
+  store::Store,
+};
+use std::{
+  io,
+  os::unix::fs::PermissionsExt,
+  path::PathBuf,
+  sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
+  time::{Duration, Instant},
+};
+
+pub enum Update {
+  Ready,
+  Presentation(Event),
+  Failed(String),
+}
+
+pub struct Session {
+  commands: SyncSender<Control>,
+  updates: Receiver<Update>,
+}
+impl Session {
+  /// Inputs come from trusted shell configuration, not the plugin manifest.
+  /// This never creates approvals or silently enables a plugin.
+  pub fn start(
+    root: PathBuf,
+    id: String,
+    controller: PathBuf,
+    viewport: Viewport,
+  ) -> io::Result<Self> {
+    viewport.pixels()?;
+    crate::grants::validate_id(&id)?;
+    if !root.is_absolute() || !controller.is_absolute() {
+      return Err(io::Error::other("session paths must be absolute"));
+    }
+    let (commands, receiver) = mpsc::sync_channel(64);
+    let (sender, updates) = mpsc::sync_channel(8);
+    std::thread::Builder::new()
+      .name("plugin-session".into())
+      .spawn(move || {
+        if let Err(error) = launch(root, id, controller, viewport, receiver, &sender) {
+          // A full queue or dropped receiver also terminates the session. Never
+          // wait for GUI delivery during service cleanup.
+          let _ = sender.try_send(Update::Failed(
+            error.to_string().chars().take(512).collect(),
+          ));
+        }
+      })?;
+    Ok(Self { commands, updates })
+  }
+
+  pub fn poll(&self) -> io::Result<Option<Update>> {
+    match self.updates.try_recv() {
+      Ok(update) => Ok(Some(update)),
+      Err(TryRecvError::Empty) => Ok(None),
+      Err(TryRecvError::Disconnected) => Err(io::Error::other("plugin session ended")),
+    }
+  }
+
+  pub fn send(&self, command: Control) -> io::Result<()> {
+    if !matches!(
+      command,
+      Control::Input { .. }
+        | Control::Scroll(_)
+        | Control::Presented(_)
+        | Control::Configure(_)
+        | Control::Stop
+    ) {
+      return Err(io::Error::other("invalid host session command"));
+    }
+    if let Control::Configure(viewport) = command {
+      viewport.pixels()?;
+    }
+    if let Control::Scroll(scroll) = command {
+      scroll.validate()?;
+    }
+    self
+      .commands
+      .try_send(command)
+      .map_err(|_| io::Error::other("plugin input queue unavailable"))
+  }
+}
+
+fn launch(
+  root: PathBuf,
+  id: String,
+  controller: PathBuf,
+  mut viewport: Viewport,
+  commands: Receiver<Control>,
+  updates: &SyncSender<Update>,
+) -> io::Result<()> {
+  let runtime = tempfile::Builder::new()
+    .prefix("omarchy-host-")
+    .permissions(std::fs::Permissions::from_mode(0o700))
+    .tempdir()?;
+  let path = runtime.path().join("host");
+  let listener = Listener::bind(&path)?;
+  let store = Store::open(&root)?;
+  let (mut unit, _) = store.launch(&id, &controller, &path)?;
+  let result = (|| {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let channel = loop {
+      match commands.try_recv() {
+        Err(TryRecvError::Empty) => (),
+        Ok(Control::Configure(next)) => {
+          next.pixels()?;
+          viewport = next;
+        }
+        _ => return Err(io::Error::other("session cancelled before admission")),
+      }
+      match listener.accept() {
+        Ok(channel) => {
+          unit.authenticate(&channel)?;
+          break channel;
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+          std::thread::sleep(Duration::from_millis(5));
+        }
+        Err(error) => return Err(error),
+      }
+    };
+    dispatch(channel, viewport, commands, updates)
+  })();
+  // Unit::Drop also retries cleanup on failure. No manager work runs on GUI Drop.
+  let stopped = unit.stop();
+  result.and(stopped)
+}
+
+fn emit(updates: &SyncSender<Update>, update: Update) -> io::Result<()> {
+  updates
+    .try_send(update)
+    .map_err(|_| io::Error::other("plugin presentation queue unavailable"))
+}
+
+fn dispatch(
+  channel: Channel,
+  mut viewport: Viewport,
+  commands: Receiver<Control>,
+  updates: &SyncSender<Update>,
+) -> io::Result<()> {
+  viewport.pixels()?;
+  let mut desired = viewport;
+  let mut resize_requested = false;
+  let mut requested = None;
+  let mut generation = 0;
+  let mut settled = false;
+  let mut frames = Frames::default();
+  let mut described = 0u8;
+  let mut ready = false;
+  let mut ping = 0;
+  let mut pong = 0;
+  let mut next_ping = Instant::now();
+  let mut deadline = Instant::now() + Duration::from_secs(3);
+  let mut rate_window = Instant::now();
+  let mut records = 0;
+  loop {
+    let now = Instant::now();
+    if now >= deadline {
+      return Err(io::Error::other("plugin controller lease expired"));
+    }
+    if now >= next_ping {
+      ping += 1;
+      Control::Ping(ping).send(&channel)?;
+      next_ping = now + Duration::from_millis(500);
+    }
+    if now.duration_since(rate_window) >= Duration::from_secs(1) {
+      rate_window = now;
+      records = 0;
+    }
+    for _ in 0..32 {
+      match commands.try_recv() {
+        Ok(Control::Stop) | Err(TryRecvError::Disconnected) => return Ok(()),
+        Ok(Control::Configure(next)) => {
+          next.pixels()?;
+          desired = next;
+          resize_requested = true;
+        }
+        Ok(command) => {
+          if !ready {
+            return Err(io::Error::other("input before session ready"));
+          }
+          if let Control::Presented(serial) = command {
+            frames.presented(serial)?;
+            settled = true;
+          }
+          command.send(&channel)?;
+        }
+        Err(TryRecvError::Empty) => break,
+      }
+    }
+    for _ in 0..32 {
+      let packet = match channel.receive() {
+        Ok(packet) => packet,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+        Err(error) => return Err(error),
+      };
+      records += 1;
+      if records > 2048 {
+        return Err(io::Error::other("controller presentation rate exceeded"));
+      }
+      if packet.bytes.len() == 16 {
+        match Control::decode(packet)? {
+          Control::Hello if !ready => {
+            Control::Configure(desired).send(&channel)?;
+            requested = Some(desired);
+            resize_requested = false;
+            ready = true;
+            emit(updates, Update::Ready)?;
+          }
+          Control::Pong(serial) if ready && serial > pong && serial <= ping => {
+            pong = serial;
+            deadline = now + Duration::from_secs(3);
+          }
+          _ => return Err(io::Error::other("unexpected controller control record")),
+        }
+      } else {
+        if !ready {
+          return Err(io::Error::other("presentation before hello"));
+        }
+        let event = Event::decode(packet)?;
+        match &event {
+          Event::Configured {
+            generation: next,
+            viewport: next_viewport,
+          } => {
+            if requested != Some(*next_viewport) {
+              return Err(io::Error::other("unsolicited presentation viewport"));
+            }
+            frames.configure(*next)?;
+            generation = *next;
+            viewport = *next_viewport;
+            described = 0;
+            requested = None;
+            settled = false;
+          }
+          Event::Buffer(buffer) => {
+            if buffer.generation != generation
+              || (buffer.width, buffer.height) != viewport.pixels()?
+            {
+              return Err(io::Error::other("unexpected presentation buffer geometry"));
+            }
+            frames.describe(buffer.generation, buffer.slot)?;
+            described |= 1 << buffer.slot;
+          }
+          Event::Frame {
+            generation,
+            serial,
+            slot,
+          } => frames.frame(*generation, *serial, *slot)?,
+          Event::Mask {
+            generation: mask_generation,
+            regions,
+          } => {
+            if *mask_generation != generation
+              || described != 3
+              || regions.iter().any(|region| {
+                region.x + region.width > viewport.width
+                  || region.y + region.height > viewport.height
+              })
+            {
+              return Err(io::Error::other("unexpected presentation mask"));
+            }
+          }
+        }
+        emit(updates, Update::Presentation(event))?;
+      }
+    }
+    // One configured generation must reach the GUI before another is requested.
+    // Repeated geometry changes replace `desired`; no resize-effect queue grows.
+    if ready && settled && requested.is_none() && resize_requested {
+      Control::Configure(desired).send(&channel)?;
+      requested = Some(desired);
+      resize_requested = false;
+    }
+    std::thread::sleep(Duration::from_millis(5));
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::presentation::Buffer;
+  use std::{fs::File, thread::JoinHandle};
+
+  fn connection() -> (
+    Channel,
+    SyncSender<Control>,
+    Receiver<Update>,
+    JoinHandle<io::Result<()>>,
+  ) {
+    let (host, controller) = Channel::pair().unwrap();
+    let (commands, receiver) = mpsc::sync_channel(64);
+    let (sender, updates) = mpsc::sync_channel(8);
+    let task = std::thread::spawn(move || {
+      dispatch(
+        host,
+        Viewport {
+          width: 80,
+          height: 48,
+          scale: 1,
+        },
+        receiver,
+        &sender,
+      )
+    });
+    (controller, commands, updates, task)
+  }
+
+  fn hello(controller: &Channel, updates: &Receiver<Update>) {
+    Control::Hello.send(controller).unwrap();
+    assert!(matches!(
+      updates.recv_timeout(Duration::from_secs(1)).unwrap(),
+      Update::Ready
+    ));
+  }
+
+  fn buffers(controller: &Channel) {
+    configure_buffers(
+      controller,
+      1,
+      Viewport {
+        width: 80,
+        height: 48,
+        scale: 1,
+      },
+    );
+  }
+
+  fn configure_buffers(controller: &Channel, generation: u64, viewport: Viewport) {
+    Event::Configured {
+      generation,
+      viewport,
+    }
+    .send(controller)
+    .unwrap();
+    let (width, height) = viewport.pixels().unwrap();
+    for slot in 0..2 {
+      Event::Buffer(Buffer {
+        generation,
+        slot,
+        width,
+        height,
+        stride: width * 4,
+        fd: File::open("/dev/null").unwrap().into(),
+      })
+      .send(controller)
+      .unwrap();
+    }
+  }
+
+  fn next_configure(controller: &Channel) -> Viewport {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+      match controller.receive() {
+        Ok(packet) => {
+          if let Control::Configure(viewport) = Control::decode(packet).unwrap() {
+            return viewport;
+          }
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+          std::thread::sleep(Duration::from_millis(5))
+        }
+        Err(error) => panic!("missing resize request: {error}"),
+      }
+    }
+  }
+
+  #[test]
+  fn resize_coalesces_waits_for_presented_frames_and_accepts_same_size_roundtrips() {
+    let (controller, commands, updates, task) = connection();
+    hello(&controller, &updates);
+    assert_eq!(next_configure(&controller).width, 80);
+    let drain_frame = || {
+      for _ in 0..4 {
+        assert!(matches!(
+          updates.recv_timeout(Duration::from_secs(1)).unwrap(),
+          Update::Presentation(_)
+        ));
+      }
+    };
+    buffers(&controller);
+    Event::Frame {
+      generation: 1,
+      serial: 1,
+      slot: 0,
+    }
+    .send(&controller)
+    .unwrap();
+    drain_frame();
+    let target = Viewport {
+      width: 140,
+      height: 90,
+      scale: 2,
+    };
+    commands
+      .send(Control::Configure(Viewport {
+        width: 120,
+        ..target
+      }))
+      .unwrap();
+    commands.send(Control::Configure(target)).unwrap();
+    std::thread::sleep(Duration::from_millis(30));
+    while let Ok(packet) = controller.receive() {
+      assert!(
+        !matches!(Control::decode(packet).unwrap(), Control::Configure(_)),
+        "resize overtook the displayed frame"
+      );
+    }
+    commands.send(Control::Presented(1)).unwrap();
+    assert_eq!(next_configure(&controller), target);
+    // Old-generation work may already be on the wire when a resize is sent.
+    Event::Frame {
+      generation: 1,
+      serial: 2,
+      slot: 1,
+    }
+    .send(&controller)
+    .unwrap();
+    assert!(matches!(
+      updates.recv_timeout(Duration::from_secs(1)).unwrap(),
+      Update::Presentation(Event::Frame { serial: 2, .. })
+    ));
+    commands.send(Control::Presented(2)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+      match controller.receive() {
+        Ok(packet) => {
+          if Control::decode(packet).unwrap() == Control::Presented(2) {
+            break;
+          }
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+          std::thread::sleep(Duration::from_millis(5))
+        }
+        Err(error) => panic!("old frame not acknowledged: {error}"),
+      }
+    }
+    configure_buffers(&controller, 2, target);
+    Event::Frame {
+      generation: 2,
+      serial: 3,
+      slot: 0,
+    }
+    .send(&controller)
+    .unwrap();
+    drain_frame();
+    commands
+      .send(Control::Configure(Viewport {
+        width: 100,
+        ..target
+      }))
+      .unwrap();
+    commands.send(Control::Configure(target)).unwrap();
+    commands.send(Control::Presented(3)).unwrap();
+    assert_eq!(
+      next_configure(&controller),
+      target,
+      "returning to the current geometry still needs an acknowledgement"
+    );
+    configure_buffers(&controller, 3, target);
+    Event::Frame {
+      generation: 3,
+      serial: 4,
+      slot: 0,
+    }
+    .send(&controller)
+    .unwrap();
+    drain_frame();
+    commands.send(Control::Presented(4)).unwrap();
+    commands.send(Control::Stop).unwrap();
+    assert!(task.join().unwrap().is_ok());
+  }
+
+  #[test]
+  fn unsolicited_generations_and_inconsistent_geometry_fail_closed() {
+    for mode in 0..4 {
+      let (controller, _commands, updates, task) = connection();
+      hello(&controller, &updates);
+      let viewport = Viewport {
+        width: 80,
+        height: 48,
+        scale: 1,
+      };
+      match mode {
+        0 => Event::Configured {
+          generation: 2,
+          viewport,
+        }
+        .send(&controller)
+        .unwrap(),
+        1 => Event::Configured {
+          generation: 1,
+          viewport: Viewport {
+            width: 81,
+            ..viewport
+          },
+        }
+        .send(&controller)
+        .unwrap(),
+        2 => {
+          buffers(&controller);
+          Event::Mask {
+            generation: 2,
+            regions: Vec::new(),
+          }
+          .send(&controller)
+          .unwrap();
+        }
+        _ => {
+          Event::Configured {
+            generation: 1,
+            viewport,
+          }
+          .send(&controller)
+          .unwrap();
+          Event::Buffer(Buffer {
+            generation: 1,
+            slot: 0,
+            width: 160,
+            height: 96,
+            stride: 640,
+            fd: File::open("/dev/null").unwrap().into(),
+          })
+          .send(&controller)
+          .unwrap();
+        }
+      }
+      assert!(task.join().unwrap().is_err());
+    }
+  }
+
+  #[test]
+  fn session_validates_frame_ownership_and_gui_disconnect() {
+    let (controller, commands, updates, task) = connection();
+    hello(&controller, &updates);
+    buffers(&controller);
+    Event::Frame {
+      generation: 1,
+      serial: 1,
+      slot: 0,
+    }
+    .send(&controller)
+    .unwrap();
+    for _ in 0..4 {
+      assert!(matches!(
+        updates.recv_timeout(Duration::from_secs(1)).unwrap(),
+        Update::Presentation(_)
+      ));
+    }
+    commands.send(Control::Presented(1)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+      match controller.receive() {
+        Ok(packet) => {
+          if Control::decode(packet).unwrap() == Control::Presented(1) {
+            break;
+          }
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+          std::thread::sleep(Duration::from_millis(5))
+        }
+        Err(error) => panic!("missing acknowledgement: {error}"),
+      }
+    }
+    Event::Frame {
+      generation: 1,
+      serial: 2,
+      slot: 1,
+    }
+    .send(&controller)
+    .unwrap();
+    assert!(matches!(
+      updates.recv_timeout(Duration::from_secs(1)).unwrap(),
+      Update::Presentation(Event::Frame { serial: 2, .. })
+    ));
+    drop(commands);
+    assert!(task.join().unwrap().is_ok());
+  }
+
+  #[test]
+  fn session_rejects_replays_unconfigured_frames_and_stale_acknowledgements() {
+    for mode in 0..4 {
+      let (controller, commands, updates, task) = connection();
+      hello(&controller, &updates);
+      match mode {
+        0 => Control::Hello.send(&controller).unwrap(),
+        1 => Event::Frame {
+          generation: 1,
+          serial: 1,
+          slot: 0,
+        }
+        .send(&controller)
+        .unwrap(),
+        2 => commands.send(Control::Presented(1)).unwrap(),
+        _ => {
+          buffers(&controller);
+          Event::Frame {
+            generation: 1,
+            serial: 1,
+            slot: 0,
+          }
+          .send(&controller)
+          .unwrap();
+          Event::Frame {
+            generation: 1,
+            serial: 2,
+            slot: 1,
+          }
+          .send(&controller)
+          .unwrap();
+        }
+      }
+      assert!(task.join().unwrap().is_err());
+    }
+  }
+
+  #[test]
+  fn stalled_gui_cannot_create_an_unbounded_presentation_queue() {
+    let (controller, _commands, updates, task) = connection();
+    hello(&controller, &updates);
+    buffers(&controller);
+    for _ in 0..16 {
+      if (Event::Mask {
+        generation: 1,
+        regions: Vec::new(),
+      })
+      .send(&controller)
+      .is_err()
+      {
+        break;
+      }
+    }
+    assert!(
+      task
+        .join()
+        .unwrap()
+        .unwrap_err()
+        .to_string()
+        .contains("queue")
+    );
+    assert!(updates.try_iter().count() <= 8);
+  }
+}
