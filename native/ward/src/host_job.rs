@@ -74,6 +74,31 @@ impl Executable {
     }
     Ok(file)
   }
+
+  pub(crate) fn prepare(self, started: Instant) -> io::Result<PreparedExecutable> {
+    let file = self.open()?;
+    Ok(PreparedExecutable {
+      executable: self,
+      file,
+      started,
+    })
+  }
+}
+
+/// A controller-created, verified snapshot; never supplied by a worker.
+pub(crate) struct PreparedExecutable {
+  executable: Executable,
+  file: File,
+  started: Instant,
+}
+
+impl PreparedExecutable {
+  pub(crate) fn check(&self, executable: &Executable) -> io::Result<()> {
+    if self.executable != *executable {
+      return Err(invalid("prepared executable differs from current approval"));
+    }
+    Ok(())
+  }
 }
 
 // Execute a sealed copy through its descriptor. Unlike a pathname or
@@ -335,7 +360,31 @@ impl Job {
     paths: &[crate::exec_policy::PluginDir],
     lifetime: Lifetime,
   ) -> io::Result<Self> {
-    let started = Instant::now();
+    Self::start_prepared(
+      executable.clone().prepare(Instant::now())?,
+      tree,
+      selected,
+      argv,
+      environment,
+      paths,
+      lifetime,
+    )
+  }
+
+  pub(crate) fn start_prepared(
+    prepared: PreparedExecutable,
+    tree: &Tree,
+    selected: &BTreeSet<String>,
+    argv: &[String],
+    environment: &Environment,
+    paths: &[crate::exec_policy::PluginDir],
+    lifetime: Lifetime,
+  ) -> io::Result<Self> {
+    let PreparedExecutable {
+      executable,
+      file,
+      started,
+    } = prepared;
     // Resolve the invocation itself, not just the copy used by the matcher.
     // Host commands cannot open a literal "$OMARCHY_PLUGIN_PATH/..." filename.
     let argv = argv
@@ -344,7 +393,6 @@ impl Job {
       .collect::<io::Result<Vec<_>>>()?;
     tree.check_with(paths, selected, &argv)?;
     supervisor::verify_controller_limits(supervisor::Limits::default())?;
-    let file = executable.open()?;
     if started.elapsed() >= TIMEOUT {
       return Err(invalid("host executable preparation timed out"));
     }

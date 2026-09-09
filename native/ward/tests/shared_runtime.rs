@@ -78,7 +78,8 @@ fn missing_or_invalid_shared_runtime_fails_without_presenting() {
           Update::Ready
           | Update::Presentation(_)
           | Update::PanelState { .. }
-          | Update::WidgetSize { .. },
+          | Update::WidgetSize { .. }
+          | Update::PanelSwitch { .. },
         ) => (),
         None => {
           assert!(

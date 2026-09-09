@@ -87,6 +87,7 @@ Panel {{
   property bool forgedDone: false
   property bool requestAccepted: false
   property int negativeMode: 0
+  property bool dragged: false
   Process {{
     id: forged
     command: ["/bootstrap", "--switch-panel", "1"]
@@ -104,6 +105,15 @@ Panel {{
     Rectangle {{
       anchors.fill: parent; color: "{panel_color}"; focus: true
       Rectangle {{ width: 10; height: 10; color: root.forgedDone ? "#ffee11" : root.negativeMode === 1 ? "#aa1177" : root.negativeMode === 2 ? "#11ccee" : "{panel_color}" }}
+      Rectangle {{ anchors.right: parent.right; width: 10; height: 10; color: root.dragged ? "#22ccdd" : "{panel_color}" }}
+      MouseArea {{
+        anchors.fill: parent
+        property real lastX: 0
+        property real travel: 0
+        onPressed: mouse => {{ lastX = mouse.x; travel = 0; root.dragged = false }}
+        onPositionChanged: mouse => {{ if (pressed) {{ travel += Math.abs(mouse.x - lastX); lastX = mouse.x }} }}
+        onReleased: root.dragged = travel > 30
+      }}
       Keys.onEscapePressed: root.close()
       Keys.onPressed: event => {{
         if (event.key === Qt.Key_A) {{ forged.running = true; event.accepted = true }}
@@ -214,6 +224,8 @@ Panel {{
     );
     stage("two-slots");
     stage("click-first");
+    stage("cross-gap");
+    stage("drag-panel");
     stage("forged-switch");
     stage("arm-wrong-direction");
     stage("wrong-direction");
@@ -222,6 +234,8 @@ Panel {{
     stage("tab-second");
     stage("backtab-first");
     stage("click-second");
+    stage("click-first");
+    stage("outside");
     stage("click-first");
     stage("escape");
     assert_eq!(
@@ -249,6 +263,7 @@ Panel {{
     );
     stage("moved-slot");
     stage("click-first");
+    stage("cross-gap");
     stage("click-second");
     stage("click-first");
     stage("escape");
@@ -302,6 +317,43 @@ Panel {{
         display
           .graphics
           .input(1, 0x110, x, y, start.elapsed().as_millis() as u32)
+          .unwrap();
+      } else if next == "cross-gap" {
+        // A user-opened panel owns outside dismissal even where its worker
+        // has no surface. Pointer transit must not fall into the application
+        // beneath it and trigger sloppy-focus dismissal on the real desktop.
+        display
+          .graphics
+          .input(2, 0, 400, 400, start.elapsed().as_millis() as u32)
+          .unwrap();
+      } else if next == "drag-panel" {
+        let (x, y) = center(current.as_ref().unwrap(), [0x44, 0xee, 0x22]);
+        display
+          .graphics
+          .input(0, 0x110, x - 25, y, start.elapsed().as_millis() as u32)
+          .unwrap();
+        // Hold through host focus priming, then move while the button remains down.
+        for offset in 0..80 {
+          if offset >= 20 {
+            display
+              .graphics
+              .input(
+                2,
+                0,
+                x - 25 + offset - 20,
+                y,
+                start.elapsed().as_millis() as u32,
+              )
+              .unwrap();
+          }
+          for frame in display.step(start.elapsed().as_millis() as u32) {
+            current = Some(frame);
+          }
+          std::thread::sleep(Duration::from_millis(10));
+        }
+        display
+          .graphics
+          .input(1, 0x110, x + 34, y, start.elapsed().as_millis() as u32)
           .unwrap();
       } else if matches!(
         next,
@@ -368,6 +420,18 @@ Panel {{
               first_panel > 5000 && second_panel == 0
             }
             "click-second" | "tab-second" => second_panel > 5000 && first_panel == 0,
+            "cross-gap" => {
+              first_panel > 5000
+                && second_panel == 0
+                && display.mask().iter().any(|region| {
+                  region.operation == 1
+                    && region.x <= 400
+                    && 400 < region.x + region.width
+                    && region.y <= 400
+                    && 400 < region.y + region.height
+                })
+            }
+            "drag-panel" => first_panel > 5000 && frame.count([0x22, 0xcc, 0xdd]) == 100,
             "forged-switch" | "wrong-direction" | "expired-switch" => {
               first_panel > 5000 && second_panel == 0 && frame.count([0xff, 0xee, 0x11]) == 100
             }

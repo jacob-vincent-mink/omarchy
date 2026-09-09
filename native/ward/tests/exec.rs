@@ -75,6 +75,20 @@ fn exec_worker_child() {
     let (output, result) = cli(&["echo", "literal"]);
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(result, serde_json::json!({"version":1,"status":"failed"}));
+  } else if mode == "prepare" || mode == "prepare-abandon" {
+    if mode == "prepare-abandon" {
+      drop(send("/run/plugin/exec", hold));
+      display.write_all(b"CANC").unwrap();
+      let mut ack = [0; 4];
+      display.read_exact(&mut ack).unwrap();
+      assert_eq!(&ack, b"OKAY");
+    }
+    let output = receive(&send(
+      "/run/plugin/exec",
+      vec!["echo".into(), "prepared".into()],
+    ))
+    .unwrap();
+    assert_eq!(output.status.code(), Some(7));
   } else if mode == "long" || mode == "abandon" {
     let mut cli = Command::new("/grants/cli")
       .args(["--json", "--exec", "fixture"])
@@ -220,9 +234,15 @@ fn exec_controller_child() {
   )
   .unwrap();
   let mut display = None;
+  let preparation_test = fs::read_to_string(root.join("source/mode"))
+    .unwrap()
+    .starts_with("prepare");
+  let mut maximum_dispatch = Duration::ZERO;
   let deadline = Instant::now() + Duration::from_secs(18);
   loop {
+    let dispatch_started = Instant::now();
     broker.dispatch(&approval).unwrap();
+    maximum_dispatch = maximum_dispatch.max(dispatch_started.elapsed());
     if display.is_none()
       && let Ok((stream, _)) = listener.accept()
     {
@@ -255,6 +275,13 @@ fn exec_controller_child() {
         continue;
       }
       assert_eq!(&bytes, b"PASS");
+      if preparation_test {
+        assert!(
+          maximum_dispatch < Duration::from_millis(200),
+          "executable preparation blocked input dispatch for {maximum_dispatch:?}"
+        );
+        println!("large executable maximum broker dispatch: {maximum_dispatch:?}");
+      }
       fs::write(root.join("passed"), bytes).unwrap();
       break;
     }
@@ -292,6 +319,8 @@ fn selected_exec_crosses_only_the_broker_and_revocation_stops_owned_jobs() {
     "long",
     "abandon",
     "revoke-long",
+    "prepare",
+    "prepare-abandon",
   ] {
     let root = tempfile::Builder::new()
       .prefix("omarchy-exec-")
@@ -319,6 +348,16 @@ fn selected_exec_crosses_only_the_broker_and_revocation_stops_owned_jobs() {
         .unwrap()
         .success()
     );
+    if mode.starts_with("prepare") {
+      // ELF ignores trailing bytes. Make verification substantial without
+      // changing the synthetic executable's behavior or requiring a real CLI.
+      OpenOptions::new()
+        .write(true)
+        .open(&fixture)
+        .unwrap()
+        .set_len(64 * 1024 * 1024)
+        .unwrap();
+    }
     let socket = root.join("owned.socket");
     let listener = UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -335,7 +374,7 @@ fn selected_exec_crosses_only_the_broker_and_revocation_stops_owned_jobs() {
       tree["next"][0].clone()
     };
     let ask: Ask = serde_json::from_value(serde_json::json!({"executable":fixture,
-      "lifetime":if matches!(mode, "long" | "abandon" | "revoke-long") {"plugin"} else {"request"},"tree":{"next":[
+      "lifetime":if matches!(mode, "long" | "abandon" | "revoke-long" | "prepare-abandon") {"plugin"} else {"request"},"tree":{"next":[
       {"arg":{"kind":"exact","value":"echo"},"then":{"next":[{"arg":{"kind":"text","prefix":"","min":0,"max":8192},"then":{"end":"echo"}}]}},
       branch("hold", &hold), branch("flood", &["flood-out".into()]), branch("failure", &["failure".into()]), branch("unselected", &["unselected".into()])
     ]}})).unwrap();
@@ -455,7 +494,7 @@ fn selected_exec_crosses_only_the_broker_and_revocation_stops_owned_jobs() {
       peers.len(),
       match mode {
         "allowed" => 2,
-        "denied" | "failed" => 0,
+        "denied" | "failed" | "prepare" | "prepare-abandon" => 0,
         _ => 1,
       }
     );

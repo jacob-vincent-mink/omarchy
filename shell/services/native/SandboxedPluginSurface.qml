@@ -26,6 +26,10 @@ PanelWindow {
   property bool programmaticFocus: false
   onProgrammaticFocusChanged: Qt.callLater(updateMask)
   property bool focusHeld: false
+  // Only host interaction can establish focusHeld. Worker-reported panel state
+  // may retain that focus, but cannot independently capture the desktop.
+  readonly property bool panelFocus: focusHeld && opened
+  onPanelFocusChanged: Qt.callLater(updateMask)
   property bool hadWindowFocus: false
   onOpenedChanged: if (!opened) { focusHeld = false; programmaticFocus = false }
   readonly property string contextJson: {
@@ -86,7 +90,7 @@ PanelWindow {
   function updateMask() {
     var previous = regions
     var next = []
-    var source = programmaticFocus ? [{x: 0, y: 0, width: width, height: height}] : view.inputRegions
+    var source = programmaticFocus || panelFocus ? [{x: 0, y: 0, width: width, height: height}] : view.inputRegions
     var rectangles = PluginInput.barMask(source, barPlacement, width, height)
     for (var i = 0; i < rectangles.length; i++) {
       var rect = rectangles[i]
@@ -103,8 +107,12 @@ PanelWindow {
   function primeFocus(programmatic) {
     programmaticFocus = programmatic === true
     focusHeld = true
-    focusPrimed = true
-    focusPrimeTimer.restart()
+    // Re-priming an already focused Wayland layer can cancel a held pointer
+    // gesture. Existing panel interaction needs no compositor focus handoff.
+    if (!view.Window.active) {
+      focusPrimed = true
+      focusPrimeTimer.restart()
+    }
     view.forceActiveFocus()
   }
   function setPanel(open, payload) {
@@ -167,12 +175,12 @@ PanelWindow {
     }
   }
 
-  // A shortcut-opened panel can hold keyboard focus while the pointer is
-  // outside its private surface. The host owns that outside-click dismissal;
-  // only clicks inside the existing bounded worker regions reach the worker.
+  // Keep pointer transit between the bar and panel on the focused host surface.
+  // The host owns outside-click dismissal; only clicks inside the existing
+  // bounded worker regions reach the worker, and neighboring bar slots stay free.
   MouseArea {
     anchors.fill: parent
-    enabled: root.programmaticFocus
+    enabled: root.programmaticFocus || root.panelFocus
     acceptedButtons: Qt.AllButtons
     onPressed: mouse => {
       const regions = PluginInput.barMask(view.inputRegions, root.barPlacement, root.width, root.height)

@@ -32,7 +32,7 @@ A new shell test only needs the right name: drop `<area>-test.sh` into
 `test/shell.d/` and `./test/shell` picks it up automatically. Shared fixtures
 live under `test/shell.d/fixtures/`.
 
-Ward's native tests under `native/ward` use synthetic plugins and generic resource contracts. Shell-specific activation and reviewer coverage lives in `test/shell.d/fixtures/ward-integration`, invoked by `ward-integration-test.sh` only with the explicit systemd, graphics, Qt-module and executable opt-ins documented in [the Ward plan](../plans/sandboxed-quickshell.md). It renders on a private display, not the active desktop. Concrete third-party compatibility experiments also belong outside Ward; first-party plugins are not sandbox-port targets.
+Ward's native tests under `native/ward` use synthetic plugins and generic resource contracts. Shell-specific activation and reviewer coverage lives in `test/shell.d/fixtures/ward-integration`, invoked by `ward-integration-test.sh` only with the explicit systemd, graphics, Qt-module and executable opt-ins documented in [the Ward plan](../plans/sandboxed-quickshell.md). Both crates share the root Cargo workspace, lockfile and `target/` directory; their existing `--manifest-path` commands still select the intended crate. It renders on a private display, not the active desktop. Concrete third-party compatibility experiments also belong outside Ward; first-party plugins are not sandbox-port targets.
 
 ## The base-test.sh contract
 

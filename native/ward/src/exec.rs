@@ -126,12 +126,11 @@ impl Request {
     channel.send(TAG, &[file.as_fd()])
   }
 
-  pub(crate) fn start(
-    &self,
+  pub(crate) fn prepare(
+    self,
     grants: &BTreeMap<String, Grant>,
-    env: &Environment,
     paths: &[crate::exec_policy::PluginDir],
-  ) -> io::Result<Job> {
+  ) -> io::Result<Preparation> {
     self.validate()?;
     let grant = grants
       .get(&self.name)
@@ -140,11 +139,54 @@ impl Request {
       .tree
       .check_with(paths, &grant.selected, &self.argv)
       .map_err(|_| Status::Denied.error())?;
-    Job::start(
-      &grant.executable,
+    let executable = grant.executable.clone();
+    let started = Instant::now();
+    Ok(Preparation {
+      request: self,
+      started,
+      task: std::thread::Builder::new()
+        .name("ward-exec-verify".into())
+        .spawn(move || executable.prepare(started))?,
+    })
+  }
+}
+
+/// Verification does no execution and holds no authority lock. The broker
+/// retains its slot until the thread finishes, even after caller cancellation.
+pub(crate) struct Preparation {
+  request: Request,
+  pub(crate) started: Instant,
+  task: std::thread::JoinHandle<io::Result<crate::host_job::PreparedExecutable>>,
+}
+
+impl Preparation {
+  pub(crate) fn is_finished(&self) -> bool {
+    self.task.is_finished()
+  }
+
+  pub(crate) fn start(
+    self,
+    grants: &BTreeMap<String, Grant>,
+    env: &Environment,
+    paths: &[crate::exec_policy::PluginDir],
+  ) -> io::Result<Job> {
+    if !self.is_finished() {
+      return Err(Status::Busy.error());
+    }
+    let prepared = self.task.join().map_err(|_| Status::Failed.error())??;
+    let grant = grants
+      .get(&self.request.name)
+      .ok_or_else(|| Status::Denied.error())?;
+    grant
+      .tree
+      .check_with(paths, &grant.selected, &self.request.argv)
+      .map_err(|_| Status::Denied.error())?;
+    prepared.check(&grant.executable)?;
+    Job::start_prepared(
+      prepared,
       &grant.tree,
       &grant.selected,
-      &self.argv,
+      &self.request.argv,
       env,
       paths,
       grant.lifetime,
@@ -342,6 +384,58 @@ mod tests {
     grants.exec.insert("fixture".into(), selected);
     grants.exec.get_mut("fixture").unwrap().executable.path = "/usr/bin/bash".into();
     assert!(grants.validate(&requests).is_err());
+  }
+
+  #[test]
+  fn prepared_requests_recheck_selection_and_executable_identity_before_launch() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("fixture");
+    std::fs::write(&path, "#!/bin/bash\nexit 7\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let ask: Ask = serde_json::from_value(json!({"executable":path,"tree":{"end":"run"}})).unwrap();
+    let grants: BTreeMap<_, _> = [(
+      "fixture".into(),
+      Grant::select(&ask, ["run".into()].into()).unwrap(),
+    )]
+    .into();
+    let prepare = || {
+      let preparation = Request {
+        name: "fixture".into(),
+        argv: vec![],
+      }
+      .prepare(&grants, &[])
+      .unwrap();
+      let deadline = Instant::now() + Duration::from_secs(2);
+      while !preparation.is_finished() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+      }
+      preparation
+    };
+    let env = Environment::capture().unwrap();
+    let mut declined = grants.clone();
+    declined.get_mut("fixture").unwrap().selected.clear();
+    let error = prepare().start(&declined, &env, &[]).err().unwrap();
+    assert_eq!(Status::from_error(&error), Status::Denied);
+    let error = prepare().start(&BTreeMap::new(), &env, &[]).err().unwrap();
+    assert_eq!(Status::from_error(&error), Status::Denied);
+    let prepared = prepare();
+    std::fs::write(&path, "#!/bin/bash\nexit 8\n").unwrap();
+    let mut changed = grants.clone();
+    changed.get_mut("fixture").unwrap().executable = Executable::select(&path).unwrap();
+    let error = prepared.start(&changed, &env, &[]).err().unwrap();
+    assert_eq!(
+      error.to_string(),
+      "prepared executable differs from current approval"
+    );
+    let invalid = Request {
+      name: "fixture".into(),
+      argv: vec!["extra".into()],
+    }
+    .prepare(&grants, &[])
+    .err()
+    .unwrap();
+    assert_eq!(Status::from_error(&invalid), Status::Denied);
   }
 
   #[test]
