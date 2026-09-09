@@ -106,7 +106,7 @@ pub(crate) fn await_reply(channel: &Channel) -> io::Result<()> {
 
 /// The read-only admission snapshot explains intentionally absent sockets.
 /// This is caller feedback, not authority: the broker rechecks every request.
-pub(crate) fn connect(kind: Kind) -> io::Result<Channel> {
+pub(crate) fn grants() -> io::Result<Grants> {
   let mut bytes = Vec::new();
   File::open("/run/plugin/grants.json")
     .and_then(|file| {
@@ -118,7 +118,11 @@ pub(crate) fn connect(kind: Kind) -> io::Result<Channel> {
   if bytes.len() > crate::grants::MAX_PERSISTED_BYTES {
     return Err(Status::Unavailable.error());
   }
-  let grants: Grants = serde_json::from_slice(&bytes).map_err(|_| Status::Unavailable.error())?;
+  serde_json::from_slice(&bytes).map_err(|_| Status::Unavailable.error())
+}
+
+pub(crate) fn connect(kind: Kind) -> io::Result<Channel> {
+  let grants = grants()?;
   let (allowed, path) = match kind {
     Kind::Notification => (grants.notifications, "/run/plugin/notify"),
     Kind::Settings => (grants.settings.can_write(), "/run/plugin/settings"),

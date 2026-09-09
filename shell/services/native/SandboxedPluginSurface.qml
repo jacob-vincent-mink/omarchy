@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Wayland
 import Omarchy.Ward
 import qs.Commons
+import "../PluginInput.js" as PluginInput
 
 // One private desktop canvas, hosted by the existing trusted shell. A worker's
 // layer-shell requests affect only its private display, never this window.
@@ -15,15 +16,18 @@ PanelWindow {
   property var settings: ({})
   property var geometrySource: null
   property var barPlacement: null
+  onBarPlacementChanged: Qt.callLater(updateMask)
   property var barOwner: null
   readonly property size widgetSize: view.widgetSize
   property var panelCommand: null
   readonly property bool opened: !error && (panelCommand && panelCommand.serial !== view.panelSerial
     ? panelCommand.open : view.panelOpen)
   property bool focusPrimed: false
+  property bool programmaticFocus: false
+  onProgrammaticFocusChanged: Qt.callLater(updateMask)
   property bool focusHeld: false
   property bool hadWindowFocus: false
-  onOpenedChanged: if (!opened) focusHeld = false
+  onOpenedChanged: if (!opened) { focusHeld = false; programmaticFocus = false }
   readonly property string contextJson: {
     const context = {
       settings: settings,
@@ -51,6 +55,7 @@ PanelWindow {
   readonly property string error: view.error
   readonly property string state: error ? "error" : view.presented ? "running" : "starting"
   signal statusChanged()
+  signal panelSwitchRequested(int direction)
   onStateChanged: statusChanged()
 
   // The preview provides one desktop canvas, on the largest logical output.
@@ -71,7 +76,7 @@ PanelWindow {
   // Above the bar even when a replacement bar maps after this worker. The
   // bounded mask still leaves every unpainted/unclaimed area click-through.
   WlrLayershell.layer: WlrLayer.Overlay
-  WlrLayershell.keyboardFocus: focusPrimed ? WlrKeyboardFocus.Exclusive
+  WlrLayershell.keyboardFocus: focusPrimed || programmaticFocus ? WlrKeyboardFocus.Exclusive
     : focusHeld ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
   mask: inputMask
 
@@ -81,7 +86,8 @@ PanelWindow {
   function updateMask() {
     var previous = regions
     var next = []
-    var rectangles = view.inputRegions
+    var source = programmaticFocus ? [{x: 0, y: 0, width: width, height: height}] : view.inputRegions
+    var rectangles = PluginInput.barMask(source, barPlacement, width, height)
     for (var i = 0; i < rectangles.length; i++) {
       var rect = rectangles[i]
       next.push(regionComponent.createObject(inputMask, {
@@ -94,7 +100,8 @@ PanelWindow {
   }
 
   function stop() { view.stop() }
-  function primeFocus() {
+  function primeFocus(programmatic) {
+    programmaticFocus = programmatic === true
     focusHeld = true
     focusPrimed = true
     focusPrimeTimer.restart()
@@ -111,10 +118,13 @@ PanelWindow {
       open: open, payload: text
     }
     if (open) {
-      primeFocus()
+      // Unlike a click, an IPC summon has no pointer activation that retains
+      // OnDemand focus. Hold it until interaction or host-owned dismissal.
+      primeFocus(true)
     } else {
       focusPrimeTimer.stop()
       focusPrimed = false
+      programmaticFocus = false
       focusHeld = false
       view.dismiss()
     }
@@ -134,8 +144,8 @@ PanelWindow {
       view.configure(width, height, renderScale)
     }
   }
-  onWidthChanged: Qt.callLater(configure)
-  onHeightChanged: Qt.callLater(configure)
+  onWidthChanged: { Qt.callLater(configure); Qt.callLater(updateMask) }
+  onHeightChanged: { Qt.callLater(configure); Qt.callLater(updateMask) }
   onRenderScaleChanged: Qt.callLater(configure)
   Component.onCompleted: Qt.callLater(configure)
   Component.onDestruction: view.stop()
@@ -145,12 +155,30 @@ PanelWindow {
     anchors.fill: parent
     onStateChanged: root.updateMask()
     onFocusRequested: root.primeFocus()
+    onPanelSwitchRequested: direction => {
+      if (root.opened && root.focusHeld) root.panelSwitchRequested(direction)
+    }
     Window.onActiveChanged: {
       if (Window.active) root.hadWindowFocus = true
       else if (root.hadWindowFocus) {
         root.hadWindowFocus = false
         root.dismiss()
       }
+    }
+  }
+
+  // A shortcut-opened panel can hold keyboard focus while the pointer is
+  // outside its private surface. The host owns that outside-click dismissal;
+  // only clicks inside the existing bounded worker regions reach the worker.
+  MouseArea {
+    anchors.fill: parent
+    enabled: root.programmaticFocus
+    acceptedButtons: Qt.AllButtons
+    onPressed: mouse => {
+      const regions = PluginInput.barMask(view.inputRegions, root.barPlacement, root.width, root.height)
+      if (regions.some(rect => mouse.x >= rect.x && mouse.y >= rect.y
+        && mouse.x < rect.x + rect.width && mouse.y < rect.y + rect.height)) mouse.accepted = false
+      else root.dismiss()
     }
   }
 }

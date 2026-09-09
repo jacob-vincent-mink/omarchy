@@ -1,6 +1,6 @@
 use crate::{
   channel::Channel,
-  controller::Scroll,
+  controller::{Key, Scroll},
   presentation::{self, Event, Frames, Region, Viewport},
 };
 use smithay::{
@@ -66,6 +66,7 @@ use smithay::{
 };
 use std::{
   cell::RefCell,
+  collections::BTreeMap,
   fs::File,
   os::unix::fs::MetadataExt,
   path::{Path, PathBuf},
@@ -128,8 +129,10 @@ pub struct Graphics {
   last_mask: Vec<Region>,
   pointer: smithay::input::pointer::PointerHandle<App>,
   keyboard: smithay::input::keyboard::KeyboardHandle<App>,
+  keysyms: BTreeMap<u32, u32>,
   // Worker layer requests cannot reactivate keyboard focus withdrawn by the host.
   keyboard_active: bool,
+  pending_keyboard_focus: Option<WlSurface>,
   buttons: u8,
 }
 
@@ -226,7 +229,9 @@ impl Graphics {
       last_mask: Vec::new(),
       pointer,
       keyboard,
+      keysyms: BTreeMap::new(),
       keyboard_active: false,
+      pending_keyboard_focus: None,
       buttons: 0,
     })
   }
@@ -306,7 +311,24 @@ impl Graphics {
       return;
     }
     let current = self.keyboard.current_focus();
-    let next = self.app.exclusive_keyboard_focus().or_else(|| {
+    // A clicked layer can enable OnDemand only after receiving that click.
+    // Retain its target across that client round trip, never across dismissal.
+    let requested = self
+      .pending_keyboard_focus
+      .as_ref()
+      .filter(|surface| surface_mapped(surface) && self.app.accepts_keyboard(surface))
+      .cloned();
+    let exclusive = self.app.exclusive_keyboard_focus();
+    if requested.is_some()
+      || exclusive.is_some()
+      || self
+        .pending_keyboard_focus
+        .as_ref()
+        .is_some_and(|surface| !surface_mapped(surface))
+    {
+      self.pending_keyboard_focus = None;
+    }
+    let next = exclusive.or(requested).or_else(|| {
       current
         .clone()
         .filter(|surface| surface_mapped(surface) && self.app.accepts_keyboard(surface))
@@ -670,6 +692,41 @@ impl Graphics {
     self.update_keyboard_focus();
   }
 
+  pub fn key(&mut self, key: Key, time: u32) -> Result<()> {
+    key.validate()?;
+    if key.pressed && self.keysyms.get(&key.code) != Some(&key.symbol) {
+      self.keysyms.insert(key.code, key.symbol);
+      // Only symbols delivered to this focused host item are projected. The
+      // key range bounds this map to 760 entries; no compositor socket or full
+      // host keymap enters the worker. ONE_LEVEL avoids applying Shift twice.
+      let mut codes = String::from("minimum=8; maximum=767;");
+      let mut symbols = String::new();
+      for (code, symbol) in &self.keysyms {
+        codes.push_str(&format!("<W{code}>={code};"));
+        symbols.push_str(&format!(
+          "key <W{code}> {{type=\"ONE_LEVEL\",[0x{symbol:x}]}};"
+        ));
+        let modifier = match symbol {
+          0xffe1 | 0xffe2 => Some("Shift"),
+          0xffe3 | 0xffe4 => Some("Control"),
+          0xffe5 => Some("Lock"),
+          0xffe7..=0xffea => Some("Mod1"),
+          0xff7f => Some("Mod2"),
+          0xffeb | 0xffec => Some("Mod4"),
+          0xfe03 | 0xff7e => Some("Mod5"),
+          _ => None,
+        };
+        if let Some(modifier) = modifier {
+          symbols.push_str(&format!("modifier_map {modifier} {{<W{code}>}};"));
+        }
+      }
+      self.keyboard.set_keymap_from_string(&mut self.app, format!(
+        "xkb_keymap {{xkb_keycodes {{{codes}}}; xkb_types {{include \"complete\"}}; xkb_compatibility {{include \"complete\"}}; xkb_symbols {{{symbols}}};}};"
+      ))?;
+    }
+    self.input(if key.pressed { 3 } else { 4 }, key.code, 0, 0, time)
+  }
+
   pub fn input(&mut self, kind: u32, code: u32, x: i32, y: i32, time: u32) -> Result<()> {
     if kind <= 2 {
       if x < 0
@@ -708,6 +765,7 @@ impl Graphics {
         if kind == 0 {
           self.buttons |= 1 << (code - 0x110);
           self.keyboard_active = true;
+          self.pending_keyboard_focus = focus.as_ref().map(|(surface, _)| surface.clone());
         } else {
           self.buttons &= !(1 << (code - 0x110));
         }
@@ -772,6 +830,7 @@ impl Graphics {
       }
     } else if kind == 5 && code == 0 && x == 0 && y == 0 {
       self.keyboard_active = false;
+      self.pending_keyboard_focus = None;
       self
         .keyboard
         .set_focus(&mut self.app, None, SERIAL_COUNTER.next_serial());

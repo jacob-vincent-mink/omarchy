@@ -27,7 +27,7 @@ fs.writeFileSync(path.join(plugin, 'manifest.json'), JSON.stringify({
   sandbox: { version: 1, entryPoint: 'worker.qml', requests: {
     filesystem: [{ name: 'data', access: 'readwrite', required: true }],
     settings: { read: ['theme'], write: ['volume'], required: true }, openUrls: true, network: true, storage: true,
-    exec: { printf: { executable: '/usr/bin/printf', required: [], tree: {next: [
+    exec: { printf: { executable: '/usr/bin/printf', lifetime: 'plugin', required: [], tree: {next: [
       {arg: {kind: 'exact', value: 'hello'}, then: {end: 'greet'}},
       {arg: {kind: 'exact', value: 'bye'}, then: {end: 'farewell'}}
     ]} } },
@@ -62,8 +62,10 @@ try {
   run('omarchy-plugin-approve', args)
   assertEqual(record().grants.storage, false, 'reapproval does not implicitly retain storage')
   assert(text.includes('Host executable printf: /usr/bin/printf') && text.includes('greet'), 'CLI shows requested executable and tree')
+  assert(text.includes('long-running; stops with its caller or plugin, no ten-second deadline'), 'CLI discloses plugin-lifetime execution')
   run('omarchy-plugin-approve', args.concat(['--exec', 'printf:greet']))
   assertDeepEqual(record().grants.exec.printf.selected, ['greet'], 'only the explicitly selected terminal is granted')
+  assertEqual(record().grants.exec.printf.lifetime, 'plugin', 'approval binds the reviewed execution lifetime')
   assert(/^[0-9a-f]{64}$/.test(record().grants.exec.printf.executable.digest), 'exec approval binds executable bytes')
   const execPrior = JSON.stringify(record())
   run('omarchy-plugin-approve', args.concat(['--exec', 'printf:other']), false)
@@ -102,9 +104,14 @@ try {
 
   const source = fs.readFileSync(path.join(root, 'shell/plugins/panels/plugin-review/Review.qml'), 'utf8')
   const scope = { revision: review, busy: false, pluginId: 'test.selection', network: false, http: [], exec: {},
-    notifications: false, settings: {read: [], write: []}, openUrls: false, storage: false, media: '', folders: {data: selected}, writableFolders: {},
+    notifications: false, settings: {read: [], write: []}, openUrls: false, storage: false, desktopGeometry: false, media: '', folders: {data: selected}, writableFolders: {},
     run: (operation, args) => { scope.args = args } }
   vm.createContext(scope)
+  const rowsStart = source.indexOf('  readonly property var execRequests: {')
+  const rowsEnd = source.indexOf('\n  readonly property var httpRequests:', rowsStart)
+  const rowsBody = source.slice(source.indexOf('{', rowsStart) + 1, rowsEnd).replace(/\}\s*$/, '')
+  vm.runInContext(`function execRows() { ${rowsBody} }`, scope)
+  assert(scope.execRows().every(row => row.lifetime === 'plugin'), 'each reviewer leaf carries its long-running disclosure')
   for (const name of ['requestLabel', 'setWritable', 'toggleHttp', 'toggleExec', 'approve']) {
     const start = source.indexOf(`  function ${name}(`)
     const end = source.indexOf('\n  }', start) + 4

@@ -56,6 +56,9 @@ fn activation(review_ui: bool) {
     "entryPoints": {"panel": "worker.qml"}, "sandbox": {
       "version": 1, "entryPoint": "worker.qml", "requests": {
         "network": true, "notifications": true, "storage": true, "desktopGeometry": true, "settings": {"write": ["width"]}, "filesystem": [{"name": "notes"}],
+        "exec": {"helper": {"executable": "/usr/bin/printf", "lifetime": "plugin", "tree": {
+          "next": [{"arg": {"kind": "exact", "value": "fixture"}, "then": {"end": "session"}}]
+        }}},
         "http": {"catalog": {"scope": {
           "origin": "https://example.test", "method": "GET", "path": "/catalog",
           "query": {"limit": {"required": true, "value": {"kind": "exact", "value": "10"}}}
@@ -143,6 +146,8 @@ ShellRoot {{
         storage: review.storage, storageButton: point("review-storage"),
         desktopGeometry: review.desktopGeometry, geometryButton: point("review-desktop-geometry"),
         http: review.http, httpButton: point("review-http-catalog"),
+        exec: review.exec, execButton: point("review-exec-helper-session"),
+        execDescription: find(window.contentItem, "review-exec-helper-session").description,
         httpDetails: point("review-http-scope-catalog"),
         notificationButton: point("review-notifications"), approvalButton: point("review-approve"), revokeButton: point("review-revoke"), closeButton: point("review-close")}})
     }}
@@ -281,6 +286,10 @@ ShellRoot {{
       capture("storage-denied");
       click(&reveal("storageButton"), "storageButton");
       wait(&|state| state["storage"] == true);
+      assert!(state["execDescription"].as_str().unwrap().contains("Long-running"));
+      click(&reveal("execButton"), "execButton");
+      wait(&|state| state["exec"]["helper"] == serde_json::json!(["session"]));
+      capture("exec-lifetime");
       click(&reveal("settingsButton"), "settingsButton");
       wait(&|state| state["settings"]["write"] == serde_json::json!(["width"]));
       click(&reveal("httpButton"), "httpButton");
@@ -321,6 +330,7 @@ ShellRoot {{
       );
       assert_eq!(state["current"]["grants"]["notifications"], true);
       assert_eq!(state["current"]["grants"]["storage"], true);
+      assert_eq!(state["current"]["grants"]["exec"]["helper"]["lifetime"], "plugin");
       assert_eq!(state["current"]["grants"]["desktopGeometry"], true);
       assert_eq!(
         state["current"]["grants"]["settings"],
@@ -346,6 +356,8 @@ ShellRoot {{
       run("omarchy-plugin-review", &["test.activation", "--ui"]);
       let state = wait(&|state| state["current"]["enabled"] == true && state["busy"] == false);
       assert_eq!(state["storage"], false, "reopen silently selected storage");
+      assert_eq!(state["exec"], serde_json::json!({}), "reopen silently selected execution");
+      assert_eq!(state["current"]["grants"]["exec"]["helper"]["lifetime"], "plugin");
       assert_eq!(
         state["desktopGeometry"], false,
         "reopen silently selected geometry"

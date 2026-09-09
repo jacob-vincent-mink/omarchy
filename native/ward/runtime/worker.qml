@@ -100,6 +100,8 @@ ShellRoot {
   }
   Timer { id: panelStateRetry; interval: 100; onTriggered: root.reportPanelState() }
 
+  Process { id: panelSwitchProcess }
+
   FileView {
     path: "/context/state.json"
     watchChanges: true
@@ -270,6 +272,12 @@ ShellRoot {
     _unregisterClickTarget: target => { clickTargets = clickTargets.filter(value => value !== target) }
     _requestPopout: owner => { activePopout = owner }
     _releasePopout: owner => { if (activePopout === owner) activePopout = null }
+    _switchPanelFrom: (owner, direction) => {
+      if (!root.opened || panelSwitchProcess.running) return false
+      panelSwitchProcess.command = ["/bootstrap", "--switch-panel", direction < 0 ? "-1" : "1"]
+      panelSwitchProcess.running = true
+      return true
+    }
     _targetBelongsToWindow: (target, window) => target.QsWindow.window === window
     _moduleWidgets: id => id === pluginId && widgetLoader.item ? [widgetLoader.item] : []
     _setCenterHoverRevealSuppressed: value => { _centerHoverRevealSuppressed = value }

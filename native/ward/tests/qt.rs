@@ -3,7 +3,11 @@
 mod desktop;
 use desktop::{Desktop, Host};
 use omarchy_ward::{
-  controller::Scroll, grants::Grants, presentation::Viewport, revision::Revision, store::Store,
+  controller::{Key, Scroll},
+  grants::Grants,
+  presentation::Viewport,
+  revision::Revision,
+  store::Store,
 };
 use std::{
   fs,
@@ -74,6 +78,12 @@ ShellRoot {
       id: input; x: 24; y: 115; width: 200; height: 40; color: "white"; font.pixelSize: 20; text: "INPUT"
       property bool escapePressed: false
       property bool escapeReleased: false
+      property bool shiftSeen: false
+      property bool controlSeen: false
+      Keys.onPressed: event => {
+        if (event.key === Qt.Key_Z && (event.modifiers & Qt.ShiftModifier)) shiftSeen = true
+        if (event.key === Qt.Key_Q && (event.modifiers & Qt.ControlModifier)) { controlSeen = true; event.accepted = true }
+      }
       Keys.onEscapePressed: event => { escapePressed = true; event.accepted = true }
       Keys.onReleased: event => {
         if (event.key === Qt.Key_Escape) { escapeReleased = escapePressed; event.accepted = true }
@@ -83,6 +93,7 @@ ShellRoot {
     Rectangle { x: 294; y: 115; width: 32; height: 32; color: input.text.indexOf("r") >= 0 ? "#ffee44" : "#111122" }
     Rectangle { x: 338; y: 115; width: 16; height: 32; color: input.activeFocus ? "#aaeeff" : "#111122" }
     Rectangle { x: 360; y: 115; width: 32; height: 32; color: input.escapeReleased && input.activeFocus ? "#22ccdd" : "#111122" }
+    Rectangle { x: 410; y: 115; width: 32; height: 32; color: input.text.indexOf("éλZ") >= 0 && input.shiftSeen && input.controlSeen ? "#cc4499" : "#111122" }
     Rectangle {
       id: button; x: 24; y: 180; width: 180; height: 48; color: "#607080"
       Text { anchors.centerIn: parent; text: "Open popup"; color: "white" }
@@ -181,6 +192,34 @@ ShellRoot {
       for kind in [3, 4] {
         outer.graphics.input(kind, 26, 0, 0, time).unwrap();
       }
+      // Deliberately unlike US scan codes, as with another layout or a
+      // Unicode virtual keyboard. Symbols must survive both compositor hops.
+      for (code, symbol, pressed) in [
+        (9, 0xe9, true),
+        (9, 0, false),
+        (10, 0x0100_03bb, true),
+        (10, 0, false),
+        (8, 0xffe1, true),
+        (11, u32::from('Z'), true),
+        (11, 0, false),
+        (8, 0, false),
+        (12, 0xffe3, true),
+        (13, u32::from('q'), true),
+        (13, 0, false),
+        (12, 0, false),
+      ] {
+        outer
+          .graphics
+          .key(
+            Key {
+              code,
+              symbol,
+              pressed,
+            },
+            time,
+          )
+          .unwrap();
+      }
       typed = true;
     }
     if !clicked && time >= 1800 {
@@ -201,7 +240,7 @@ ShellRoot {
           frame.save(path);
         }
       }
-      if green > 500 && purple > 5000 && !verified {
+      if green > 500 && purple > 5000 && count([0xcc, 0x44, 0x99]) > 500 && !verified {
         verified = true;
         if let Some(path) = std::env::var_os("OMARCHY_TEST_QT_CAPTURE") {
           frame.save(path);
@@ -235,15 +274,35 @@ ShellRoot {
       if resize_stage == 3 && !escape_sent && count([0xaa, 0xee, 0xff]) > 200 {
         // Escape belongs to the worker's focused control (clear search, close
         // a menu, etc.), not an unconditional host-side focus withdrawal.
-        for kind in [3, 4] {
-          outer.graphics.input(kind, 9, 0, 0, time).unwrap();
+        for pressed in [true, false] {
+          outer
+            .graphics
+            .key(
+              Key {
+                code: 9,
+                symbol: 0xff1b,
+                pressed,
+              },
+              time,
+            )
+            .unwrap();
         }
         escape_sent = true;
       }
       if resize_stage == 3 && escape_sent && count([0x22, 0xcc, 0xdd]) > 500 {
         escaped = true;
-        for kind in [3, 4] {
-          outer.graphics.input(kind, 27, 0, 0, time).unwrap();
+        for pressed in [true, false] {
+          outer
+            .graphics
+            .key(
+              Key {
+                code: 27,
+                symbol: u32::from('r'),
+                pressed,
+              },
+              time,
+            )
+            .unwrap();
         }
         retyped = true;
         resize_stage = 4;

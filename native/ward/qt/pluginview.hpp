@@ -1,5 +1,6 @@
 #pragma once
 #include "omarchy-ward/src/qt.rs.h"
+#include <QElapsedTimer>
 #include <QQuickItem>
 #include <QRegion>
 #include <QTimer>
@@ -44,6 +45,7 @@ signals:
   void panelChanged();
   void widgetSizeChanged();
   void focusRequested();
+  void panelSwitchRequested(int direction);
 protected:
   QSGNode *updatePaintNode(QSGNode *, UpdatePaintNodeData *) override;
   void mousePressEvent(QMouseEvent *) override;
@@ -59,9 +61,12 @@ protected:
 private:
   void poll();
   void input(uint32_t kind, uint32_t code, QPointF point = {});
+  void key(QKeyEvent *event, bool pressed);
   std::optional<rust::Box<omarchy::Session>> m_session;
   std::array<std::optional<rust::Box<omarchy::NativeBuffer>>, 2> m_buffers;
   QTimer m_timer;
+  QElapsedTimer m_panelSwitchAge;
+  int m_panelSwitchDirection = 0;
   QSize m_viewport;
   QSize m_widgetSize = QSize(0, 0);
   QSize m_requestedViewport;

@@ -16,6 +16,7 @@ QtObject {
     target: Hyprland
     function onFocusedWorkspaceChanged() { root.dismissAll() }
     function onFocusedMonitorChanged() { root.dismissAll() }
+    function onRawEvent(event) { root.handleHostEvent(event) }
   }
   property Connections popoutChanges: Connections {
     target: root.bar
@@ -82,6 +83,10 @@ QtObject {
     }
     instance.openedChanged.connect(coordinate)
     instance.focusHeldChanged.connect(coordinate)
+    instance.panelSwitchRequested.connect(function(direction) {
+      if (instances[id] === instance && instance.barOwner && bar && typeof bar.switchPanelFrom === "function")
+        bar.switchPanelFrom(instance.barOwner, direction)
+    })
     changed()
     return "starting"
   }
@@ -111,6 +116,15 @@ QtObject {
   }
 
   // Closing private panels must not unmap their persistent bar widgets.
+  function handleHostEvent(event) {
+    if (String(event && event.name || "") !== "openwindow") return
+    var parts
+    try { parts = event.parse(4) }
+    catch (error) { parts = String(event && event.data || "").split(",") }
+    // Lifecycle policy stays in the host: no compositor events cross the boundary.
+    if (String(parts && parts[2] || "") === "org.omarchy.screensaver") dismissAll()
+  }
+
   function dismissAll(except) {
     for (var id in instances) {
       if (instances[id] !== except && instances[id].barOwner !== except) instances[id].dismiss()

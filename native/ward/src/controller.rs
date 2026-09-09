@@ -31,6 +31,7 @@ pub enum Control {
     y: i32,
   },
   Scroll(Scroll),
+  Key(Key),
   Context(UiContext),
   PanelState {
     serial: u32,
@@ -40,6 +41,29 @@ pub enum Control {
     width: u32,
     height: u32,
   },
+  PanelSwitch {
+    forward: bool,
+  },
+}
+
+/// Symbols already resolved by the focused host's keyboard layout. Scan codes
+/// identify matching presses/releases; they do not imply a US layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Key {
+  pub code: u32,
+  pub symbol: u32,
+  pub pressed: bool,
+}
+impl Key {
+  pub fn validate(self) -> io::Result<()> {
+    if !(8..=767).contains(&self.code)
+      || self.symbol > 0x1fff_ffff
+      || (self.pressed && self.symbol == 0)
+    {
+      return Err(invalid("invalid host key input"));
+    }
+    Ok(())
+  }
 }
 
 /// Host-local position and Qt-signed deltas. Source 0 is wheel (120 units per
@@ -158,6 +182,14 @@ impl Control {
     if let Self::Input { kind, code, x, y } = self {
       return send_extended(channel, 7, [*kind, *code, *x as u32, *y as u32]);
     }
+    if let Self::Key(key) = self {
+      key.validate()?;
+      return send_extended(
+        channel,
+        12,
+        [key.code, key.symbol, u32::from(key.pressed), 0],
+      );
+    }
     let (kind, serial): (u32, u64) = match self {
       Self::Hello => (1, 0),
       Self::Ping(serial) => (2, *serial),
@@ -165,13 +197,18 @@ impl Control {
       Self::Stop => (4, 0),
       Self::Presented(serial) => (6, *serial),
       Self::PanelState { serial, open } => (10, u64::from(*serial) | (u64::from(*open) << 32)),
+      Self::PanelSwitch { forward } => (13, u64::from(*forward)),
       Self::WidgetSize { width, height } => {
         if *width > 1024 || *height > 1024 {
           return Err(invalid("invalid widget size"));
         }
         (11, u64::from(*width) | (u64::from(*height) << 32))
       }
-      Self::Configure(_) | Self::Input { .. } | Self::Scroll(_) | Self::Context(_) => {
+      Self::Configure(_)
+      | Self::Input { .. }
+      | Self::Scroll(_)
+      | Self::Key(_)
+      | Self::Context(_) => {
         unreachable!()
       }
     };
@@ -227,6 +264,15 @@ impl Control {
           x: values[2] as i32,
           y: values[3] as i32,
         }),
+        12 if values[2] <= 1 && values[3] == 0 => {
+          let key = Key {
+            code: values[0],
+            symbol: values[1],
+            pressed: values[2] == 1,
+          };
+          key.validate()?;
+          Ok(Self::Key(key))
+        }
         _ => Err(invalid("invalid extended control record")),
       };
     }
@@ -244,6 +290,9 @@ impl Control {
       (11, value) if value as u32 <= 1024 && value >> 32 <= 1024 => Ok(Self::WidgetSize {
         width: value as u32,
         height: (value >> 32) as u32,
+      }),
+      (13, 0..=1) => Ok(Self::PanelSwitch {
+        forward: serial == 1,
       }),
       _ => Err(invalid("unknown control record")),
     }
@@ -375,6 +424,13 @@ pub fn run(path: &Path, approval: Option<Approval>) -> io::Result<()> {
           .ok_or_else(|| invalid("scroll before configuration"))?
           .display
           .scroll(scroll, started.elapsed().as_millis() as u32)
+          .map_err(graphics_error)?,
+        #[cfg(feature = "graphics")]
+        Control::Key(key) => graphics
+          .as_mut()
+          .ok_or_else(|| invalid("input before configuration"))?
+          .display
+          .key(key, started.elapsed().as_millis() as u32)
           .map_err(graphics_error)?,
         _ => return Err(invalid("unexpected or stale host control record")),
       }
@@ -591,6 +647,9 @@ impl RunningGraphics {
       if let Some(size) = requests.widget_size.take() {
         size.send(channel)?;
       }
+      if let Some(switch) = requests.panel_switch.take() {
+        switch.send(channel)?;
+      }
     }
     let mut bytes = [0u8; 4096];
     if let Some(log) = &mut self.child.stderr {
@@ -633,6 +692,28 @@ fn invalid(message: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn panel_switch_carries_only_one_direction() {
+    let (sender, receiver) = Channel::pair().unwrap();
+    for forward in [false, true] {
+      let intent = Control::PanelSwitch { forward };
+      intent.send(&sender).unwrap();
+      let packet = receiver.receive().unwrap();
+      assert_eq!(packet.bytes.len(), 16);
+      assert!(packet.fds.is_empty());
+      let mut invalid = packet.bytes.clone();
+      assert_eq!(Control::decode(packet).unwrap(), intent);
+      invalid[8..16].copy_from_slice(&2u64.to_le_bytes());
+      assert!(
+        Control::decode(Packet {
+          bytes: invalid,
+          fds: vec![]
+        })
+        .is_err()
+      );
+    }
+  }
 
   #[test]
   fn widget_size_is_bounded_descriptor_free_metadata() {
@@ -819,6 +900,50 @@ mod tests {
       assert!(Control::Scroll(scroll).send(&sender).is_err());
     }
   }
+  #[test]
+  fn logical_key_records_are_bounded_and_cannot_carry_extra_fields() {
+    let (sender, receiver) = Channel::pair().unwrap();
+    for pressed in [true, false] {
+      let key = Control::Key(Key {
+        code: 9,
+        symbol: 0x0100_03bb,
+        pressed,
+      });
+      key.send(&sender).unwrap();
+      let packet = receiver.receive().unwrap();
+      assert_eq!(
+        Control::decode(Packet {
+          bytes: packet.bytes.clone(),
+          fds: vec![]
+        })
+        .unwrap(),
+        key
+      );
+      for (offset, value) in [(8, 7u32), (8, 768), (12, 0x2000_0000), (16, 2), (20, 1)] {
+        let mut bytes = packet.bytes.clone();
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        assert!(Control::decode(Packet { bytes, fds: vec![] }).is_err());
+      }
+      let mut bytes = packet.bytes.clone();
+      bytes[12..16].copy_from_slice(&0u32.to_le_bytes());
+      assert_eq!(
+        Control::decode(Packet { bytes, fds: vec![] }).is_err(),
+        pressed
+      );
+    }
+    for (code, symbol) in [(0, 1), (768, 1), (9, 0), (9, u32::MAX)] {
+      assert!(
+        Control::Key(Key {
+          code,
+          symbol,
+          pressed: true
+        })
+        .send(&sender)
+        .is_err()
+      );
+    }
+  }
+
   #[test]
   fn control_codec_rejects_unknown_fields_and_unexpected_descriptors() {
     let packet = |bytes| Packet {

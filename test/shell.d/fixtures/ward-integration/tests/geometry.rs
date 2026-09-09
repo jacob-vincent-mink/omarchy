@@ -45,7 +45,7 @@ ShellRoot {{
   Services.PluginDesktopGeometry {{ id: geometry; active: true }}
   FileView {{ id: result; path: Quickshell.env("TEST_SNAPSHOT") }}
   Timer {{ interval: 100; running: true; repeat: true
-    onTriggered: result.setText(JSON.stringify(geometry.forScreen(Quickshell.screens[0])))
+    onTriggered: {{ gc(); result.setText(JSON.stringify(geometry.forScreen(Quickshell.screens[0]))) }}
   }}
   FloatingWindow {{ implicitWidth: 400; implicitHeight: 240 }}
 }}
@@ -92,9 +92,7 @@ ShellRoot {{
   let start = Instant::now();
   let mut event: Option<UnixStream> = None;
   let mut wait = |clients: &Value, message: Option<&[u8]>, ready: &dyn Fn(&Snapshot) -> bool| {
-    if let Some(message) = message {
-      event.as_mut().unwrap().write_all(message).unwrap();
-    }
+    let mut message = message;
     let deadline = Instant::now() + Duration::from_secs(4);
     while Instant::now() < deadline {
       if event.is_none() {
@@ -121,6 +119,14 @@ ShellRoot {{
         stream
           .write_all(&serde_json::to_vec(&response).unwrap())
           .unwrap();
+        // An earlier creating query may still be in flight. Publish the new
+        // client list before its removal event so it cannot recreate a stale
+        // object after that event during rapid model churn.
+        if &bytes[..length] == b"j/clients" {
+          if let Some(message) = message.take() {
+            event.as_mut().unwrap().write_all(message).unwrap();
+          }
+        }
       }
       display.step(start.elapsed().as_millis() as u32);
       if let Ok(bytes) = fs::read(&output) {
@@ -167,4 +173,13 @@ ShellRoot {{
   });
   let reopened = wait(&clients, None, &|snapshot| snapshot.windows.len() == 1);
   assert_ne!(reopened.windows[0].id, initial.windows[0].id);
+  let mut previous = reopened.windows[0].id;
+  for _ in 0..30 {
+    wait(&json!([]), Some(b"closewindow>>deadbeef\n"), &|snapshot| {
+      snapshot.windows.is_empty()
+    });
+    let next = wait(&clients, None, &|snapshot| snapshot.windows.len() == 1);
+    assert_ne!(next.windows[0].id, previous);
+    previous = next.windows[0].id;
+  }
 }

@@ -26,6 +26,20 @@ const MAX_EXECUTABLE: u64 = 64 * 1024 * 1024;
 pub const MAX_OUTPUT: usize = 2 * 1024 * 1024; // Independently for stdout and stderr.
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Lifetime {
+  #[default]
+  Request,
+  Plugin,
+}
+
+impl Lifetime {
+  pub fn is_request(&self) -> bool {
+    *self == Self::Request
+  }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Executable {
@@ -203,7 +217,13 @@ impl Drop for Group {
 
 // Called only after fork. Use only async-signal-safe libc operations: the
 // controller may have other threads holding allocator or library locks.
-unsafe fn guard(owner: i32, kill: i32, events: i32, path: &CString) -> io::Result<()> {
+unsafe fn guard(
+  owner: i32,
+  kill: i32,
+  events: i32,
+  path: &CString,
+  lifetime: Lifetime,
+) -> io::Result<()> {
   unsafe {
     if libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) != 0 {
       return Err(io::Error::last_os_error());
@@ -231,7 +251,15 @@ unsafe fn guard(owner: i32, kill: i32, events: i32, path: &CString) -> io::Resul
       revents: 0,
     });
     if target_fd >= 0 {
-      libc::poll(watched.as_mut_ptr(), 2, TIMEOUT.as_millis() as i32);
+      libc::poll(
+        watched.as_mut_ptr(),
+        2,
+        if lifetime.is_request() {
+          TIMEOUT.as_millis() as i32
+        } else {
+          -1
+        },
+      );
     }
     let completed = libc::waitpid(target, &mut status, libc::WNOHANG) == target;
     if !completed {
@@ -293,6 +321,7 @@ pub struct Job {
   err_eof: bool,
   status: Option<ExitStatus>,
   started: Instant,
+  lifetime: Lifetime,
   finished: bool,
 }
 
@@ -304,6 +333,7 @@ impl Job {
     argv: &[String],
     environment: &Environment,
     paths: &[crate::exec_policy::PluginDir],
+    lifetime: Lifetime,
   ) -> io::Result<Self> {
     let started = Instant::now();
     // Resolve the invocation itself, not just the copy used by the matcher.
@@ -350,7 +380,7 @@ impl Job {
       .stderr(Stdio::piped());
     unsafe {
       command.pre_exec(move || {
-        guard(owner_fd, kill_fd, events_fd, &group_path)?;
+        guard(owner_fd, kill_fd, events_fd, &group_path, lifetime)?;
         if libc::write(member_fd, b"0".as_ptr().cast(), 1) != 1
           // Preserve the spawn error pipe until exec, but inherit only the
           // explicitly selected payload descriptor through that exec.
@@ -378,6 +408,7 @@ impl Job {
       err_eof: false,
       status: None,
       started,
+      lifetime,
       finished: false,
     };
     for fd in [job.stdout.as_raw_fd(), job.stderr.as_raw_fd()] {
@@ -402,7 +433,7 @@ impl Job {
   }
 
   fn poll_inner(&mut self) -> io::Result<Option<Output>> {
-    if self.started.elapsed() >= TIMEOUT {
+    if self.lifetime.is_request() && self.started.elapsed() >= TIMEOUT {
       return Err(io::Error::new(
         io::ErrorKind::TimedOut,
         "host job timed out",

@@ -1,6 +1,6 @@
 use omarchy_ward::{
   exec_policy::{Argument, PluginDir, Step, Tree},
-  host_job::{Environment, Executable, Job},
+  host_job::{Environment, Executable, Job, Lifetime},
   revision::Revision,
   supervisor::{Limits, Unit, watchdog},
   worker,
@@ -44,6 +44,7 @@ fn start(executable: &Executable, argv: &[String], environment: &Environment) ->
     argv,
     environment,
     &[],
+    Lifetime::Request,
   )
   .unwrap()
 }
@@ -154,7 +155,8 @@ fn job_controller_child() {
       &["fixture".into()].into(),
       &identity,
       &environment,
-      &[]
+      &[],
+      Lifetime::Request,
     )
     .is_err(),
     "a retargeted alias accepted different executable bytes"
@@ -222,6 +224,7 @@ fn job_controller_child() {
     &symbolic,
     &environment,
     &paths,
+    Lifetime::Request,
   )
   .unwrap();
   let output = finish(&mut read).unwrap();
@@ -282,6 +285,7 @@ fn job_controller_child() {
       &args,
       &environment,
       &[],
+      Lifetime::Request,
     )
     .is_err(),
     "a later invocation accepted changed executable bytes"
@@ -301,6 +305,7 @@ fn job_controller_child() {
       &changed,
       &environment,
       &[],
+      Lifetime::Request,
     )
     .is_err()
   );
@@ -312,6 +317,7 @@ fn job_controller_child() {
       &args,
       &environment,
       &[],
+      Lifetime::Request,
     )
     .is_err()
   );
@@ -324,7 +330,7 @@ fn job_controller_child() {
         .contains("output exceeds")
     );
   }
-  for mode in ["cancel", "drop", "exit", "timeout"] {
+  for mode in ["cancel", "drop", "exit", "timeout", "plugin"] {
     let socket = root.join(format!("{mode}.socket"));
     let gate = root.join(format!("{mode}.exit"));
     let listener = UnixListener::bind(&socket).unwrap();
@@ -334,7 +340,20 @@ fn job_controller_child() {
       socket.to_str().unwrap().into(),
       gate.to_str().unwrap().into(),
     ];
-    let mut job = start(&executable, &args, &environment);
+    let mut job = Job::start(
+      &executable,
+      &policy(&args),
+      &["fixture".into()].into(),
+      &args,
+      &environment,
+      &[],
+      if mode == "plugin" {
+        Lifetime::Plugin
+      } else {
+        Lifetime::Request
+      },
+    )
+    .unwrap();
     let process = peer(&listener, || job.poll().unwrap().is_none());
     match mode {
       "cancel" => job.cancel().unwrap(),
@@ -352,6 +371,19 @@ fn job_controller_child() {
         finish(&mut job).unwrap_err().kind(),
         io::ErrorKind::TimedOut
       ),
+      "plugin" => {
+        let until = Instant::now() + Duration::from_secs(11);
+        while Instant::now() < until {
+          watchdog().unwrap();
+          assert!(
+            job.poll().unwrap().is_none(),
+            "plugin-lifetime job ended early"
+          );
+          std::thread::sleep(Duration::from_millis(10));
+        }
+        fs::write(&gate, "exit").unwrap();
+        assert_eq!(finish(&mut job).unwrap().status.code(), Some(17));
+      }
       _ => unreachable!(),
     }
     assert_dead(process);
@@ -390,7 +422,16 @@ fn job_owner_child() {
     root.join("owner.socket").to_str().unwrap().into(),
     root.join("never-exit").to_str().unwrap().into(),
   ];
-  let job = start(&executable, &args, &Environment::capture().unwrap());
+  let job = Job::start(
+    &executable,
+    &policy(&args),
+    &["fixture".into()].into(),
+    &args,
+    &Environment::capture().unwrap(),
+    &[],
+    Lifetime::Plugin,
+  )
+  .unwrap();
   std::mem::forget(job);
   let deadline = Instant::now() + Duration::from_secs(2);
   while !root.join("owner.exit").exists() {
