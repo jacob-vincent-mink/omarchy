@@ -1,6 +1,10 @@
-# Sandboxed plugin authoring (preview)
+# Ward plugin authoring (preview)
 
-This is the developer and coding-agent reference for the sandbox currently implemented on this branch, not the trusted in-process plugin contract. Native payload installation, real bar slots and final desktop compatibility gates remain unfinished; see the [development preview](omarchy-shell.md#sandboxed-plugin-development-preview) and [implementation inventory](../plans/sandboxed-plugin-grants.md). Proposed shortcuts are not accepted syntax until implemented.
+Ward is Omarchy's isolated plugin security system. This is the developer and coding-agent reference for its sandbox currently implemented on this branch, not the trusted in-process plugin contract. Native payload installation, real bar slots and final desktop compatibility gates remain unfinished; see the [development preview](omarchy-shell.md#sandboxed-plugin-development-preview) and [implementation inventory](../plans/sandboxed-plugin-grants.md). Proposed shortcuts are not accepted syntax until implemented.
+
+Ward's product scope is third-party plugins distributed through the Omarchy plugin registry. Omarchy's own first-party plugins remain in-process, and users may explicitly choose the trusted in-process path for their own plugins. Ward is not a restriction on that choice. Trust must come from the installation decision, not a downloaded manifest claiming to be first-party. This preview still selects Ward through the `sandbox` declaration; registry provenance and mandatory registry-install routing are not yet implemented.
+
+Ward's source and tests use synthetic plugins and generic resource fixtures. Compatibility checks for concrete third-party plugins belong outside `native/ward`; first-party plugins are not sandbox-port targets.
 
 ## Start here
 
@@ -166,7 +170,7 @@ Limits: 32 arguments, 8 KiB per argument, 64 KiB combined argv, 512 nodes and 64
 }
 ```
 
-Place it at `sandbox.requests.exec.player`; select with `--exec player:chime`. Executable paths must be absolute and canonical at approval, name an installed regular executable and contain no traversal. Approval pins its bytes; updating the executable requires reapproval. This does not pin libraries, configuration or descendants. The matcher cannot infer CLI safety. Never permit arbitrary shell programs, GraphQL documents or CLI flags merely to shorten a declaration.
+Place it at `sandbox.requests.exec.player`; select with `--exec player:chime`. Executable paths must be absolute, contain no traversal and resolve to an installed regular executable. Symlink aliases are supported: the declared path remains the invocation name (`argv[0]`), while approval pins the resolved executable's bytes. Each launch resolves the path again and executes a sealed copy only if its bytes still match; changing the binary requires reapproval. This does not pin libraries, configuration or descendants. The matcher cannot infer CLI safety. Never permit arbitrary shell programs, GraphQL documents or CLI flags merely to shorten a declaration.
 
 Host jobs preserve host user/group mappings and run a sealed executable copy inside a child cgroup under the controller's resource limits. They do not add a filesystem or user-namespace sandbox to the approved CLI. For a shebang script, the interpreter receives a `/proc/self/fd/...` script path, so scripts that locate adjacent files through `$0` need explicit paths. Normal exit, cancellation and owner death terminate remaining job-group processes; cleanup waits for the kernel's empty-group event with a one-second bound. Effects handed to another host service are still outside that cleanup.
 
@@ -193,15 +197,50 @@ Read `/run/plugin/grants.json`, not the manifest, to discover admitted access. T
 
 | Operation | Worker interface | Limits/semantics |
 | --- | --- | --- |
-| Host CLI | `/bootstrap --exec <name> <argv...>`; shared alias `omarchy-plugin-exec` | Literal argv, binary stdout/stderr, CLI exit status. Host cwd `/`, EOF stdin, no caller-selected environment. Two concurrent jobs, ten-second job deadline, 2 MiB each stdout/stderr. Forwarder may retry explicit not-started busy/rate-limit replies for up to 120 seconds; never block the UI thread |
-| HTTP | `/bootstrap --http [metadata-file]`; alias `omarchy-plugin-http` | One JSON stdin request: `scope`, `method`, `url`, optional `body`. Raw response on stdout; optional status/selected-header JSON in a worker-local file. 2 MiB response body, twelve concurrent jobs, ten-second deadline. Check HTTP status separately from transport success |
+| Host CLI | `/bootstrap --exec <name> <argv...>`; shared alias `omarchy-ward-exec` | Literal argv, binary stdout/stderr, CLI exit status. Host cwd `/`, EOF stdin, no caller-selected environment. Two concurrent jobs, ten-second job deadline, 2 MiB each stdout/stderr. Forwarder may retry explicit not-started busy/rate-limit replies for up to 120 seconds; never block the UI thread |
+| HTTP | `/bootstrap --http [metadata-file]`; alias `omarchy-ward-http` | One JSON stdin request: `scope`, `method`, `url`, optional `body`. Raw response on stdout; optional status/selected-header JSON in a worker-local file. 2 MiB response body, twelve concurrent jobs, ten-second deadline. Check HTTP status separately from transport success |
 | Notification | `/bootstrap --notify <title> <body>` | Title 1–160 bytes, body up to 2,048 bytes, constrained controls, no actions/images. Fixed plugin identity; two deliveries per 30 seconds |
 | Open link | `/bootstrap --open-url browser <url>` or `... webapp <url>` | HTTP(S) up to 2,048 bytes, no whitespace/controls/backslashes; two deliveries per 30 seconds. Success means launch accepted, not page loaded |
 | Shared link aliases | `omarchy-launch-browser <url>`, `omarchy-launch-webapp <url>` | Exactly one URL argument; denial produces shared-runtime feedback |
 | Save own settings | Own shell API's `updateEntryInline(id, patch)`; low-level `/bootstrap --settings '<JSON object>'` | Widgets reach the API through `bar.shell`; service/overlay Items receive `shell`. Only selected writable keys. Host merges without deleting unselected values. Shared API acceptance queues a save, not durable confirmation; rejected saves restore host values and show feedback |
 | Existing player | MPRIS through the worker's filtered `DBUS_SESSION_BUS_ADDRESS` | Exact selected player at `/org/mpris/MediaPlayer2`: property Get/GetAll, introspection, Next/Previous/Pause/PlayPause/Stop/Play/Seek/SetPosition and PropertiesChanged/Seeked. No Properties.Set, OpenUri, Raise, Quit, arbitrary bus access or player publication |
 
-All broker operations share a 32-connections-per-second admission ceiling. Check helper exit codes and handle failures. Denial, timeout and remote application errors are not interchangeable; blindly retrying an ambiguous mutation can duplicate effects. Revocation cancels owned jobs and stops the worker but cannot undo completed writes or retract effects delegated to other host services.
+All broker operations share a 32-connections-per-second admission ceiling. Revocation cancels owned jobs and stops the worker but cannot undo completed writes or retract effects delegated to other host services.
+
+### Approved grants are signed into the record
+
+The review is what turns a request into durable authority: every `approve` (and every later publish — launch, `stop`, `revoke`, `recover`) re-mints an ed25519 signature over `{ id, revision, enabled, grants }`, and every read re-verifies it before the grants are trusted. Runtime state (`epoch`, `active_unit`) is deliberately excluded so the controller can advance it to start/stop a worker without holding the signing key. The consequence is that a hand-edit of the store's grant record — adding a permission the reviewer never approved — fails closed at dispatch and at launch. The private key lives next to the records (`secrets/signing.key`, mode 0600), so this seals against accidental and editorial edits and against writers working outside the review tool; it is not a hardware-backed boundary, and a determined same-account process that can read the key can also re-sign. Genuine binding to a human reviewer needs the key outside the desktop account.
+
+### Machine-readable operation results
+
+Prefix a direct bootstrap operation with `--json` to receive one versioned JSON record on stdout, including the operation's output. There is no result file or extra pipe:
+
+```text
+/bootstrap --json --exec player --volume 0.5 '$OMARCHY_PLUGIN_PATH/sounds/chime.wav'
+/bootstrap --json --http
+```
+
+The HTTP command still reads its request from stdin; JSON mode includes response headers and body in the record and accepts no metadata-file argument. Notification, settings and open-link commands accept the same prefix. Internal worker/controller/management modes do not. No extra permission is granted by requesting JSON. Quickshell can use `Process` with `StdioCollector` and parse the complete stdout using `JSON.parse(text)` in `onStreamFinished`; catch parsing failures as unknown outcomes. No native QML adapter is needed.
+
+Every complete record contains `version: 1` and `status`:
+
+| `status` | Meaning |
+| --- | --- |
+| `completed` | The command returned an outcome, HTTP returned a response, or the notification/settings/link helper acknowledged delivery. This does **not** mean application success |
+| `denied` | Ward rejected the operation's grant or selected arguments/scope; the requested operation was not started |
+| `invalid` | Malformed or unsupported request; the requested operation was not started |
+| `busy`, `rate_limited` | Capacity/admission rejection; this attempt was not started |
+| `failed` | Operational failure, including executable verification, launch, transport or output delivery. Not a grant denial; effects may already have occurred |
+| `timed_out` | No completed outcome within the deadline; effects may already have occurred |
+| `unavailable` | Admission snapshot, broker connection or a valid reply was unavailable; do not assume the operation never ran |
+
+A completed command adds `exitCode` or `signal`, plus `stdout` and `stderr`; a completed HTTP response adds `httpStatus`, the selected `headers` map and `body`. Output values are strings when the original bytes are valid UTF-8 (including escaped controls), otherwise objects of the form `{ "base64": "..." }` using standard padded Base64. Bytes are never replaced or silently discarded. Existing 2 MiB per-stream/body bounds apply before encoding; JSON escaping or Base64 can enlarge the encoded record. Child output cannot impersonate a Ward status because it is serialized as data inside the record, not appended alongside it.
+
+For example, `{"version":1,"status":"completed","exitCode":1,"stdout":"","stderr":"invalid input"}` means the host command ran and exited 1, while `{"version":1,"status":"denied"}` means Ward refused it. HTTP 403 is `completed` with `httpStatus: 403`, not Ward `denied`. In JSON mode, helper exit 0 means a `completed` outcome was emitted, even for command exit 1 or HTTP 403; Ward errors return exit 1. Inspect the record's application exit/status separately. Delivery acknowledgement does not prove a browser loaded a page or a notification was seen.
+
+Without `--json`, raw mode is unchanged: binary stdout/stderr and the command's exit code (128 + signal for signal termination), raw HTTP body with the optional metadata file, and exit 1 for HTTP status >= 400 or Ward errors. Raw exit 1 alone cannot classify the failure. Shared aliases retain this raw behavior; use `/bootstrap --json ...` directly for structured results.
+
+Missing, empty, partial, unknown-version or unknown-status results are **unknown outcomes**, not permission denial or proof that nothing happened. Writing stdout can fail after an external effect. Never blindly retry `failed`, `timed_out`, `unavailable` or an unknown outcome for a mutation. The exec forwarder already retries only explicit not-started busy/rate-limit conditions for up to 120 seconds. The read-only grants snapshot lets the caller identify intentionally absent broker sockets, but the host still rechecks live approval on every request.
 
 The shared runtime provides packaged `qs.Commons`/`qs.Ui`, detached live theme/style/settings, widget `bar`/`settings` properties and own-service/panel operations. Widgets reach the own shell API through `bar.shell`; service/overlay Items may declare `shell`, `manifest` and `omarchyPath` properties for injection. The API's `serviceFor(id)`, `summon`, `hide`, `toggle` and `isPluginOpen` are scoped to this plugin. Panels expose `open(payloadJson)`, `close()` and `opened`; the host manages input/dismissal. These are not access to other plugins, desktop config, authentication objects or compositor sockets. Worker `OMARCHY_PATH` names the restricted runtime, not the desktop source checkout.
 
@@ -218,6 +257,6 @@ omarchy plugin approve example.pet --revision <sha256> --allow-storage --read-se
 omarchy plugin enable example.pet
 ```
 
-`--yes` skips terminal confirmation, not revision binding or grant selection; agents need authority for that approval. `omarchy plugin review <id> --ui` opens the same workflow. Missing required access prevents activation. `disable` revokes and stops; `update` changes the checkout but does not approve it. Re-review and reapprove changed code. Never remove `sandbox` to work around startup failure.
+`--yes` skips terminal confirmation, not revision binding or grant selection; agents need authority for that approval. `omarchy plugin review <id> --ui` opens the same workflow. Missing required access prevents activation. `stop` halts a running instance without disconnecting its approval — it is the non-destructive predecessor to a re-approval, which requires no active instance (the old path forced a destructive `revoke` first). `disable` revokes and stops; `update` changes the checkout but does not approve it. Re-review and reapprove changed code. Never remove `sandbox` to work around startup failure.
 
 Keep this reference, parsing/enforcement, CLI/reviewer selection and tests synchronized. Examples must pass the native parser. See the [test guide](testing.md). GPU fixtures need short wall-clock and explicit memory/swap limits around the outer test process as well as worker limits; do not leave capture loops running between interactions.

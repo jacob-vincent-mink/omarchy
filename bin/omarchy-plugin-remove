@@ -99,7 +99,7 @@ fi
 
 if [[ $sandboxed == "true" ]]; then
   # Stop and revoke before deleting the checkout, even when no shell is up.
-  jq -cn --arg id "$id" '{operation: "revoke", id: $id}' | omarchy-plugin-runtime >/dev/null
+  jq -cn --arg id "$id" '{operation: "revoke", id: $id}' | omarchy-ward-runtime >/dev/null
   omarchy-shell -q shell setPluginEnabled "$id" false >/dev/null
 elif [[ $was_enabled == "true" ]]; then
   omarchy-shell shell setPluginEnabled "$id" false >/dev/null

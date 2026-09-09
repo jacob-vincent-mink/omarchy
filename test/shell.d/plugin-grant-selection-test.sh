@@ -3,8 +3,8 @@
 set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
-if [[ -z ${OMARCHY_TEST_PLUGIN_HOST:-} ]]; then
-  pass "set OMARCHY_TEST_PLUGIN_HOST to test explicit filesystem grant selection"
+if [[ -z ${OMARCHY_TEST_WARD_HOST:-} ]]; then
+  pass "set OMARCHY_TEST_WARD_HOST to test explicit filesystem grant selection"
   exit 0
 fi
 
@@ -37,8 +37,8 @@ fs.writeFileSync(path.join(plugin, 'manifest.json'), JSON.stringify({
   } }
 }))
 const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, '.config'),
-  OMARCHY_PATH: root, OMARCHY_PLUGIN_STORE: path.join(temp, 'store'),
-  OMARCHY_PLUGIN_HOST: process.env.OMARCHY_TEST_PLUGIN_HOST, PATH: `${root}/bin:/usr/bin` }
+  OMARCHY_PATH: root, OMARCHY_WARD_STORE: path.join(temp, 'store'),
+  OMARCHY_WARD_HOST: process.env.OMARCHY_TEST_WARD_HOST, PATH: `${root}/bin:/usr/bin` }
 function run(name, args, success = true) {
   const result = spawnSync(name, args, { env, encoding: 'utf8', timeout: 10000 })
   assertEqual(result.status === 0, success, `${name} exit status matches expected outcome`)

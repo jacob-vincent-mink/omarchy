@@ -13,7 +13,7 @@ deterministic raw-Wayland-client test that proves the transform is honored end
 to end (rendering, the input mask, and input hit-testing). No changes to the
 renderer, `presentation.rs`, or `controller.rs`.
 
-### `native/plugin-host/src/graphics.rs`
+### `native/ward/src/graphics.rs`
 
 - `use smithay::wayland::viewporter::ViewporterState`
 - `_viewporter: ViewporterState::new::<App>(&dh)` created alongside the other
@@ -51,7 +51,7 @@ fractional-scale protocol (`wp_fractional_scale`) or by leaving the destination
 automatic and relying on fractional source coordinates — the former is the
 platform's path (see limitations).
 
-### `native/plugin-host/tests/viewporter.rs` (reworked)
+### `native/ward/tests/viewporter.rs` (reworked)
 
 A real Wayland client (this test process speaking the wire protocol) connects
 to the in-process `Graphics` compositor on a private socket. Compositor setup,
@@ -102,7 +102,7 @@ compositor; the live desktop compositor is never touched.
 - `tests/surfaces.rs` — passed, `OMARCHY_TEST_GRAPHICS=1
   OMARCHY_TEST_SYSTEMD=1` (spawns a Quickshell worker on the private display).
 - `tests/qt.rs` — passed, additionally `OMARCHY_TEST_QT_BRIDGE=<built qml dir>`.
-  The QML module (`Omarchy.PluginHost` with `PluginView`) must be built from
+  The QML module (`Omarchy.Ward` with `PluginView`) must be built from
   this worktree's `qt/CMakeLists.txt` against the staticlib built with
   `--features graphics,qt-bridge` (a stale cache from other activation work did
   not register `PluginView`).

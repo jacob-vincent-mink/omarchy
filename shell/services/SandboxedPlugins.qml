@@ -21,10 +21,10 @@ QtObject {
       if (root.bar && root.bar.activePopout) root.dismissAll(root.bar.activePopout)
     }
   }
-  property string store: Quickshell.env("OMARCHY_PLUGIN_STORE")
-    || (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state") + "/omarchy/plugin-host"
-  property string controller: Quickshell.env("OMARCHY_PLUGIN_HOST")
-    || Quickshell.env("OMARCHY_PATH") + "/lib/omarchy-plugin-host"
+  property string store: Quickshell.env("OMARCHY_WARD_STORE")
+    || (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state") + "/omarchy/ward"
+  property string controller: Quickshell.env("OMARCHY_WARD_HOST")
+    || Quickshell.env("OMARCHY_PATH") + "/lib/omarchy-ward"
   signal changed()
   signal activated(string pluginId)
 

@@ -3,8 +3,8 @@
 set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
-if [[ -z ${OMARCHY_TEST_PLUGIN_HOST:-} ]]; then
-  pass "set OMARCHY_TEST_PLUGIN_HOST to a built runtime for plugin command integration"
+if [[ -z ${OMARCHY_TEST_WARD_HOST:-} ]]; then
+  pass "set OMARCHY_TEST_WARD_HOST to a built runtime for plugin command integration"
   exit 0
 fi
 
@@ -21,8 +21,8 @@ const installed = path.join(home, '.config/omarchy/plugins/acme.review')
 for (const directory of [home, source, stubs]) fs.mkdirSync(directory)
 const env = {
   ...process.env, HOME: home, OMARCHY_PATH: root,
-  OMARCHY_PLUGIN_HOST: process.env.OMARCHY_TEST_PLUGIN_HOST,
-  OMARCHY_PLUGIN_STORE: store, PATH: `${stubs}:${root}/bin:${process.env.PATH}`
+  OMARCHY_WARD_HOST: process.env.OMARCHY_TEST_WARD_HOST,
+  OMARCHY_WARD_STORE: store, PATH: `${stubs}:${root}/bin:${process.env.PATH}`
 }
 function run(command, args, success = true) {
   const result = spawnSync(command, args, { env, encoding: 'utf8', timeout: 10000 })

@@ -84,7 +84,7 @@ placement=$(jq -cn \
 
 if omarchy-plugin-catalog | jq -e --arg id "$id" 'any(.[]; .id == $id and .sandboxed)' >/dev/null; then
   [[ $placement == "{}" ]] || fail "native bar placement is not available yet"
-  approvals=$(printf '%s' '{"operation":"list"}' | omarchy-plugin-runtime)
+  approvals=$(printf '%s' '{"operation":"list"}' | omarchy-ward-runtime)
   jq -e --arg id "$id" 'any(.[]; .id == $id and .approved and .error == null)' <<<"$approvals" >/dev/null ||
     fail "review and approve an exact revision first: omarchy plugin review $id"
 fi

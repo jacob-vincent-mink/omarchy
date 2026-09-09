@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# omarchy:summary=Snapshot an installed sandbox plugin and review its requested access
+# omarchy:summary=Snapshot an installed Ward plugin and review its requested access
 # omarchy:args=<id> [--json|--ui]
 # omarchy:examples=omarchy plugin review acme.weather
 
@@ -34,7 +34,7 @@ if [[ ${1:-} == "--ui" ]]; then
   [[ $result == "ok" ]] || { echo "omarchy-plugin-review: review panel is unavailable; restart the updated shell" >&2; exit 1; }
   exit 0
 fi
-review=$(jq -cn --arg path "$source_dir" '{operation: "import", path: $path}' | omarchy-plugin-runtime)
+review=$(jq -cn --arg path "$source_dir" '{operation: "import", path: $path}' | omarchy-ward-runtime)
 
 if [[ ${1:-} == "--json" ]]; then
   printf '%s\n' "$review"

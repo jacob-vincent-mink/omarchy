@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# omarchy:summary=Approve an exact sandbox plugin revision and explicitly selected access
+# omarchy:summary=Approve an exact Ward plugin revision and explicitly selected access
 # omarchy:args=<id> --revision <sha256> [--read <slot=folder>] [--write <slot=folder>] [--read-setting <key>] [--write-setting <key>] [--http <scope>] [--exec <name:leaf>] [--media <service>] [--allow-network] [--allow-notifications] [--allow-open-urls] [--allow-storage] [--yes]
 # omarchy:examples=omarchy plugin approve acme.weather --revision <sha256> --allow-network
 
@@ -103,5 +103,5 @@ if (( ! assume_yes )); then
   gum confirm "Approve this revision and only this access?" || fail "aborted"
 fi
 jq -cn --arg id "$id" --arg revision "$revision" --argjson selections "$selections" \
-  '{operation: "approve", id: $id, revision: $revision, selections: $selections}' | omarchy-plugin-runtime >/dev/null
+  '{operation: "approve", id: $id, revision: $revision, selections: $selections}' | omarchy-ward-runtime >/dev/null
 echo "Approved $id at $revision. No plugin was started."
