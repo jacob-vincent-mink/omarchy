@@ -19,6 +19,11 @@ fn main() -> io::Result<()> {
       };
       omarchy_plugin_host::notification::request(text(title)?, text(body)?)
     }
+    [mode, settings] if mode == "--settings" => omarchy_plugin_host::requests::save_settings(
+      settings
+        .to_str()
+        .ok_or_else(|| io::Error::other("settings require UTF-8 JSON"))?,
+    ),
     [mode] if mode == "--worker" || mode == "--omarchy-worker" => {
       omarchy_plugin_host::worker::restrict_bootstrap()?;
       Err(

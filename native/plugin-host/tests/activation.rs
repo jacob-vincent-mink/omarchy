@@ -56,7 +56,7 @@ fn activation(review_ui: bool) {
   }
   fs::write(plugin.join("manifest.json"), serde_json::to_vec(&serde_json::json!({
     "schemaVersion": 1, "id": "test.activation", "name": "Activation", "version": "1", "kinds": ["panel"],
-    "entryPoints": {"panel": "worker.qml"}, "sandbox": {"version": 1, "entryPoint": "worker.qml", "requests": {"network": true, "notifications": true, "read": ["notes"]}}
+    "entryPoints": {"panel": "worker.qml"}, "sandbox": {"version": 1, "entryPoint": "worker.qml", "requests": {"network": true, "notifications": true, "settings": true, "read": ["notes"]}}
   })).unwrap()).unwrap();
   fs::write(
     plugin.join("worker.qml"),
@@ -131,7 +131,8 @@ ShellRoot {{
         scrollY: scroll.contentItem.contentY, scrollMoving: scroll.contentItem.moving,
         folders: review.folders, folderField: point("review-folder-notes"),
         folderFocus: folder && folder.activeFocus,
-        approved: review.selectionApproved, current: review.current, network: review.network, notifications: review.notifications,
+        approved: review.selectionApproved, current: review.current, network: review.network, notifications: review.notifications, settings: review.settings,
+        settingsButton: point("review-settings"),
         notificationButton: point("review-notifications"), approvalButton: point("review-approve"), revokeButton: point("review-revoke"), closeButton: point("review-close")}})
     }}
   }}
@@ -219,6 +220,7 @@ ShellRoot {{
       assert_eq!(state["error"], "");
       assert_eq!(state["network"], false);
       assert_eq!(state["notifications"], false);
+      assert_eq!(state["settings"], false);
       assert_eq!(state["current"]["approved"], false);
       click(&state, "notificationButton");
       wait(&|state| state["notifications"] == true);
@@ -231,6 +233,8 @@ ShellRoot {{
       let state = wait(&|state| {
         state["scrollY"].as_f64().unwrap_or(0.0) > 0.0 && state["scrollMoving"] == false
       });
+      click(&state, "settingsButton");
+      let state = wait(&|state| state["settings"] == true);
       click(&state, "folderField");
       wait(&|state| state["folderFocus"] == true);
       progress.send(Stage::Key(53)).unwrap(); // x: an invalid relative folder
@@ -259,6 +263,7 @@ ShellRoot {{
       );
       assert_eq!(state["current"]["grants"]["network"], false);
       assert_eq!(state["current"]["grants"]["notifications"], true);
+      assert_eq!(state["current"]["grants"]["settings"], true);
       assert_eq!(state["current"]["grants"]["read"], serde_json::json!({}));
       capture("approved");
       click(&state, "approvalButton");
@@ -278,6 +283,14 @@ ShellRoot {{
       assert_eq!(
         state["notifications"], false,
         "reopen silently selected an existing grant"
+      );
+      assert_eq!(
+        state["settings"], false,
+        "reopen silently selected settings access"
+      );
+      assert_eq!(
+        state["current"]["grants"]["settings"], true,
+        "reopen changed saved settings access"
       );
       assert_eq!(
         state["current"]["grants"]["notifications"], true,

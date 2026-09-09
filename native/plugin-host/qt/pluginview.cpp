@@ -119,15 +119,23 @@ PluginView::PluginView(QQuickItem *parent) : QQuickItem(parent) {
   connect(&m_timer, &QTimer::timeout, this, &PluginView::poll);
 }
 
-void PluginView::start(const QString &store, const QString &id, const QString &controller, int w, int h, int scale) {
+void PluginView::start(const QString &store, const QString &id, const QString &controller, int w, int h, int scale, const QString &context) {
   if (m_started) { fail("PluginView cannot be restarted; create a new host item"); return; }
   m_started = true;
   try {
-    const auto root = store.toUtf8(), name = id.toUtf8(), program = controller.toUtf8();
-    m_session.emplace(omarchy::begin(root.constData(), name.constData(), program.constData(), w, h, scale));
+    const auto root = store.toUtf8(), name = id.toUtf8(), program = controller.toUtf8(), json = context.toUtf8();
+    m_session.emplace(omarchy::begin(root.constData(), name.constData(), program.constData(), w, h, scale, json.constData()));
     m_requestedViewport = QSize(w, h);
     m_requestedScale = scale;
     m_timer.start();
+  } catch (const rust::Error &error) { fail(QString::fromUtf8(error.what())); }
+}
+
+void PluginView::setContext(const QString &context) {
+  if (!m_session) return;
+  try {
+    const auto json = context.toUtf8();
+    omarchy::context(**m_session, json.constData());
   } catch (const rust::Error &error) { fail(QString::fromUtf8(error.what())); }
 }
 

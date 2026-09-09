@@ -1,165 +1,12 @@
-//! The worker may request text, never a desktop action, image, application
-//! identity, executable, or notification replacement identifier.
-use crate::channel::{Channel, Listener, Packet};
+//! Notification text policy and worker-side helper; transport is shared with
+//! other explicitly granted operations in requests.rs.
+use crate::channel::{Channel, Packet};
 use serde::{Deserialize, Serialize};
 use std::{
-  fs::{File, OpenOptions},
   io,
-  os::unix::fs::OpenOptionsExt,
-  path::{Path, PathBuf},
-  process::{Child, Command, Stdio},
+  path::Path,
   time::{Duration, Instant},
 };
-
-/// One explicit operation, with no worker-selected method, executable or identity.
-/// The socket is mounted only for an admitted notification grant. All connected
-/// peers must also belong to this controller's kernel-owned unit.
-pub struct Broker {
-  listener: Listener,
-  socket: File,
-  program: PathBuf,
-  clients: Vec<(Channel, Instant)>,
-  delivery: Option<Delivery>,
-  budget: Budget,
-  admission_window: Instant,
-  admissions: u32,
-}
-
-struct Delivery {
-  child: Child,
-  channel: Channel,
-  started: Instant,
-}
-
-impl Drop for Delivery {
-  fn drop(&mut self) {
-    let _ = self.child.kill();
-    let _ = self.child.try_wait();
-  }
-}
-
-impl Broker {
-  pub fn start(root: &Path) -> io::Result<Self> {
-    let program = PathBuf::from(
-      std::env::var_os("OMARCHY_PATH")
-        .ok_or_else(|| invalid("OMARCHY_PATH is required for notification delivery"))?,
-    )
-    .join("bin/omarchy-notification-send");
-    if !program.is_absolute() || !program.is_file() {
-      return Err(invalid("notification helper unavailable"));
-    }
-    let path = root.join("notify");
-    let listener = Listener::bind(&path)?;
-    let socket = OpenOptions::new()
-      .read(true)
-      .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
-      .open(path)?;
-    let now = Instant::now();
-    Ok(Self {
-      listener,
-      socket,
-      program,
-      clients: Vec::new(),
-      delivery: None,
-      budget: Budget::new(now),
-      admission_window: now,
-      admissions: 0,
-    })
-  }
-
-  pub(crate) fn socket(&self) -> &File {
-    &self.socket
-  }
-
-  pub fn dispatch(&mut self, approval: &crate::controller::Approval) -> io::Result<()> {
-    let now = Instant::now();
-    if let Some(delivery) = &mut self.delivery {
-      let status = delivery.child.try_wait()?;
-      if status.is_some() || now.duration_since(delivery.started) >= Duration::from_secs(2) {
-        let delivery = self.delivery.take().unwrap();
-        approval.with_notifications(|_| {
-          let status = if status.is_some_and(|status| status.success()) {
-            Status::Delivered
-          } else {
-            Status::Failed
-          };
-          let _ = reply(&delivery.channel, status);
-          Ok(())
-        })?;
-      }
-    }
-    if now.duration_since(self.admission_window) >= Duration::from_secs(1) {
-      self.admission_window = now;
-      self.admissions = 0;
-    }
-    for _ in 0..4 {
-      // Stop accepting until the next window; even failed authentication is
-      // charged, before doing procfs/pidfd work. The kernel backlog is bounded.
-      if self.admissions >= 32 || self.clients.len() >= 4 {
-        break;
-      }
-      let client = match self.listener.accept() {
-        Ok(client) => client,
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-        Err(error) => return Err(error),
-      };
-      self.admissions += 1;
-      if crate::supervisor::authenticate_member(&client).is_ok() {
-        self.clients.push((client, now));
-      }
-    }
-    let mut index = 0;
-    while index < self.clients.len() {
-      let packet = match self.clients[index].0.receive() {
-        Ok(packet) => Some(packet),
-        Err(error)
-          if error.kind() == io::ErrorKind::WouldBlock
-            && now.duration_since(self.clients[index].1) < Duration::from_secs(1) =>
-        {
-          index += 1;
-          continue;
-        }
-        Err(_) => None,
-      };
-      let (client, _) = self.clients.swap_remove(index);
-      let request = packet.and_then(|packet| Request::decode(packet).ok());
-      let Some(request) = request else {
-        let _ = reply(&client, Status::Invalid);
-        continue;
-      };
-      if self.delivery.is_some() {
-        let _ = reply(&client, Status::Busy);
-        continue;
-      }
-      if !self.budget.take(now) {
-        let _ = reply(&client, Status::RateLimited);
-        continue;
-      }
-      self.delivery = approval.with_notifications(|id| {
-        let result = Command::new("/usr/bin/timeout")
-          .args(["--signal=KILL", "1s"])
-          .arg(&self.program)
-          .args(request.arguments(id)?)
-          .stdin(Stdio::null())
-          .stdout(Stdio::null())
-          .stderr(Stdio::null())
-          .spawn();
-        match result {
-          Ok(child) => Ok(Some(Delivery {
-            child,
-            channel: client,
-            started: now,
-          })),
-          Err(_) => {
-            let _ = reply(&client, Status::Failed);
-            Ok(None)
-          }
-        }
-      })?;
-    }
-    Ok(())
-  }
-}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -231,6 +78,7 @@ pub enum Status {
   Busy,
   RateLimited,
   Failed,
+  Denied,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -253,23 +101,27 @@ pub fn request(title: String, body: String) -> io::Result<()> {
 fn request_at(path: &Path, request: Request) -> io::Result<()> {
   let channel = Channel::connect(path)?;
   channel.send(&serde_json::to_vec(&request)?, &[])?;
+  await_reply(&channel)
+}
+
+pub(crate) fn await_reply(channel: &Channel) -> io::Result<()> {
   let deadline = Instant::now() + Duration::from_secs(3);
   loop {
     match channel.receive() {
       Ok(packet) => {
         if !packet.fds.is_empty() {
-          return Err(invalid("notification reply carried descriptors"));
+          return Err(invalid("host reply carried descriptors"));
         }
-        let reply: Reply = serde_json::from_slice(&packet.bytes)
-          .map_err(|_| invalid("invalid notification reply"))?;
+        let reply: Reply =
+          serde_json::from_slice(&packet.bytes).map_err(|_| invalid("invalid host reply"))?;
         if reply.version != 1 {
-          return Err(invalid("unknown notification reply version"));
+          return Err(invalid("unknown host reply version"));
         }
         return if reply.status == Status::Delivered {
           Ok(())
         } else {
           Err(io::Error::other(format!(
-            "notification request rejected: {:?}",
+            "host request rejected: {:?}",
             reply.status
           )))
         };
@@ -284,19 +136,26 @@ fn request_at(path: &Path, request: Request) -> io::Result<()> {
 
 pub(crate) struct Budget {
   tokens: u8,
+  capacity: u8,
+  seconds: u64,
   refilled: Instant,
 }
 impl Budget {
-  pub fn new(now: Instant) -> Self {
+  pub fn new(now: Instant, capacity: u8, seconds: u64) -> Self {
     Self {
-      tokens: 2,
+      tokens: capacity,
+      capacity,
+      seconds,
       refilled: now,
     }
   }
   pub fn take(&mut self, now: Instant) -> bool {
-    let refill = now.saturating_duration_since(self.refilled).as_secs() / 30;
+    let refill = now.saturating_duration_since(self.refilled).as_secs() / self.seconds;
     if refill > 0 {
-      self.tokens = (self.tokens + refill.min(2) as u8).min(2);
+      self.tokens = self
+        .tokens
+        .saturating_add(refill.min(self.capacity as u64) as u8)
+        .min(self.capacity);
       self.refilled = now;
     }
     if self.tokens == 0 {
@@ -325,6 +184,7 @@ fn invalid(message: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::process::Command;
   #[test]
   fn request_cannot_select_authority_or_smuggle_actions() {
     let packet = |bytes: &[u8]| Packet {
@@ -366,7 +226,7 @@ mod tests {
   #[test]
   fn notification_budget_is_small_and_replenishes_without_sleeping() {
     let start = Instant::now();
-    let mut budget = Budget::new(start);
+    let mut budget = Budget::new(start, 2, 30);
     assert!(budget.take(start));
     assert!(budget.take(start));
     assert!(!budget.take(start));

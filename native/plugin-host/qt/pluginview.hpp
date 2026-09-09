@@ -26,7 +26,8 @@ public:
   QVariantList inputRegions() const;
   bool contains(const QPointF &) const override;
   Q_INVOKABLE void start(const QString &store, const QString &id, const QString &controller,
-    int logicalWidth, int logicalHeight, int scale = 1);
+    int logicalWidth, int logicalHeight, int scale = 1, const QString &context = QString());
+  Q_INVOKABLE void setContext(const QString &context);
   Q_INVOKABLE void stop();
   Q_INVOKABLE void configure(int logicalWidth, int logicalHeight, int scale = 1);
   Q_INVOKABLE void dismiss();

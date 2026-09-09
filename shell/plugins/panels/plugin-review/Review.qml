@@ -10,6 +10,7 @@ QtObject {
   property var current: null
   property bool network: false
   property bool notifications: false
+  property bool settings: false
   property string media: ""
   property var folders: ({})
   property bool busy: false
@@ -20,6 +21,7 @@ QtObject {
 
   onNetworkChanged: selectionApproved = false
   onNotificationsChanged: selectionApproved = false
+  onSettingsChanged: selectionApproved = false
   onMediaChanged: selectionApproved = false
   onFoldersChanged: selectionApproved = false
 
@@ -34,6 +36,7 @@ QtObject {
     current = null
     network = false
     notifications = false
+    settings = false
     media = ""
     folders = ({})
     selectionApproved = false
@@ -51,6 +54,7 @@ QtObject {
     var args = ["omarchy-plugin-approve", pluginId, "--revision", revision.revision, "--yes"]
     if (network) args.push("--allow-network")
     if (notifications) args.push("--allow-notifications")
+    if (settings) args.push("--allow-settings")
     if (media.trim()) args.push("--media", media.trim())
     for (var slot in folders) if (folders[slot].trim()) args.push("--read", slot + "=" + folders[slot].trim())
     run("approve", args)

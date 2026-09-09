@@ -1,14 +1,14 @@
 #!/bin/bash
 
 # omarchy:summary=Approve an exact sandbox plugin revision and explicitly selected access
-# omarchy:args=<id> --revision <sha256> [--read <slot=folder>] [--media <service>] [--allow-network] [--allow-notifications] [--yes]
+# omarchy:args=<id> --revision <sha256> [--read <slot=folder>] [--media <service>] [--allow-network] [--allow-notifications] [--allow-settings] [--yes]
 # omarchy:examples=omarchy plugin approve acme.weather --revision <sha256> --allow-network
 
 set -euo pipefail
 
 fail() { echo "omarchy-plugin-approve: $*" >&2; exit 1; }
 if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
-  echo "Usage: omarchy plugin approve <id> --revision <sha256> [--read <slot=folder>] [--media <service>] [--allow-network] [--allow-notifications] [--yes]"
+  echo "Usage: omarchy plugin approve <id> --revision <sha256> [--read <slot=folder>] [--media <service>] [--allow-network] [--allow-notifications] [--allow-settings] [--yes]"
   echo "All access defaults to denied. Approval does not start the plugin."
   exit 0
 fi
@@ -16,7 +16,7 @@ id="${1:-}"
 [[ -n $id ]] || fail "plugin id is required"
 shift
 revision=""
-selections='{"read":{},"network":false,"media":null,"notifications":false}'
+selections='{"read":{},"network":false,"media":null,"notifications":false,"settings":false}'
 assume_yes=0
 while (( $# > 0 )); do
   case "$1" in
@@ -43,6 +43,10 @@ while (( $# > 0 )); do
       ;;
     --allow-notifications)
       selections=$(jq -c '.notifications = true' <<<"$selections")
+      shift
+      ;;
+    --allow-settings)
+      selections=$(jq -c '.settings = true' <<<"$selections")
       shift
       ;;
     --yes | -y)

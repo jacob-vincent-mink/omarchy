@@ -1626,12 +1626,13 @@ ShellRoot {
         var placement = JSON.parse(placementJson || "{}")
         if (shell.pluginRegistry.isSandboxed(id)) {
           if (Object.keys(placement).length !== 0) return "native bar placement is not available yet"
-          var result = shell.sandboxedPlugins.enable(id)
+          var existing = (shell.shellConfig.plugins || []).find(function(entry) { return entry.id === id }) || { id: id }
+          var result = shell.sandboxedPlugins.enable(id, existing)
           if (result === "starting" || result === "ok") {
             shell.mutateShellConfig(function(config) {
               if (!Array.isArray(config.plugins)) config.plugins = []
               config.plugins = config.plugins.filter(function(entry) { return entry.id !== id })
-              config.plugins.push({ id: id, sandbox: true })
+              config.plugins.push(Object.assign({}, existing, { id: id, sandbox: true }))
             })
           }
           return result
@@ -1645,6 +1646,27 @@ ShellRoot {
 
     function pluginStatus(id: string): string {
       return JSON.stringify(shell.sandboxedPlugins.status(id))
+    }
+
+    function saveSandboxSettings(id: string, settingsJson: string): string {
+      var index = (shell.shellConfig.plugins || []).findIndex(function(value) { return value && value.id === id && value.sandbox === true })
+      var state = shell.sandboxedPlugins.status(id).state
+      if (index < 0 || (state !== "starting" && state !== "running")) return "plugin is not active"
+      try {
+        if (settingsJson.length > 65536) return "settings are too large"
+        var settings = JSON.parse(settingsJson)
+        if (!Util.isPlainObject(settings)
+          || ["id", "sandbox", "__proto__", "constructor", "prototype"].some(function(key) { return Object.prototype.hasOwnProperty.call(settings, key) }))
+          return "invalid settings"
+        // The preview owns a top-level sandbox entry, never a legacy bar
+        // command/QML entry that happens to have the same id.
+        var copy = JSON.parse(JSON.stringify(shell.shellConfig))
+        copy.plugins[index] = Object.assign({ id: id, sandbox: true }, settings)
+        if (JSON.stringify(copy) !== JSON.stringify(shell.shellConfig)) shell.persistShellConfig(copy)
+        return "ok"
+      } catch (e) {
+        return "invalid settings: " + e
+      }
     }
 
     // Enable, but only where the widget is not on the bar already, so a caller

@@ -3,6 +3,7 @@
 //! These modules do not yet constitute an integrated shell plugin system.
 
 pub mod channel;
+pub mod context;
 pub mod controller;
 pub mod grants;
 #[cfg(feature = "graphics")]
@@ -13,6 +14,7 @@ pub mod notification;
 pub mod presentation;
 #[cfg(feature = "qt-bridge")]
 mod qt;
+pub mod requests;
 pub mod revision;
 pub mod sandbox;
 pub mod session;

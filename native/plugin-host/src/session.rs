@@ -2,6 +2,7 @@
 //! dedicated thread; the GUI only exchanges bounded, non-blocking messages.
 use crate::{
   channel::{Channel, Listener},
+  context::UiContext,
   controller::Control,
   presentation::{Event, Frames, Viewport},
   store::Store,
@@ -33,6 +34,16 @@ impl Session {
     controller: PathBuf,
     viewport: Viewport,
   ) -> io::Result<Self> {
+    Self::start_with_context(root, id, controller, viewport, UiContext::default())
+  }
+
+  pub fn start_with_context(
+    root: PathBuf,
+    id: String,
+    controller: PathBuf,
+    viewport: Viewport,
+    context: UiContext,
+  ) -> io::Result<Self> {
     viewport.pixels()?;
     crate::grants::validate_id(&id)?;
     if !root.is_absolute() || !controller.is_absolute() {
@@ -43,7 +54,7 @@ impl Session {
     std::thread::Builder::new()
       .name("plugin-session".into())
       .spawn(move || {
-        if let Err(error) = launch(root, id, controller, viewport, receiver, &sender) {
+        if let Err(error) = launch(root, id, controller, viewport, context, receiver, &sender) {
           // A full queue or dropped receiver also terminates the session. Never
           // wait for GUI delivery during service cleanup.
           let _ = sender.try_send(Update::Failed(
@@ -69,6 +80,7 @@ impl Session {
         | Control::Scroll(_)
         | Control::Presented(_)
         | Control::Configure(_)
+        | Control::Context(_)
         | Control::Stop
     ) {
       return Err(io::Error::other("invalid host session command"));
@@ -91,6 +103,7 @@ fn launch(
   id: String,
   controller: PathBuf,
   mut viewport: Viewport,
+  mut context: UiContext,
   commands: Receiver<Control>,
   updates: &SyncSender<Update>,
 ) -> io::Result<()> {
@@ -111,6 +124,7 @@ fn launch(
           next.pixels()?;
           viewport = next;
         }
+        Ok(Control::Context(next)) => context = next,
         _ => return Err(io::Error::other("session cancelled before admission")),
       }
       match listener.accept() {
@@ -124,7 +138,7 @@ fn launch(
         Err(error) => return Err(error),
       }
     };
-    dispatch(channel, viewport, commands, updates)
+    dispatch(channel, viewport, context, commands, updates)
   })();
   // Unit::Drop also retries cleanup on failure. No manager work runs on GUI Drop.
   let stopped = unit.stop();
@@ -140,6 +154,7 @@ fn emit(updates: &SyncSender<Update>, update: Update) -> io::Result<()> {
 fn dispatch(
   channel: Channel,
   mut viewport: Viewport,
+  mut context: UiContext,
   commands: Receiver<Control>,
   updates: &SyncSender<Update>,
 ) -> io::Result<()> {
@@ -152,6 +167,7 @@ fn dispatch(
   let mut frames = Frames::default();
   let mut described = 0u8;
   let mut ready = false;
+  let mut context_changed = false;
   let mut ping = 0;
   let mut pong = 0;
   let mut next_ping = Instant::now();
@@ -180,6 +196,10 @@ fn dispatch(
           desired = next;
           resize_requested = true;
         }
+        Ok(Control::Context(next)) => {
+          context = next;
+          context_changed = true;
+        }
         Ok(command) => {
           if !ready {
             return Err(io::Error::other("input before session ready"));
@@ -192,6 +212,10 @@ fn dispatch(
         }
         Err(TryRecvError::Empty) => break,
       }
+    }
+    if ready && context_changed {
+      Control::Context(context.clone()).send(&channel)?;
+      context_changed = false;
     }
     for _ in 0..32 {
       let packet = match channel.receive() {
@@ -206,6 +230,8 @@ fn dispatch(
       if packet.bytes.len() == 16 {
         match Control::decode(packet)? {
           Control::Hello if !ready => {
+            Control::Context(context.clone()).send(&channel)?;
+            context_changed = false;
             Control::Configure(desired).send(&channel)?;
             requested = Some(desired);
             resize_requested = false;
@@ -304,6 +330,7 @@ mod tests {
           height: 48,
           scale: 1,
         },
+        UiContext::default(),
         receiver,
         &sender,
       )
@@ -317,6 +344,40 @@ mod tests {
       updates.recv_timeout(Duration::from_secs(1)).unwrap(),
       Update::Ready
     ));
+  }
+
+  #[test]
+  fn context_precedes_startup_and_updates_without_worker_authority() {
+    let (controller, commands, updates, task) = connection();
+    let mut context = UiContext::default();
+    context.settings.insert("width".into(), 40.into());
+    commands.send(Control::Context(context.clone())).unwrap();
+    hello(&controller, &updates);
+    let next_context = || {
+      let deadline = Instant::now() + Duration::from_secs(1);
+      loop {
+        match controller.receive() {
+          Ok(packet) => match Control::decode(packet).unwrap() {
+            Control::Context(context) => return context,
+            Control::Ping(_) => (),
+            other => panic!("context must precede configuration: {other:?}"),
+          },
+          Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+            std::thread::sleep(Duration::from_millis(5))
+          }
+          Err(error) => panic!("context not delivered: {error}"),
+        }
+      }
+    };
+    assert_eq!(next_context(), context);
+    next_configure(&controller);
+    context.settings.insert("width".into(), 60.into());
+    commands.send(Control::Context(context.clone())).unwrap();
+    assert_eq!(next_context(), context);
+    // The worker/controller cannot reverse this one-way contract to mutate
+    // shell settings. A context sent back is an invalid controller reply.
+    Control::Context(context).send(&controller).unwrap();
+    assert!(task.join().unwrap().is_err());
   }
 
   fn buffers(controller: &Channel) {

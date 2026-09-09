@@ -205,8 +205,9 @@ fn media_controller_child() {
       worker::Resources {
         render_node: None,
         media: Some(&proxy),
-        notifications: None,
+        requests: None,
         runtime: None,
+        context: None,
       },
     )
     .unwrap(),

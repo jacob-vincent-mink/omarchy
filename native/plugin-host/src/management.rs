@@ -41,6 +41,7 @@ struct Selections {
   network: bool,
   media: Option<String>,
   notifications: bool,
+  settings: bool,
 }
 
 pub fn run(root: &Path) -> io::Result<()> {
@@ -138,6 +139,7 @@ fn execute(root: &Path, bytes: &[u8]) -> io::Result<Value> {
         network: selections.network,
         media: selections.media,
         notifications: selections.notifications,
+        settings: selections.settings,
         ..Grants::default()
       };
       for (slot, path) in selections.read {
