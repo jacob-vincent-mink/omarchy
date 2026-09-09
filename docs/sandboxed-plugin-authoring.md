@@ -1,10 +1,10 @@
 # Ward plugin authoring (preview)
 
-Ward is Omarchy's isolated plugin security system. This is the developer and coding-agent reference for its sandbox currently implemented on this branch, not the trusted in-process plugin contract. Native payload installation, real bar slots and final desktop compatibility gates remain unfinished; see the [development preview](omarchy-shell.md#sandboxed-plugin-development-preview) and [implementation inventory](../plans/sandboxed-plugin-grants.md). Proposed shortcuts are not accepted syntax until implemented.
+Ward is Omarchy's isolated plugin security system. This is the developer and coding-agent reference for its sandbox currently implemented on this branch, not the trusted in-process plugin contract. CMake supports an installed native payload, but default packaging and final desktop compatibility gates remain unfinished; see the [development preview](omarchy-shell.md#sandboxed-plugin-development-preview) and [implementation inventory](../plans/sandboxed-plugin-grants.md). Proposed shortcuts are not accepted syntax until implemented.
 
 Ward's product scope is third-party plugins distributed through the Omarchy plugin registry. Omarchy's own first-party plugins remain in-process, and users may explicitly choose the trusted in-process path for their own plugins. Ward is not a restriction on that choice. Trust must come from the installation decision, not a downloaded manifest claiming to be first-party. This preview still selects Ward through the `sandbox` declaration; registry provenance and mandatory registry-install routing are not yet implemented.
 
-Ward's source and tests use synthetic plugins and generic resource fixtures. Compatibility checks for concrete third-party plugins belong outside `native/ward`; first-party plugins are not sandbox-port targets.
+Ward's source and tests use synthetic plugins and generic resource fixtures, including for compatibility adapters. Concrete third-party plugin trials are temporary external experiments, not new test harnesses in Omarchy or a plugin repository. Keep their build artifacts outside Ward's target directory and the reviewed plugin bundle. First-party plugins are not sandbox-port targets.
 
 ## Start here
 
@@ -129,6 +129,7 @@ This is the complete current `sandbox` request vocabulary. Unknown fields inside
 | `storage` | Atomic request | Persistent private home; `--allow-storage` |
 | `network` | Atomic request | Broad host network namespace, including local services; `--allow-network`. Cannot be granted together with scoped HTTP |
 | `notifications` | Atomic request | Text-only notifications; `--allow-notifications` |
+| `desktopGeometry` | Atomic request | Read-only all-output/workspace/window geometry; `--allow-desktop-geometry`. No titles, content or compositor control |
 | `openUrls` | Atomic request | HTTP(S) browser/webapp handoff; `--allow-open-urls`. Can transmit data without worker networking |
 | `media` | Atomic request | Filtered access to one existing MPRIS player; user selects exact `org.mpris.MediaPlayer2.Name` with `--media` |
 | `filesystem` | Array of `{ "name": "notes", "access": "read", "required": false }` | Up to 256 unique slots. `access` defaults to `read`; `readwrite` permits both. `write` alone is rejected. Select with `--read notes=/folder` or `--write notes=/folder` |
@@ -203,6 +204,7 @@ Read `/run/plugin/grants.json`, not the manifest, to discover admitted access. T
 | Open link | `/bootstrap --open-url browser <url>` or `... webapp <url>` | HTTP(S) up to 2,048 bytes, no whitespace/controls/backslashes; two deliveries per 30 seconds. Success means launch accepted, not page loaded |
 | Shared link aliases | `omarchy-launch-browser <url>`, `omarchy-launch-webapp <url>` | Exactly one URL argument; denial produces shared-runtime feedback |
 | Save own settings | Own shell API's `updateEntryInline(id, patch)`; low-level `/bootstrap --settings '<JSON object>'` | Widgets reach the API through `bar.shell`; service/overlay Items receive `shell`. Only selected writable keys. Host merges without deleting unselected values. Shared API acceptance queues a save, not durable confirmation; rejected saves restore host values and show feedback |
+| Observe desktop layout | Own shell API's read-only `desktopGeometry` property | Requires `desktopGeometry` selection; detached live geometry or `null`. No compositor socket, handles or commands |
 | Existing player | MPRIS through the worker's filtered `DBUS_SESSION_BUS_ADDRESS` | Exact selected player at `/org/mpris/MediaPlayer2`: property Get/GetAll, introspection, Next/Previous/Pause/PlayPause/Stop/Play/Seek/SetPosition and PropertiesChanged/Seeked. No Properties.Set, OpenUri, Raise, Quit, arbitrary bus access or player publication |
 
 All broker operations share a 32-connections-per-second admission ceiling. Revocation cancels owned jobs and stops the worker but cannot undo completed writes or retract effects delegated to other host services.
@@ -242,9 +244,49 @@ Without `--json`, raw mode is unchanged: binary stdout/stderr and the command's 
 
 Missing, empty, partial, unknown-version or unknown-status results are **unknown outcomes**, not permission denial or proof that nothing happened. Writing stdout can fail after an external effect. Never blindly retry `failed`, `timed_out`, `unavailable` or an unknown outcome for a mutation. The exec forwarder already retries only explicit not-started busy/rate-limit conditions for up to 120 seconds. The read-only grants snapshot lets the caller identify intentionally absent broker sockets, but the host still rechecks live approval on every request.
 
+### Read-only desktop geometry
+
+Request `"desktopGeometry": true` for optional access or `"desktopGeometry": { "required": true }` when the plugin cannot operate without it. Selection is off by default in both the CLI and reviewer. The grant exposes the whole supported layout, not only the plugin's own output; it is meaningful desktop observation even without window titles. Storage, networking, settings and drawing do not imply this grant.
+
+Widgets read `bar.shell.desktopGeometry`; service/overlay Items read `shell.desktopGeometry`. Custom worker configurations may watch `geometry` in `/context/state.json`. The host publishes detached scalar snapshots through the existing read-only context mount; there is no worker query endpoint or write operation. Check `/run/plugin/grants.json`'s `desktopGeometry` boolean to distinguish declined access from a selected grant whose geometry is currently unavailable. Both expose `null`, not invented zero rectangles or a partial desktop.
+
+| Field | Contents |
+| --- | --- |
+| `viewport` | Opaque ID of the output on which the host placed this worker |
+| `outputs` | `{ id, rect, scale, reserved, activeWorkspaces }`; `reserved` is `[left, top, right, bottom]`; active workspaces may include the normal and visible special workspace |
+| `workspaces` | `{ id, output }`; `output` is an output ID or `null` |
+| `windows` | `{ id, workspace, rect, mapped, hidden, fullscreen }`; `workspace` is a workspace ID or `null` |
+| Each `rect` | `{ x, y, width, height }` in global logical pixels, preserving negative positions and fractional values |
+
+Output extents use Quickshell's logical screen dimensions, not unscaled monitor pixel dimensions. `scale` describes the output's compositor scale. To draw relative to this worker's output, find the output matching `viewport` and subtract its `rect.x`/`rect.y` from global positions. The host still controls placement; this observation grant does not place a worker on every output or authorize moving host windows. Window rectangles are observations, not an occlusion map or a guarantee that every point is visible.
+
+IDs are opaque positive integers tied to the host object's lifetime. Moving a window or changing its workspace preserves its ID; a closed window's compositor address can be reused without reusing the exported ID. Do not persist IDs across host restarts. Output/workspace names, window titles, app IDs, process IDs, raw compositor addresses and content are not exported.
+
+One shared host observer requests window refreshes every 100 ms and monitor/workspace refreshes every second while isolated plugins are active. Quickshell bounds each model to one in-flight refresh. Snapshots reflect its latest cached models, not an atomic cross-model query or a real-time deadline. Malformed, incomplete or oversized projections become unavailable. Bounds are 32 outputs, 256 workspaces, 256 windows and 48 KiB serialized geometry within the existing 64 KiB total context limit; the host drops the whole geometry snapshot if it cannot fit alongside settings/theme/panel state. There is no silent truncation. Revocation stops the worker; it cannot retract geometry already read.
+
+#### Explicit desktop adapter
+
+Shared-runtime plugins may `import qs.Ward` and use `Desktop` for a small, read-only compatibility view. It reads the admitted permission itself: `Desktop.granted` reports the geometry selection, and `Desktop.available` additionally requires a usable snapshot. Plugins need not read the grants file or pass geometry through their service to use this adapter.
+
+`Desktop.monitorFor(screen)` accepts the worker's single private `Quickshell.screens[0]` and returns the hosted output's `id`, global logical `x`/`y`, logical `width`/`height`, `scale`, `activeWorkspace: { id }` (or `null`) and `lastIpcObject: { reserved }`. The active workspace is the normal workspace, matching the original read interface; use the full snapshot for the complete active-workspace list. Unavailable or unrecognized screens return `null`.
+
+`Desktop.toplevels.values` exposes `{ address, workspace, lastIpcObject }` for each observed window. Here `address` is a stringified **opaque Ward ID**, not a compositor address; `workspace` is `{ id }` or `null`; `lastIpcObject` contains only `at: [x, y]`, `size: [width, height]`, `mapped`, `hidden` and `fullscreen`. Without available geometry, the list is empty. Subscribe to `Desktop.changed` to rebuild observations; refresh requests and timers are unnecessary because Ward publishes updates.
+
+This is an explicit adapter, not a replacement or shadow import for `Quickshell.Hyprland`. It provides no raw events, titles, application identifiers, compositor socket, dispatch, focus or other window-control methods. These compatibility-shaped objects are local snapshots, not live host QObjects or extra authority.
+
 The shared runtime provides packaged `qs.Commons`/`qs.Ui`, detached live theme/style/settings, widget `bar`/`settings` properties and own-service/panel operations. Widgets reach the own shell API through `bar.shell`; service/overlay Items may declare `shell`, `manifest` and `omarchyPath` properties for injection. The API's `serviceFor(id)`, `summon`, `hide`, `toggle` and `isPluginOpen` are scoped to this plugin. Panels expose `open(payloadJson)`, `close()` and `opened`; the host manages input/dismissal. These are not access to other plugins, desktop config, authentication objects or compositor sockets. Worker `OMARCHY_PATH` names the restricted runtime, not the desktop source checkout.
 
-Helpers, bundled scripts, timers, local IPC and computation need no separate execution permission. Their external effects still need grants. Rendering includes the selected GPU render node, not screen capture, audio output, microphone access, arbitrary devices, compositor observations, package mutation or host execution. Unsupported families are tracked in the [grant inventory](../plans/sandboxed-plugin-grants.md); do not invent manifest fields or use broad exec grants as undocumented substitutes.
+Helpers, bundled scripts, timers, local IPC and computation need no separate execution permission. Their external effects still need grants. Rendering includes the selected GPU render node, not screen capture, audio output, microphone access, arbitrary devices, desktop observations, package mutation or host execution. Unsupported families are tracked in the [grant inventory](../plans/sandboxed-plugin-grants.md); do not invent manifest fields or use broad exec grants as undocumented substitutes.
+
+### Host-owned bar placement
+
+`omarchy plugin enable <id>` places a shared widget in its manifest's default section. The ordinary `--section`, `--index`, `--before` and `--after` options select another slot; `omarchy bar move` moves an enabled slot. One worker is hosted on the largest logical output, not replicated on every monitor. Custom complete-worker entry points retain their separate preview route.
+
+The bar loads only a host-owned spacer. The worker reports preferred dimensions bounded to 1,024 logical pixels per axis; the host allocates a rectangle and supplies bar orientation and thickness through read-only context. The shared runtime mirrors that allocation in its private bar window, so existing widget and panel anchors follow host placement. This is own-surface allocation, not desktop observation, and needs no geometry grant. Size reports cannot place host windows, reserve screen space or acquire focus. Hidden bars suppress the widget without stopping its service or own overlays.
+
+Inline settings remain in the marked native entry. The host sends selected settings to the worker, but gives both stock and trusted replacement bars only the native entry's identity and marker. Fields such as `type`, `exec` and `source` therefore remain inert plugin data and cannot turn a native slot into a legacy host command or QML module. Component lifetimes belong to the shell rather than the first bar that instantiates them.
+
+`bar.showTooltip(target, text)` and `hideTooltip(target)` use the shared bar styling and 400 ms hover delay, including all four edges and output-bounded plain-text wrapping. The target must belong to the private bar and expose `tooltipHovered`, as `WidgetButton` already does. Tooltips are input-transparent and clear on departure or bar hiding. Pointer departure preserves a focused panel and active drag; it is not a request for keyboard dismissal. Keyboard panel switching from inside a worker and final multi-output desktop behavior remain compatibility work.
 
 ## Review and development
 

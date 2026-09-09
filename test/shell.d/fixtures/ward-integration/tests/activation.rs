@@ -55,7 +55,7 @@ fn activation(review_ui: bool) {
     "schemaVersion": 1, "id": "test.activation", "name": "Activation", "version": "1", "kinds": ["panel"],
     "entryPoints": {"panel": "worker.qml"}, "sandbox": {
       "version": 1, "entryPoint": "worker.qml", "requests": {
-        "network": true, "notifications": true, "storage": true, "settings": {"write": ["width"]}, "filesystem": [{"name": "notes"}],
+        "network": true, "notifications": true, "storage": true, "desktopGeometry": true, "settings": {"write": ["width"]}, "filesystem": [{"name": "notes"}],
         "http": {"catalog": {"scope": {
           "origin": "https://example.test", "method": "GET", "path": "/catalog",
           "query": {"limit": {"required": true, "value": {"kind": "exact", "value": "10"}}}
@@ -141,6 +141,7 @@ ShellRoot {{
         approved: review.selectionApproved, current: review.current, network: review.network, notifications: review.notifications, settings: review.settings,
         settingsButton: point("review-setting-write-width"),
         storage: review.storage, storageButton: point("review-storage"),
+        desktopGeometry: review.desktopGeometry, geometryButton: point("review-desktop-geometry"),
         http: review.http, httpButton: point("review-http-catalog"),
         httpDetails: point("review-http-scope-catalog"),
         notificationButton: point("review-notifications"), approvalButton: point("review-approve"), revokeButton: point("review-revoke"), closeButton: point("review-close")}})
@@ -258,10 +259,19 @@ ShellRoot {{
       click(&reveal("notificationButton"), "notificationButton");
       wait(&|state| state["notifications"] == true);
       let capture = |label| {
-        std::thread::sleep(Duration::from_millis(150));
         progress.send(Stage::Capture(label)).unwrap();
+        proceed.recv_timeout(Duration::from_secs(8)).unwrap();
       };
       capture("selection");
+      assert_eq!(state["desktopGeometry"], false);
+      click(&reveal("geometryButton"), "geometryButton");
+      wait(&|state| state["desktopGeometry"] == true);
+      capture("geometry-selected");
+      click(&reveal("geometryButton"), "geometryButton");
+      wait(&|state| state["desktopGeometry"] == false);
+      capture("geometry-denied");
+      click(&reveal("geometryButton"), "geometryButton");
+      wait(&|state| state["desktopGeometry"] == true);
       assert_eq!(state["storage"], false);
       click(&reveal("storageButton"), "storageButton");
       wait(&|state| state["storage"] == true);
@@ -311,6 +321,7 @@ ShellRoot {{
       );
       assert_eq!(state["current"]["grants"]["notifications"], true);
       assert_eq!(state["current"]["grants"]["storage"], true);
+      assert_eq!(state["current"]["grants"]["desktopGeometry"], true);
       assert_eq!(
         state["current"]["grants"]["settings"],
         serde_json::json!({"read": [], "write": ["width"]})
@@ -335,6 +346,11 @@ ShellRoot {{
       run("omarchy-plugin-review", &["test.activation", "--ui"]);
       let state = wait(&|state| state["current"]["enabled"] == true && state["busy"] == false);
       assert_eq!(state["storage"], false, "reopen silently selected storage");
+      assert_eq!(
+        state["desktopGeometry"], false,
+        "reopen silently selected geometry"
+      );
+      assert_eq!(state["current"]["grants"]["desktopGeometry"], true);
       assert_eq!(state["current"]["grants"]["storage"], true);
       assert_eq!(
         state["notifications"], false,
@@ -385,7 +401,8 @@ ShellRoot {{
   let mut disabled = false;
   let mut withdrawn = false;
   let mut latest_frame: Option<desktop::Frame> = None;
-  while start.elapsed() < Duration::from_secs(25) {
+  let mut pending_capture = None;
+  while start.elapsed() < Duration::from_secs(40) {
     let time = start.elapsed().as_millis() as u32;
     while let Ok(stage) = stages.try_recv() {
       match stage {
@@ -418,12 +435,7 @@ ShellRoot {{
           )
           .unwrap(),
         Stage::Capture(label) => {
-          if let (Some(frame), Some(path)) = (
-            &latest_frame,
-            std::env::var_os("OMARCHY_TEST_REVIEW_CAPTURE"),
-          ) {
-            frame.save(PathBuf::from(path).with_extension(format!("{label}.ppm")));
-          }
+          pending_capture = Some((label, Instant::now()));
         }
       }
     }
@@ -450,6 +462,20 @@ ShellRoot {{
       }
       withdrawn = count([0x30, 0x40, 0x50]) == 0 && count([0xee, 0xaa, 0x22]) > 1000;
       latest_frame = Some(frame);
+    }
+    // Do not let the command thread click the next state before the animated
+    // switch has rendered. An IPC property reply is not a presentation fence.
+    if let Some((label, requested)) = pending_capture {
+      if requested.elapsed() >= Duration::from_millis(350) {
+        if let (Some(frame), Some(path)) = (
+          &latest_frame,
+          std::env::var_os("OMARCHY_TEST_REVIEW_CAPTURE"),
+        ) {
+          frame.save(PathBuf::from(path).with_extension(format!("{label}.ppm")));
+        }
+        pending_capture = None;
+        resume.send(()).unwrap();
+      }
     }
     if (disabled && withdrawn) || host.0.try_wait().unwrap().is_some() {
       break;

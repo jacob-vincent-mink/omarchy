@@ -485,6 +485,36 @@ QtObject {
     setCloneShouldRestoreSource(config, cloneId, false)
   }
 
+  // Called only after native activation admission. This writes placement, not
+  // trust: the saved marker still forbids in-process loading if source changes.
+  function placeSandboxedWidget(id, placement) {
+    var manifest = installedPlugins[id]
+    if (!manifest || !isSandboxed(id)) return "unknown sandbox plugin"
+    var error = ""
+    shellConfigMutator(function(config) {
+      ensureConfigShape(config)
+      if (placement.before || placement.after) {
+        var relative = String(placement.before || placement.after)
+        if (!findRelativeBarLocation(config, relative, String(placement.section || "")).found) {
+          error = "could not find target widget " + relative
+          return
+        }
+      }
+      var location = findEntryLocation(config, id)
+      if (location.kind === "bar") {
+        config.bar.layout[location.section][location.index].sandbox = true
+        if (Object.keys(placement).length) moveBarEntry(config, id, placement)
+      } else {
+        var entry = location.kind === "plugin" ? config.plugins.splice(location.index, 1)[0] : { id: id }
+        entry.sandbox = true
+        var target = barTarget(config, placement, defaultBarWidgetSection(manifest))
+        config.bar.layout[target.section].splice(target.index, 0, entry)
+      }
+      removeDisabled(config, id)
+    })
+    return error
+  }
+
   function setEnabled(id, value, placement) {
     var key = Util.canonicalWidgetId(String(id))
     lastEnableError = ""

@@ -754,6 +754,22 @@ impl Graphics {
         time,
         |_, _, _| FilterResult::Forward,
       );
+    } else if kind == 6 && code == 0 && x == 0 && y == 0 {
+      // Leaving the host's input region ends hover, not keyboard focus or an
+      // in-progress drag. Full dismissal remains the separate kind 5 action.
+      if self.buttons == 0 {
+        let location = self.pointer.current_location();
+        self.pointer.motion(
+          &mut self.app,
+          None,
+          &MotionEvent {
+            location,
+            serial: SERIAL_COUNTER.next_serial(),
+            time,
+          },
+        );
+        self.pointer.frame(&mut self.app);
+      }
     } else if kind == 5 && code == 0 && x == 0 && y == 0 {
       self.keyboard_active = false;
       self
@@ -1493,6 +1509,19 @@ mod tests {
     graphics.input(0, 0x110, 10, 10, 1).unwrap();
     assert!(!graphics.keyboard.pressed_keys().is_empty());
     assert_ne!(graphics.buttons, 0);
+    graphics.input(6, 0, 0, 0, 2).unwrap();
+    assert!(
+      graphics.keyboard_active,
+      "hover departure must not dismiss keyboard focus"
+    );
+    assert!(!graphics.keyboard.pressed_keys().is_empty());
+    assert_ne!(
+      graphics.buttons, 0,
+      "hover departure must not interrupt a drag"
+    );
+    for (kind, code, x, y) in [(6, 1, 0, 0), (6, 0, 1, 0), (6, 0, 0, 1), (7, 0, 0, 0)] {
+      assert!(graphics.input(kind, code, x, y, 2).is_err());
+    }
     let next = Viewport {
       width: 80,
       height: 60,

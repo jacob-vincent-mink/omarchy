@@ -254,9 +254,18 @@ Item {
             }
             Label {
               visible: !!review.revision && !review.revision.requests.network && !review.revision.requests.notifications && review.settingRequests.length === 0 && !review.revision.requests.openUrls
-                && !review.revision.requests.media && !review.revision.requests.storage && review.folderRequests.length === 0 && review.httpRequests.length === 0
+                && !review.revision.requests.media && !review.revision.requests.storage && !review.revision.requests.desktopGeometry && review.folderRequests.length === 0 && review.httpRequests.length === 0
               text: "This revision requests no additional access."
               color: Color.muted; width: parent.width
+            }
+            Toggle {
+              visible: !!review.revision && review.revision.requests.desktopGeometry
+              objectName: "review-desktop-geometry"
+              width: parent.width
+              label: review.requestLabel("desktopGeometry", "Read desktop geometry")
+              description: "Observe all window rectangles, workspaces and output layout. No titles, content or window control."
+              checked: review.desktopGeometry
+              onClicked: review.desktopGeometry = !review.desktopGeometry
             }
           }
         }

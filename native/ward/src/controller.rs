@@ -36,6 +36,10 @@ pub enum Control {
     serial: u32,
     open: bool,
   },
+  WidgetSize {
+    width: u32,
+    height: u32,
+  },
 }
 
 /// Host-local position and Qt-signed deltas. Source 0 is wheel (120 units per
@@ -161,6 +165,12 @@ impl Control {
       Self::Stop => (4, 0),
       Self::Presented(serial) => (6, *serial),
       Self::PanelState { serial, open } => (10, u64::from(*serial) | (u64::from(*open) << 32)),
+      Self::WidgetSize { width, height } => {
+        if *width > 1024 || *height > 1024 {
+          return Err(invalid("invalid widget size"));
+        }
+        (11, u64::from(*width) | (u64::from(*height) << 32))
+      }
       Self::Configure(_) | Self::Input { .. } | Self::Scroll(_) | Self::Context(_) => {
         unreachable!()
       }
@@ -211,7 +221,7 @@ impl Control {
           viewport.pixels()?;
           Ok(Self::Configure(viewport))
         }
-        7 if values[0] <= 5 => Ok(Self::Input {
+        7 if values[0] <= 6 => Ok(Self::Input {
           kind: values[0],
           code: values[1],
           x: values[2] as i32,
@@ -230,6 +240,10 @@ impl Control {
       (10, value) if value >> 32 <= 1 => Ok(Self::PanelState {
         serial: value as u32,
         open: value >> 32 == 1,
+      }),
+      (11, value) if value as u32 <= 1024 && value >> 32 <= 1024 => Ok(Self::WidgetSize {
+        width: value as u32,
+        height: (value >> 32) as u32,
       }),
       _ => Err(invalid("unknown control record")),
     }
@@ -574,6 +588,9 @@ impl RunningGraphics {
       if let Some(state) = requests.panel_state.take() {
         state.send(channel)?;
       }
+      if let Some(size) = requests.widget_size.take() {
+        size.send(channel)?;
+      }
     }
     let mut bytes = [0u8; 4096];
     if let Some(log) = &mut self.child.stderr {
@@ -616,6 +633,44 @@ fn invalid(message: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn widget_size_is_bounded_descriptor_free_metadata() {
+    let (sender, receiver) = Channel::pair().unwrap();
+    for (width, height) in [(0, 0), (1, 40), (1024, 1024)] {
+      let size = Control::WidgetSize { width, height };
+      size.send(&sender).unwrap();
+      let packet = receiver.receive().unwrap();
+      assert_eq!(packet.bytes.len(), 16);
+      assert!(packet.fds.is_empty());
+      let mut invalid = packet.bytes.clone();
+      assert_eq!(Control::decode(packet).unwrap(), size);
+      invalid[8..12].copy_from_slice(&1025u32.to_le_bytes());
+      assert!(
+        Control::decode(Packet {
+          bytes: invalid,
+          fds: vec![]
+        })
+        .is_err()
+      );
+    }
+    assert!(
+      Control::WidgetSize {
+        width: 1025,
+        height: 1
+      }
+      .send(&sender)
+      .is_err()
+    );
+    assert!(
+      Control::WidgetSize {
+        width: 1,
+        height: u32::MAX
+      }
+      .send(&sender)
+      .is_err()
+    );
+  }
 
   #[test]
   fn panel_state_is_one_exact_descriptor_free_record() {
@@ -770,6 +825,18 @@ mod tests {
       bytes,
       fds: Vec::new(),
     };
+    let (sender, receiver) = Channel::pair().unwrap();
+    let leave = Control::Input {
+      kind: 6,
+      code: 0,
+      x: 0,
+      y: 0,
+    };
+    leave.send(&sender).unwrap();
+    let mut bytes = receiver.receive().unwrap().bytes;
+    assert_eq!(Control::decode(packet(bytes.clone())).unwrap(), leave);
+    bytes[8] = 7;
+    assert!(Control::decode(packet(bytes)).is_err());
     for length in 0..32 {
       if length != 16 {
         assert!(Control::decode(packet(vec![0; length])).is_err());

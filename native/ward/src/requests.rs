@@ -31,7 +31,7 @@ enum Request {
   OpenUrl(OpenUrl),
   Http(crate::http::Request),
   Exec(crate::exec::Request),
-  PanelState(Control),
+  UiMetadata(Control),
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -79,10 +79,17 @@ impl Request {
     }
     if packet.bytes.starts_with(b"OPH\x01") {
       match Control::decode(packet)? {
-        Control::Context(context) if context.theme.is_none() && context.panel.is_none() => {
+        Control::Context(context)
+          if context.theme.is_none()
+            && context.panel.is_none()
+            && context.geometry.is_none()
+            && context.bar.is_none() =>
+        {
           Ok(Self::Settings(context))
         }
-        state @ Control::PanelState { .. } => Ok(Self::PanelState(state)),
+        state @ (Control::PanelState { .. } | Control::WidgetSize { .. }) => {
+          Ok(Self::UiMetadata(state))
+        }
         _ => Err(invalid("invalid worker UI request")),
       }
     } else {
@@ -104,13 +111,13 @@ impl Request {
       Self::OpenUrl(_) => Some(Kind::OpenUrl),
       Self::Http(_) => Some(Kind::Http),
       Self::Exec(_) => Some(Kind::Exec),
-      Self::PanelState(_) => None,
+      Self::UiMetadata(_) => None,
     }
   }
 
   fn command(&self, directory: &Path, id: &str) -> io::Result<Command> {
     let (helper, args) = match self {
-      Self::PanelState(_) => return Err(invalid("panel state is not a host effect")),
+      Self::UiMetadata(_) => return Err(invalid("UI metadata is not a host effect")),
       Self::Http(_) => return Err(invalid("HTTP uses the fixed native transport helper")),
       Self::Exec(_) => return Err(invalid("exec uses a selected supervised host job")),
       Self::Notification(request) => ("omarchy-notification-send", request.arguments(id)?),
@@ -166,6 +173,7 @@ pub struct Broker {
   // Own UI metadata, never admission/readiness or a grant. Dispatch coalesces
   // it within the existing authenticated, rate-limited request boundary.
   pub(crate) panel_state: Option<Control>,
+  pub(crate) widget_size: Option<Control>,
   listener: Listener,
   socket: File,
   directory: PathBuf,
@@ -232,6 +240,7 @@ impl Broker {
     let now = Instant::now();
     Ok(Self {
       panel_state: None,
+      widget_size: None,
       listener,
       socket,
       directory,
@@ -352,9 +361,13 @@ impl Broker {
         continue;
       };
       let Some(kind) = request.kind() else {
-        if let Request::PanelState(state) = request {
+        if let Request::UiMetadata(state) = request {
           approval.check()?;
-          self.panel_state = Some(state);
+          if matches!(state, Control::WidgetSize { .. }) {
+            self.widget_size = Some(state);
+          } else {
+            self.panel_state = Some(state);
+          }
           let _ = reply(&client, Status::Completed);
         }
         continue;
@@ -447,6 +460,16 @@ pub fn report_panel_state(serial: &str, open: &str) -> io::Result<()> {
   crate::operation::await_reply(&channel)
 }
 
+pub fn report_widget_size(width: &str, height: &str) -> io::Result<()> {
+  let size = Control::WidgetSize {
+    width: width.parse().map_err(|_| Status::Invalid.error())?,
+    height: height.parse().map_err(|_| Status::Invalid.error())?,
+  };
+  let channel = Channel::connect(Path::new("/run/plugin/ui"))?;
+  size.send(&channel)?;
+  crate::operation::await_reply(&channel)
+}
+
 pub fn save_settings(json: &str) -> io::Result<()> {
   if json.len() > 65_000 {
     return Err(Status::Invalid.error());
@@ -504,6 +527,22 @@ mod tests {
         .command(Path::new("/trusted/bin"), "test.widget")
         .is_err()
     );
+    Control::WidgetSize {
+      width: 64,
+      height: 32,
+    }
+    .send(&sender)
+    .unwrap();
+    let request = Request::decode(receiver.receive().unwrap()).unwrap();
+    assert!(request.kind().is_none());
+    assert!(
+      request
+        .command(Path::new("/trusted/bin"), "test.widget")
+        .is_err()
+    );
+    let forged = UiContext::parse(br#"{"settings":{},"bar":{"x":1,"y":1,"width":40,"height":30,"size":30,"position":"top","visible":true}}"#).unwrap();
+    Control::Context(forged).send(&sender).unwrap();
+    assert!(Request::decode(receiver.receive().unwrap()).is_err());
     Control::Hello.send(&sender).unwrap();
     assert!(Request::decode(receiver.receive().unwrap()).is_err());
   }

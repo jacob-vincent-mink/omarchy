@@ -7,6 +7,7 @@ pub mod context;
 pub mod controller;
 pub mod exec;
 pub mod exec_policy;
+pub mod geometry;
 pub mod grants;
 #[cfg(feature = "graphics")]
 pub mod graphics;

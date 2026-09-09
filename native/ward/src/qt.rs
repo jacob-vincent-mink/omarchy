@@ -15,6 +15,7 @@ mod ffi {
     Frame,
     Mask,
     PanelState,
+    WidgetSize,
     Failed,
   }
   struct NativeRegion {
@@ -146,6 +147,11 @@ fn next(session: &Session) -> io::Result<ffi::NativeEvent> {
       event.panel_serial = serial;
       event.panel_open = open;
     }
+    Some(Update::WidgetSize { width, height }) => {
+      event.kind = ffi::EventKind::WidgetSize;
+      event.width = width;
+      event.height = height;
+    }
     Some(Update::Presentation(presentation::Event::Configured {
       generation,
       viewport,
@@ -187,7 +193,7 @@ fn next(session: &Session) -> io::Result<ffi::NativeEvent> {
   Ok(event)
 }
 fn input(session: &Session, kind: u32, code: u32, x: i32, y: i32) -> io::Result<()> {
-  if kind > 5 {
+  if kind > 6 {
     return Err(io::Error::other("invalid input kind"));
   }
   session.send(Control::Input { kind, code, x, y })

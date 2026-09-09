@@ -13,6 +13,10 @@ PanelWindow {
   required property string store
   required property string controller
   property var settings: ({})
+  property var geometrySource: null
+  property var barPlacement: null
+  property var barOwner: null
+  readonly property size widgetSize: view.widgetSize
   property var panelCommand: null
   readonly property bool opened: !error && (panelCommand && panelCommand.serial !== view.panelSerial
     ? panelCommand.open : view.panelOpen)
@@ -20,16 +24,28 @@ PanelWindow {
   property bool focusHeld: false
   property bool hadWindowFocus: false
   onOpenedChanged: if (!opened) focusHeld = false
-  readonly property string contextJson: JSON.stringify({
-    settings: settings,
-    panel: panelCommand,
-    theme: {
-      foreground: String(Color.foreground), background: String(Color.background),
-      accent: String(Color.accent), urgent: String(Color.urgent), muted: String(Color.muted),
-      shellValues: Color.shellValues, cornerRadius: Style.cornerRadius,
-      gapsOut: Style.gapsOut, fontFamily: Style.resolvedFontFamily
+  readonly property string contextJson: {
+    const context = {
+      settings: settings,
+      panel: panelCommand,
+      bar: barPlacement,
+      geometry: geometrySource ? geometrySource.forScreen(targetScreen) : null,
+      theme: {
+        foreground: String(Color.foreground), background: String(Color.background),
+        accent: String(Color.accent), urgent: String(Color.urgent), muted: String(Color.muted),
+        shellValues: Color.shellValues, cornerRadius: Style.cornerRadius,
+        gapsOut: Style.gapsOut, fontFamily: Style.resolvedFontFamily
+      }
     }
-  })
+    let json = JSON.stringify(context)
+    // Preserve settings/panel delivery if the complete geometry snapshot does
+    // not fit beside them. Never send a partial window/output list.
+    if (context.geometry && encodeURIComponent(json).replace(/%[0-9A-F]{2}/g, "x").length > 65536) {
+      context.geometry = null
+      json = JSON.stringify(context)
+    }
+    return json
+  }
   function updateContext() { if (started && !error) view.setContext(contextJson) }
   onContextJsonChanged: Qt.callLater(updateContext)
   readonly property string error: view.error
@@ -37,14 +53,24 @@ PanelWindow {
   signal statusChanged()
   onStateChanged: statusChanged()
 
-  readonly property var targetScreen: Quickshell.screens[0] || null
+  // The preview provides one desktop canvas, on the largest logical output.
+  readonly property var targetScreen: {
+    let largest = null
+    for (const candidate of Quickshell.screens) {
+      if (!largest || candidate.width * candidate.height > largest.width * largest.height)
+        largest = candidate
+    }
+    return largest
+  }
   screen: targetScreen
   anchors { top: true; bottom: true; left: true; right: true }
   color: "transparent"
   visible: !error && targetScreen !== null
   exclusionMode: ExclusionMode.Ignore
   WlrLayershell.namespace: "omarchy-ward-" + pluginId
-  WlrLayershell.layer: WlrLayer.Top
+  // Above the bar even when a replacement bar maps after this worker. The
+  // bounded mask still leaves every unpainted/unclaimed area click-through.
+  WlrLayershell.layer: WlrLayer.Overlay
   WlrLayershell.keyboardFocus: focusPrimed ? WlrKeyboardFocus.Exclusive
     : focusHeld ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
   mask: inputMask

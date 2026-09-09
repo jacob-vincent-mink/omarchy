@@ -54,6 +54,13 @@ try {
   assertDeepEqual(scope.shellConfig.plugins, [{ id: 'acme.review', sandbox: true, old: true, width: 80 }, { id: 'other', untouched: true }], 'host preserves unrelated settings, identity, sandbox marker and other entries')
   assertEqual(scope.saveSandboxSettings('acme.review', '{"type":"command","exec":"malicious"}'), 'ok', 'worker strings remain inert settings in its own sandbox entry')
   assertDeepEqual(scope.shellConfig.bar.layout.right, [{ id: 'acme.review', type: 'command', exec: 'untouched' }], 'sandbox settings cannot change a same-id legacy bar command or QML entry')
+  scope.shellConfig.bar.layout.left = [scope.shellConfig.plugins.shift()]
+  assertEqual(scope.saveSandboxSettings('acme.review', '{"type":"qml","path":"/plugin/Widget.qml"}'), 'ok', 'native bar entries retain arbitrary own settings as data')
+  vm.runInContext(method('renderingBarConfig', '\n  }'), scope)
+  const rendered = scope.renderingBarConfig(scope.shellConfig.bar)
+  assertDeepEqual(rendered.layout.left, [{id: 'acme.review', sandbox: true}], 'neither first-party nor replacement bars receive native settings as dispatch fields')
+  assertDeepEqual(rendered.layout.right, [{id: 'acme.review', type: 'command', exec: 'untouched'}], 'sanitizing native slots preserves unrelated user-authored custom commands')
+  assertEqual(scope.shellConfig.bar.layout.left[0].type, 'qml', 'rendering projection never mutates canonical worker settings')
   scope.sandboxedPlugins.status = () => ({ state: 'disabled' })
   assertEqual(scope.saveSandboxSettings('acme.review', '{}'), 'plugin is not active', 'host rejects a save after deactivation')
 
@@ -61,7 +68,7 @@ try {
   fs.writeFileSync(path.join(source, 'manifest.json'), JSON.stringify({
     schemaVersion: 1, id: 'acme.review', name: 'Review fixture', version: '1', kinds: ['panel'],
     entryPoints: { panel: 'worker.qml' },
-    sandbox: { version: 1, entryPoint: 'worker.qml', requests: { network: true, notifications: true, settings: {read: ['width'], write: ['width']}, filesystem: [{name: 'notes'}] } }
+    sandbox: { version: 1, entryPoint: 'worker.qml', requests: { network: true, notifications: true, desktopGeometry: true, settings: {read: ['width'], write: ['width']}, filesystem: [{name: 'notes'}] } }
   }))
   fs.writeFileSync(path.join(source, 'worker.qml'), 'import Quickshell\nShellRoot {}\n')
   run('git', ['-C', source, 'init', '-q'])
@@ -80,11 +87,13 @@ try {
   run('omarchy-plugin-disable', ['acme.review'])
   assert(!fs.existsSync(path.join(store, 'acme.review.json')), 'disabling a reviewed plugin creates no approval')
   assert(run('omarchy-plugin-review', ['acme.review']).includes('No plugin code was run'), 'human review explains the snapshot boundary')
+  assert(run('omarchy-plugin-review', ['acme.review']).includes('Desktop geometry: output/workspace layout and window rectangles; no titles or window control'), 'human review discloses the requested desktop observation')
   run('omarchy-plugin-approve', ['acme.review', '--revision', review.revision], false)
-  run('omarchy-plugin-approve', ['acme.review', '--revision', review.revision, '--read', `notes=${source}`, '--allow-notifications', '--read-setting', 'width', '--write-setting', 'width', '--yes'])
+  run('omarchy-plugin-approve', ['acme.review', '--revision', review.revision, '--read', `notes=${source}`, '--allow-notifications', '--allow-desktop-geometry', '--read-setting', 'width', '--write-setting', 'width', '--yes'])
   let record = JSON.parse(fs.readFileSync(path.join(store, 'acme.review.json')))
   assertEqual(record.grants.network, false, 'approval does not infer requested network access')
   assertEqual(record.grants.notifications, true, 'approval records the selected notification grant')
+  assertEqual(record.grants.desktopGeometry, true, 'approval records explicitly selected geometry access')
   assertDeepEqual(record.grants.settings, {read: ['width'], write: ['width']},  'approval records only explicitly selected own-settings access')
   assertEqual(record.grants.filesystem.notes.path, source, 'approval records the selected folder')
   assertEqual(record.activeUnit, null, 'approval does not start a plugin')
@@ -107,6 +116,7 @@ try {
   record = JSON.parse(fs.readFileSync(path.join(store, 'acme.review.json')))
   assertEqual(record.revision, updated.revision, 'explicit reapproval selects the updated snapshot')
   assertEqual(record.grants.notifications, false, 'reapproval does not silently carry old grants forward')
+  assertEqual(record.grants.desktopGeometry, false, 'reapproval does not retain geometry access implicitly')
   assertDeepEqual(record.grants.settings, {read: [], write: []},  'reapproval does not retain own-settings access implicitly')
   fs.writeFileSync(path.join(stubs, 'omarchy-shell'), '#!/bin/bash\nif [[ $1 == "-q" ]]; then exit 0; else exit 1; fi\n', { mode: 0o755 })
   listed = JSON.parse(run('omarchy-plugin-list', ['--json'])).find(row => row.id === 'acme.review')
