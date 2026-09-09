@@ -162,10 +162,17 @@ impl FileSystemRequest {
 pub struct Requests {
   pub filesystem: Vec<FileSystemRequest>,
   pub network: Request,
+  #[serde(rename = "networkProxy")]
+  pub network_proxy: Request,
   pub http: BTreeMap<String, crate::http::Ask>,
   pub exec: BTreeMap<String, crate::exec::Ask>,
   pub media: Request,
   pub notifications: Request,
+  #[serde(rename = "audioPlayback")]
+  pub audio_playback: Request,
+  pub microphone: Request,
+  #[serde(rename = "audioCapture")]
+  pub audio_capture: Request,
   pub settings: crate::settings::Ask,
   #[serde(rename = "openUrls")]
   pub open_urls: Request,
@@ -179,16 +186,29 @@ pub struct Requests {
 pub struct Grants {
   pub filesystem: BTreeMap<String, FileSystemGrant>,
   pub network: bool,
+  #[serde(rename = "networkProxy", skip_serializing_if = "is_false")]
+  pub network_proxy: bool,
   pub http: BTreeMap<String, crate::http::Scope>,
   pub exec: BTreeMap<String, crate::exec::Grant>,
   pub media: Option<String>,
   pub notifications: bool,
+  // Omit new denied fields to preserve the bytes signed by older releases.
+  #[serde(rename = "audioPlayback", skip_serializing_if = "is_false")]
+  pub audio_playback: bool,
+  #[serde(skip_serializing_if = "is_false")]
+  pub microphone: bool,
+  #[serde(rename = "audioCapture", skip_serializing_if = "is_false")]
+  pub audio_capture: bool,
   pub settings: crate::settings::Grant,
   #[serde(rename = "openUrls")]
   pub open_urls: bool,
   pub storage: bool,
   #[serde(rename = "desktopGeometry")]
   pub desktop_geometry: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+  !*value
 }
 
 /// How much of the selected host directory the plugin may change. A filesystem
@@ -417,9 +437,9 @@ impl Manifest {
 impl Grants {
   pub fn validate(&self, requests: &Requests) -> io::Result<()> {
     validate_requests(requests)?;
-    if self.network && !self.http.is_empty() {
+    if self.network && (!self.http.is_empty() || self.network_proxy) {
       return Err(invalid(
-        "raw network access cannot be combined with scoped HTTP grants",
+        "raw network access cannot be combined with scoped HTTP or public proxy grants",
       ));
     }
     for (name, scope) in &self.http {
@@ -442,7 +462,11 @@ impl Grants {
     requests.settings.access().validate()?;
     if self.filesystem.len() > MAX_GRANTED_DIRS
       || self.network && !requests.network.asked()
+      || self.network_proxy && !requests.network_proxy.asked()
       || self.notifications && !requests.notifications.asked()
+      || self.audio_playback && !requests.audio_playback.asked()
+      || self.microphone && !requests.microphone.asked()
+      || self.audio_capture && !requests.audio_capture.asked()
       || !requests.settings.access().covers(&self.settings)
       || self.open_urls && !requests.open_urls.asked()
       || self.storage && !requests.storage.asked()
@@ -521,8 +545,28 @@ impl Grants {
     }
     for (label, granted, asked) in [
       ("network", self.network, requests.network.asked()),
+      (
+        "networkProxy",
+        self.network_proxy,
+        requests.network_proxy.asked(),
+      ),
       ("media", self.media.is_some(), requests.media.asked()),
-      ("notifications", self.notifications, requests.notifications.asked()),
+      (
+        "notifications",
+        self.notifications,
+        requests.notifications.asked(),
+      ),
+      (
+        "audioPlayback",
+        self.audio_playback,
+        requests.audio_playback.asked(),
+      ),
+      ("microphone", self.microphone, requests.microphone.asked()),
+      (
+        "audioCapture",
+        self.audio_capture,
+        requests.audio_capture.asked(),
+      ),
       ("openUrls", self.open_urls, requests.open_urls.asked()),
       ("storage", self.storage, requests.storage.asked()),
       (
@@ -567,6 +611,22 @@ impl Grants {
     }
     for (label, required, granted) in [
       ("network", requests.network.required, self.network),
+      (
+        "networkProxy",
+        requests.network_proxy.required,
+        self.network_proxy,
+      ),
+      (
+        "audioPlayback",
+        requests.audio_playback.required,
+        self.audio_playback,
+      ),
+      ("microphone", requests.microphone.required, self.microphone),
+      (
+        "audioCapture",
+        requests.audio_capture.required,
+        self.audio_capture,
+      ),
       ("media", requests.media.required, self.media.is_some()),
       (
         "notifications",
@@ -823,6 +883,7 @@ mod tests {
         asked: true,
         required: true,
       },
+      ..Default::default()
     };
     let grants = Grants::default();
     grants.validate(&requests).unwrap();

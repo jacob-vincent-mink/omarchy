@@ -9,6 +9,7 @@ QtObject {
   property var revision: null
   property var current: null
   property bool network: false
+  property bool networkProxy: false
   property var http: []
   property var exec: ({})
   readonly property var execRequests: {
@@ -34,6 +35,9 @@ QtObject {
   }
   readonly property var httpRequests: revision ? Object.keys(revision.requests.http) : []
   property bool notifications: false
+  property bool audioPlayback: false
+  property bool microphone: false
+  property bool audioCapture: false
   property var settings: ({read: [], write: []})
   property bool openUrls: false
   property bool storage: false
@@ -55,10 +59,14 @@ QtObject {
   property string notice: ""
   property bool selectionApproved: false
 
-  onNetworkChanged: { selectionApproved = false; if (network) http = [] }
+  onNetworkChanged: { selectionApproved = false; if (network) { http = []; networkProxy = false } }
+  onNetworkProxyChanged: { selectionApproved = false; if (networkProxy) network = false }
   onHttpChanged: selectionApproved = false
   onExecChanged: selectionApproved = false
   onNotificationsChanged: selectionApproved = false
+  onAudioPlaybackChanged: selectionApproved = false
+  onMicrophoneChanged: selectionApproved = false
+  onAudioCaptureChanged: selectionApproved = false
   onSettingsChanged: selectionApproved = false
   onOpenUrlsChanged: selectionApproved = false
   onStorageChanged: selectionApproved = false
@@ -82,9 +90,13 @@ QtObject {
     revision = null
     current = null
     network = false
+    networkProxy = false
     http = []
     exec = ({})
     notifications = false
+    audioPlayback = false
+    microphone = false
+    audioCapture = false
     settings = ({read: [], write: []})
     openUrls = false
     storage = false
@@ -138,10 +150,14 @@ QtObject {
     if (!revision || busy) return
     var args = ["omarchy-plugin-approve", pluginId, "--revision", revision.revision, "--yes"]
     if (network) args.push("--allow-network")
+    if (networkProxy) args.push("--allow-network-proxy")
     for (var name of http) args.push("--http", name)
     for (var name of Object.keys(exec))
       for (var leaf of exec[name]) args.push("--exec", name + ":" + leaf)
     if (notifications) args.push("--allow-notifications")
+    if (audioPlayback) args.push("--allow-audio-playback")
+    if (microphone) args.push("--allow-microphone")
+    if (audioCapture) args.push("--allow-audio-capture")
     for (var access of ["read", "write"])
       for (var key of settings[access]) args.push("--" + access + "-setting", key)
     if (openUrls) args.push("--allow-open-urls")

@@ -27,6 +27,7 @@ fs.writeFileSync(path.join(plugin, 'manifest.json'), JSON.stringify({
   sandbox: { version: 1, entryPoint: 'worker.qml', requests: {
     filesystem: [{ name: 'data', access: 'readwrite', required: true }],
     settings: { read: ['theme'], write: ['volume'], required: true }, openUrls: true, network: true, storage: true,
+    networkProxy: true, audioPlayback: true, microphone: true, audioCapture: true,
     exec: { printf: { executable: '/usr/bin/printf', lifetime: 'plugin', required: [], tree: {next: [
       {arg: {kind: 'exact', value: 'hello'}, then: {end: 'greet'}},
       {arg: {kind: 'exact', value: 'bye'}, then: {end: 'farewell'}}
@@ -41,7 +42,8 @@ const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, '.con
   OMARCHY_WARD_HOST: process.env.OMARCHY_TEST_WARD_HOST, PATH: `${root}/bin:/usr/bin` }
 function run(name, args, success = true) {
   const result = spawnSync(name, args, { env, encoding: 'utf8', timeout: 10000 })
-  assertEqual(result.status === 0, success, `${name} exit status matches expected outcome`)
+  const diagnostic = (result.status === 0) === success ? '' : `: ${result.stderr || result.error || ''}`
+  assertEqual(result.status === 0, success, `${name} exit status matches expected outcome${diagnostic}`)
   if (success) return result.stdout
   return result.stderr
 }
@@ -56,6 +58,26 @@ try {
   run('omarchy-plugin-approve', args)
   function record() { return JSON.parse(fs.readFileSync(path.join(temp, 'store/test.selection.json'), 'utf8')) }
   assertEqual(record().grants.storage, false, 'storage defaults to denied')
+  const streamGrants = [
+    ['networkProxy', '--allow-network-proxy'], ['audioPlayback', '--allow-audio-playback'],
+    ['microphone', '--allow-microphone'], ['audioCapture', '--allow-audio-capture']
+  ]
+  for (const [key, flag] of streamGrants) {
+    assert(record().grants[key] !== true, `${key} defaults to denied`)
+    run('omarchy-plugin-approve', args.concat([flag]))
+    assertEqual(record().grants[key], true, `${flag} selects its native grant`)
+    for (const [other] of streamGrants) {
+      if (other !== key) assert(record().grants[other] !== true, `${key} does not imply ${other}`)
+    }
+    assertEqual(record().activeUnit, null, 'selecting a stream does not start it')
+    run('omarchy-plugin-approve', args)
+    assert(record().grants[key] !== true, `reapproval does not retain ${key}`)
+  }
+  assert(text.includes('opaque TCP tunnels') && text.includes('no local services'), 'review discloses public proxy authority')
+  assert(text.includes('no recording') && text.includes('audio from other applications'), 'review distinguishes playback and capture')
+  const priorProxy = JSON.stringify(record())
+  run('omarchy-plugin-approve', args.concat(['--allow-network', '--allow-network-proxy']), false)
+  assertEqual(JSON.stringify(record()), priorProxy, 'raw network cannot bypass the proxy boundary')
   assert(text.includes('Private persistent storage; saved data remains after revocation'), 'review explains storage persistence')
   run('omarchy-plugin-approve', args.concat(['--allow-storage']))
   assertEqual(record().grants.storage, true, 'explicit storage selection reaches the native record')
@@ -104,6 +126,7 @@ try {
 
   const source = fs.readFileSync(path.join(root, 'shell/plugins/panels/plugin-review/Review.qml'), 'utf8')
   const scope = { revision: review, busy: false, pluginId: 'test.selection', network: false, http: [], exec: {},
+    networkProxy: false, audioPlayback: false, microphone: false, audioCapture: false,
     notifications: false, settings: {read: [], write: []}, openUrls: false, storage: false, desktopGeometry: false, media: '', folders: {data: selected}, writableFolders: {},
     run: (operation, args) => { scope.args = args } }
   vm.createContext(scope)
@@ -120,6 +143,14 @@ try {
   scope.approve()
   assert(scope.args.includes('--read') && !scope.args.includes('--write'), 'reviewer draft defaults to read-only, even for a writable request')
   assert(!scope.args.includes('--allow-storage'), 'reviewer storage defaults to denied')
+  for (const [key, flag] of streamGrants) {
+    assert(!scope.args.includes(flag), `${key} reviewer draft defaults to denied`)
+    scope[key] = true
+    scope.approve()
+    assert(scope.args.includes(flag), `${key} reviewer selection reaches the CLI`)
+    scope[key] = false
+    scope.approve()
+  }
   scope.storage = true
   scope.approve()
   assert(scope.args.includes('--allow-storage'), 'reviewer storage selection reaches the canonical CLI')

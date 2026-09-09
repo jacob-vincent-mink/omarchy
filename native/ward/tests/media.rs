@@ -202,6 +202,8 @@ fn media_controller_child() {
       Limits::default(),
       &grants,
       worker::Resources {
+            audio: None,
+            network_proxy: None,
         render_node: None,
         media: Some(&proxy),
         requests: None,

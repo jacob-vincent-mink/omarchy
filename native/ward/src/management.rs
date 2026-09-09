@@ -43,10 +43,17 @@ struct Selections {
   read: BTreeMap<String, PathBuf>,
   write: BTreeMap<String, PathBuf>,
   network: bool,
+  #[serde(rename = "networkProxy")]
+  network_proxy: bool,
   http: BTreeSet<String>,
   exec: BTreeMap<String, BTreeSet<String>>,
   media: Option<String>,
   notifications: bool,
+  #[serde(rename = "audioPlayback")]
+  audio_playback: bool,
+  microphone: bool,
+  #[serde(rename = "audioCapture")]
+  audio_capture: bool,
   settings: crate::settings::Grant,
   #[serde(rename = "openUrls")]
   open_urls: bool,
@@ -149,8 +156,12 @@ fn execute(root: &Path, bytes: &[u8]) -> io::Result<Value> {
       let manifest = Manifest::read(&store.revisions().join(&revision))?;
       let mut grants = Grants {
         network: selections.network,
+        network_proxy: selections.network_proxy,
         media: selections.media,
         notifications: selections.notifications,
+        audio_playback: selections.audio_playback,
+        microphone: selections.microphone,
+        audio_capture: selections.audio_capture,
         settings: selections.settings,
         open_urls: selections.open_urls,
         storage: selections.storage,

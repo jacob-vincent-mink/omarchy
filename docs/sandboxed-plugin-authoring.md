@@ -75,7 +75,7 @@ Worker-local XDG suffixes are preserved exactly: `$HOME/.local/state/pet/save.js
 
 For example, `["/bin/bash", "/plugin/scripts/save.sh"]` starts a bundled script inside the sandbox. The script might read `/plugin/defaults/save.json` and write `$HOME/save.json`. Neither action is a host exec request. Ordinary Quickshell `Process` calls and bundled native modules inherit the sandbox restrictions.
 
-For Omagotchi's host-side `pw-play`, `/plugin/sounds/chime.wav` would be the wrong argument: `/plugin` is a mount in the worker's filesystem, not in the host command's filesystem. Pass `$OMARCHY_PLUGIN_PATH/sounds/chime.wav` instead. Omarchy stages those shipped sounds automatically; no storage grant or author-written DATA initialization is needed for that playback.
+For an explicitly approved host command, `/plugin/sounds/chime.wav` would be the wrong argument: `/plugin` is a mount in the worker's filesystem, not in the host command's filesystem. Pass `$OMARCHY_PLUGIN_PATH/sounds/chime.wav` instead. New audio integrations should use the dedicated `audioPlayback` grant and sandbox-local `omarchy-ward-play` helper described below; that path needs neither host execution nor host asset staging.
 
 `OMARCHY_PLUGIN_PATH` exists when exec access is admitted. Its value names a fresh controller-owned copy of the reviewed bundle, not the editable checkout. Removed assets do not carry over from another revision, and the service manager removes temporary staging when the controller stops, including abnormal exits. Never cache this host path across launches.
 
@@ -129,8 +129,12 @@ This is the complete current `sandbox` request vocabulary. Unknown fields inside
 | `sandbox.requests` key | Accepted shape | Meaning and selection |
 | --- | --- | --- |
 | `storage` | Atomic request | Persistent private home; `--allow-storage` |
-| `network` | Atomic request | Broad host network namespace, including local services; `--allow-network`. Cannot be granted together with scoped HTTP |
+| `network` | Atomic request | Broad host network namespace, including local services; `--allow-network`. Cannot be granted together with scoped HTTP or the public proxy |
+| `networkProxy` | Atomic request | Public-destination HTTP/CONNECT streaming proxy; `--allow-network-proxy`. Includes opaque TCP tunnels and data transmission, not per-URL scope enforcement |
 | `notifications` | Atomic request | Text-only notifications; `--allow-notifications` |
+| `audioPlayback` | Atomic request | Play audio on the default output; `--allow-audio-playback`. No recording |
+| `microphone` | Atomic request | Record the default input, including a user-selected virtual source; `--allow-microphone` |
+| `audioCapture` | Atomic request | Record the default output monitor, including other applications' audio; `--allow-audio-capture` |
 | `desktopGeometry` | Atomic request | Read-only all-output/workspace/window geometry; `--allow-desktop-geometry`. No titles, content or compositor control |
 | `openUrls` | Atomic request | HTTP(S) browser/webapp handoff; `--allow-open-urls`. Can transmit data without worker networking |
 | `media` | Atomic request | Filtered access to one existing MPRIS player; user selects exact `org.mpris.MediaPlayer2.Name` with `--media` |
@@ -140,6 +144,41 @@ This is the complete current `sandbox` request vocabulary. Unknown fields inside
 | `exec` | Names mapped to `{ "executable": "/usr/bin/tool", "tree": { ... }, "required": ["leaf"], "lifetime": "request" }` | Up to 16 installed executables; selected by `--exec name:leaf`. `required` defaults empty; `lifetime` defaults to `request`, or explicitly `plugin` for long-running foreground jobs |
 
 Identifiers for resource names, settings and leaves are 1–96 ASCII characters: start with a letter or digit, then letters, digits, `.`, `_` or `-`; `..` is forbidden. Settings additionally exclude `id`, `sandbox`, `__proto__`, `constructor` and `prototype`. Each key covers its whole JSON value, not a nested path. Read does not imply write, nor write imply read. There is no all-settings wildcard, system-settings namespace, application-account provider or arbitrary host-command permission.
+
+### Audio playback and capture
+
+These are three independent, revision-bound permissions. None implies either of the others, networking, media-player publication, device enumeration, routing changes or control of other applications. A missing or false field in `/run/plugin/grants.json` means denied; selecting a grant does not itself start an audio stream.
+
+Ward exposes one-way sample streams, not the desktop's PipeWire/PulseAudio socket. All streams use signed 16-bit little-endian PCM, 48,000 frames per second, two interleaved channels (left, right), with no container header. Decode media files, apply volume and encode recordings inside the worker. Ward's trusted host backend uses fixed `pw-cat` playback/record invocations; plugin-supplied filenames, URLs, formats, device names and PipeWire properties never become host arguments.
+
+| Worker operation | Direction and lifetime |
+| --- | --- |
+| `/bootstrap --audio-playback` | Read PCM from stdin, play on the default output, and wait for drain after EOF. Exit zero means the backend completed, not that a physical speaker was audible |
+| `/bootstrap --microphone` | Write PCM from the default input to stdout until the caller stops |
+| `/bootstrap --audio-capture` | Write PCM from the default output's monitor to stdout until the caller stops |
+| `omarchy-ward-play <local-file> [volume]` | Shared-runtime convenience helper: decode a local regular file with FFmpeg inside the sandbox and feed playback. Volume defaults to 1 and accepts 0–1 with up to three decimal places |
+
+For a bundled effect, use a QML `Process.command` such as `["omarchy-ward-play", Qt.resolvedUrl("sounds/chime.wav").toString().replace(/^file:\/\//, ""), "0.5"]`. The filename is sandbox-local, not an `OMARCHY_PLUGIN_PATH` host token. This needs `audioPlayback`, not a host-exec request. Ordinary decoder/player processes remain subject to the worker sandbox. Continuous players may send PCM directly instead of using the file helper. Keep a player in the plugin's one shared service, not in each bar placement.
+
+Playback is limited to two simultaneous streams per plugin; microphone and output capture each permit one. The combined maximum is four, with at most eight stream-start attempts per second. Each stream has a 16 KiB userspace relay buffer plus bounded kernel/audio-server buffers and backpressure. All jobs share the controller's existing memory, task and CPU limits. Active streaming has no ten-second request deadline; finite playback has a three-second drain bound after EOF reaches the backend. A busy endpoint rejects a new stream rather than queuing unbounded work.
+
+These raw streaming operations do not support `--json`. Admission failures and backend failures return nonzero. A capture stream is indefinite: unexpected backend EOF is an unavailable outcome, not a successful finite recording. Stop the capture process when the desired recording is complete; closing its connection stops its host stream. Stopping/revoking the plugin or losing its controller stops every stream. Revocation cannot retract samples already captured, saved or transmitted, or audio already delivered for playback.
+
+Input/output selection belongs to the host's session manager and routing policy. `microphone` follows the default input, which can be a virtual source selected by the user; it is not a promise that samples originate from a particular physical microphone. `audioCapture` requests sink-monitor capture rather than source capture and covers the default output, not every output simultaneously. Host routing can change what these streams hear. No plugin-controlled source/sink selector is exposed.
+
+The existing `media` grant controls one already-running MPRIS player. Neither it nor `audioPlayback` permits publishing a new player to desktop media controls. The existing scoped HTTP broker is also separate: it buffers bounded responses and is not a continuous HTTP/CONNECT proxy for media players. Do not substitute the broad network grant when a restricted streaming-network contract is required.
+
+### Public streaming proxy
+
+`networkProxy` is a separate atomic request, selected with `--allow-network-proxy`. It provides long-lived public-destination connections while leaving the worker in its private network namespace. It is broader than a named HTTP scope: any public destination and TCP port may be selected, and CONNECT is an opaque bidirectional TCP tunnel. Ward does not inspect TLS or enforce HTTP methods, paths or bodies inside that tunnel. Plugins can send data through this permission. It grants neither host credentials nor access to loopback, private, link-local, reserved or other denied address classes. It cannot be combined with broad `network`, which would bypass those restrictions.
+
+The bootstrap starts a bounded localhost bridge at `http://127.0.0.1:18765` inside the existing private namespace, after applying the worker restrictions. It sets lowercase and uppercase `http_proxy`, `https_proxy` and `all_proxy`, with empty `no_proxy`. Proxy-aware sandboxed tools can use those variables; tools that ignore them cannot reach the Internet directly. The worker receives TLS trust roots for its own HTTPS validation, not the host's resolver, network namespace or audio sockets. No nested namespace or extra capability is needed.
+
+The host accepts absolute-form HTTP GET/HEAD with no request body, or CONNECT with an explicit host and port. Each ordinary HTTP connection carries exactly one request, with a rewritten Host and `Connection: close`; proxy authorization and fixed hop-by-hop fields are not forwarded. Redirects are returned to the client, which must make a new proxy request. Every new connection resolves again on the host, rejects the entire result if any of at most sixteen distinct addresses is disallowed, checks that routing does not point back to the host, then connects to that validated numeric address without a second DNS lookup. IPv4-mapped, NAT64, 6to4 and other non-public/transition address forms are conservatively rejected. This is destination-class filtering, not a claim that a public server is trustworthy or cannot itself relay traffic.
+
+There are eight concurrent connections and eight starts per second per plugin. Headers are capped at 16 KiB; setup, including DNS and route lookup, has a ten-second watchdog. Streaming has no total body-size or duration cap, but ends after sixty seconds without relay progress. Each relay uses two fixed 16 KiB buffers with backpressure, plus kernel buffers, under the existing controller/worker resource limits. Disconnect, stop, revocation and controller loss terminate owned connections. Data already sent cannot be retracted. The proxy wire protocol is HTTP, not the bootstrap JSON operation protocol; an HTTP 403 is a denied destination, and an HTTP 503 means proxy capacity was unavailable.
+
+Named `http` grants retain their existing API-call limits and exact scope matching. A plugin may request both when it needs both interfaces, but the public proxy is broader public-network authority and must be disclosed as such; an HTTP scope does not constrain connections made through the proxy. Audio playback remains separately selected.
 
 ### Exec tree schema
 
@@ -213,7 +252,7 @@ Read `/run/plugin/grants.json`, not the manifest, to discover admitted access. T
 | Observe desktop layout | Own shell API's read-only `desktopGeometry` property | Requires `desktopGeometry` selection; detached live geometry or `null`. No compositor socket, handles or commands |
 | Existing player | MPRIS through the worker's filtered `DBUS_SESSION_BUS_ADDRESS` | Exact selected player at `/org/mpris/MediaPlayer2`: property Get/GetAll, introspection, Next/Previous/Pause/PlayPause/Stop/Play/Seek/SetPosition and PropertiesChanged/Seeked. No Properties.Set, OpenUri, Raise, Quit, arbitrary bus access or player publication |
 
-All broker operations share a 32-connections-per-second admission ceiling. Revocation cancels owned jobs and stops the worker but cannot undo completed writes or retract effects delegated to other host services.
+The bounded request brokers in this table share a 32-connections-per-second admission ceiling. Audio and the streaming proxy have their separately documented eight-starts-per-second limits. Revocation cancels owned jobs and stops the worker but cannot undo completed writes or retract effects delegated to other host services.
 
 ### Approved grants are signed into the record
 

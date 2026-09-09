@@ -28,6 +28,10 @@ The Omarchy bootstrap sets `OMARCHY_PATH=/runtime` inside the already restricted
 
 The host opens the runtime directly and passes its descriptor; selection does not depend on propagating the host process's environment through the systemd user manager. Existing Omarchy host-effect helpers still have their separate controller-side environment requirements. This change does not add the proposed host-exec environment profile or desktop handoffs.
 
+The staged `omarchy-ward-play <local-file> [volume]` helper decodes with FFmpeg inside the worker and feeds Ward's fixed-format PCM playback endpoint. It requires the separate `audioPlayback` selection and does not invoke a host executable on a plugin-supplied file. Microphone and output capture use the separate raw bootstrap operations documented in the [authoring reference](sandboxed-plugin-authoring.md#audio-playback-and-capture). These additions require a matching native Ward build and a newly staged adapter.
+
+Ward itself owns the optional `networkProxy` localhost bridge; the Omarchy loader does not start a second proxy or network namespace. The native bootstrap starts it only when its admitted socket is mounted, after applying worker restrictions. Proxy-aware helpers inherit the private bridge's proxy environment; there is no direct worker Internet access.
+
 ## Installed-style verification
 
 Build the matched native executable/module and stage the native files and adapter separately, using fresh directories:

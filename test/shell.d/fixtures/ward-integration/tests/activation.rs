@@ -56,6 +56,7 @@ fn activation(review_ui: bool) {
     "entryPoints": {"panel": "worker.qml"}, "sandbox": {
       "version": 1, "entryPoint": "worker.qml", "requests": {
         "network": true, "notifications": true, "storage": true, "desktopGeometry": true, "settings": {"write": ["width"]}, "filesystem": [{"name": "notes"}],
+        "networkProxy": true, "audioPlayback": true, "microphone": true, "audioCapture": true,
         "exec": {"helper": {"executable": "/usr/bin/printf", "lifetime": "plugin", "tree": {
           "next": [{"arg": {"kind": "exact", "value": "fixture"}, "then": {"end": "session"}}]
         }}},
@@ -143,6 +144,10 @@ ShellRoot {{
         folders: review.folders, folderField: point("review-folder-notes"),
         folderFocus: folder && folder.activeFocus,
         approved: review.selectionApproved, current: review.current, network: review.network, notifications: review.notifications, settings: review.settings,
+        networkProxy: review.networkProxy, proxyButton: point("review-network-proxy"),
+        audioPlayback: review.audioPlayback, playbackButton: point("review-audio-playback"),
+        microphone: review.microphone, microphoneButton: point("review-microphone"),
+        audioCapture: review.audioCapture, captureButton: point("review-audio-capture"),
         settingsButton: point("review-setting-write-width"),
         storage: review.storage, storageButton: point("review-storage"),
         desktopGeometry: review.desktopGeometry, geometryButton: point("review-desktop-geometry"),
@@ -269,6 +274,27 @@ ShellRoot {{
         proceed.recv_timeout(Duration::from_secs(8)).unwrap();
       };
       capture("selection");
+      for key in ["networkProxy", "audioPlayback", "microphone", "audioCapture"] {
+        assert_eq!(state[key], false, "new access was selected by default: {key}");
+      }
+      click(&reveal("playbackButton"), "playbackButton");
+      let selected = wait(&|state| state["audioPlayback"] == true);
+      assert_eq!(selected["microphone"], false);
+      assert_eq!(selected["audioCapture"], false);
+      click(&reveal("microphoneButton"), "microphoneButton");
+      wait(&|state| state["microphone"] == true);
+      click(&reveal("captureButton"), "captureButton");
+      wait(&|state| state["audioCapture"] == true);
+      capture("audio-independent-selections");
+      // Review only: never approve recording authority in this graphics test.
+      click(&reveal("microphoneButton"), "microphoneButton");
+      wait(&|state| state["microphone"] == false);
+      click(&reveal("captureButton"), "captureButton");
+      wait(&|state| state["audioCapture"] == false);
+      click(&reveal("proxyButton"), "proxyButton");
+      let selected = wait(&|state| state["networkProxy"] == true);
+      assert_eq!(selected["network"], false);
+      capture("proxy-selected");
       assert_eq!(state["desktopGeometry"], false);
       click(&reveal("geometryButton"), "geometryButton");
       wait(&|state| state["desktopGeometry"] == true);
@@ -325,6 +351,10 @@ ShellRoot {{
         "approval started a plugin"
       );
       assert_eq!(state["current"]["grants"]["network"], false);
+      assert_eq!(state["current"]["grants"]["networkProxy"], true);
+      assert_eq!(state["current"]["grants"]["audioPlayback"], true);
+      assert_ne!(state["current"]["grants"]["microphone"], true);
+      assert_ne!(state["current"]["grants"]["audioCapture"], true);
       assert_eq!(
         state["current"]["grants"]["http"]["catalog"],
         state["revision"]["requests"]["http"]["catalog"]["scope"]
@@ -357,6 +387,11 @@ ShellRoot {{
       run("omarchy-plugin-review", &["test.activation", "--ui"]);
       let state = wait(&|state| state["current"]["enabled"] == true && state["busy"] == false);
       assert_eq!(state["storage"], false, "reopen silently selected storage");
+      for key in ["networkProxy", "audioPlayback", "microphone", "audioCapture"] {
+        assert_eq!(state[key], false, "reopen silently selected {key}");
+      }
+      assert_eq!(state["current"]["grants"]["networkProxy"], true);
+      assert_eq!(state["current"]["grants"]["audioPlayback"], true);
       assert_eq!(state["exec"], serde_json::json!({}), "reopen silently selected execution");
       assert_eq!(state["current"]["grants"]["exec"]["helper"]["lifetime"], "plugin");
       assert_eq!(
@@ -415,7 +450,7 @@ ShellRoot {{
   let mut withdrawn = false;
   let mut latest_frame: Option<desktop::Frame> = None;
   let mut pending_capture = None;
-  while start.elapsed() < Duration::from_secs(40) {
+  while start.elapsed() < Duration::from_secs(if review_ui { 65 } else { 40 }) {
     let time = start.elapsed().as_millis() as u32;
     while let Ok(stage) = stages.try_recv() {
       match stage {

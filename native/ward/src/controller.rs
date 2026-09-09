@@ -131,6 +131,35 @@ impl Approval {
       .store
       .with_authority(&self.id, self.epoch, &self.unit, |_| Ok(()))
   }
+  pub(crate) fn with_audio<T>(
+    &self,
+    mode: crate::audio::Mode,
+    effect: impl FnOnce(&str) -> io::Result<T>,
+  ) -> io::Result<T> {
+    self
+      .store
+      .with_authority(&self.id, self.epoch, &self.unit, |_| {
+        if mode.granted(&self.grants) {
+          effect(&self.id)
+        } else {
+          Err(crate::operation::Status::Denied.error())
+        }
+      })
+  }
+  pub(crate) fn with_network_proxy<T>(
+    &self,
+    effect: impl FnOnce() -> io::Result<T>,
+  ) -> io::Result<T> {
+    self
+      .store
+      .with_authority(&self.id, self.epoch, &self.unit, |_| {
+        if self.grants.network_proxy {
+          effect()
+        } else {
+          Err(crate::operation::Status::Denied.error())
+        }
+      })
+  }
   pub(crate) fn with_request<T>(
     &self,
     kind: crate::requests::Kind,
@@ -585,6 +614,8 @@ struct RunningGraphics {
   child: std::process::Child,
   log: Vec<u8>,
   media: Option<crate::media::MediaProxy>,
+  audio: Option<crate::audio::Broker>,
+  network_proxy: Option<crate::network_proxy::Broker>,
   requests: Option<crate::requests::Broker>,
   _runtime: tempfile::TempDir,
 }
@@ -664,6 +695,12 @@ impl RunningGraphics {
           })
           .transpose()?;
         // Resolve staged assets before creating the broker that consumes them.
+        let audio = crate::audio::Broker::prepare(runtime.path(), &record.grants)?;
+        let network_proxy = record
+          .grants
+          .network_proxy
+          .then(|| crate::network_proxy::Broker::prepare(runtime.path()))
+          .transpose()?;
         let plugin_path = if record.grants.exec.is_empty() {
           None
         } else {
@@ -728,6 +765,8 @@ impl RunningGraphics {
           crate::worker::Resources {
             render_node: Some(display.render_node()),
             media: media.as_ref(),
+            audio: audio.as_ref(),
+            network_proxy: network_proxy.as_ref(),
             requests: requests.as_ref(),
             runtime: worker_runtime,
             context: worker_runtime.as_ref().map(|_| &context_directory),
@@ -759,6 +798,8 @@ impl RunningGraphics {
           child,
           log: Vec::new(),
           media,
+          audio,
+          network_proxy,
           requests,
           _runtime: runtime,
         })
@@ -768,6 +809,12 @@ impl RunningGraphics {
     use std::io::Read;
     if let Some(media) = &mut self.media {
       media.check()?;
+    }
+    if let Some(audio) = &mut self.audio {
+      audio.dispatch(approval)?;
+    }
+    if let Some(proxy) = &mut self.network_proxy {
+      proxy.dispatch(approval)?;
     }
     if let Some(requests) = &mut self.requests {
       requests.dispatch(approval)?;

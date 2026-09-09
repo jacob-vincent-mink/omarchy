@@ -24,5 +24,6 @@ install -Dm755 "$adapter_dir/open-url" "$runtime_dir/bin/omarchy-launch-browser"
 install -Dm755 "$adapter_dir/open-url" "$runtime_dir/bin/omarchy-launch-webapp"
 install -Dm755 "$adapter_dir/http" "$runtime_dir/bin/omarchy-ward-http"
 install -Dm755 "$adapter_dir/exec" "$runtime_dir/bin/omarchy-ward-exec"
+install -Dm755 "$adapter_dir/play" "$runtime_dir/bin/omarchy-ward-play"
 # A partial staging failure has no selectable manifest.
 install -Dm644 "$adapter_dir/runtime.json" "$runtime_dir/runtime.json"

@@ -104,9 +104,18 @@ Item {
               width: parent.width
               visible: !!review.revision && review.revision.requests.network
               label: review.requestLabel("network", "Network")
-              description: "Unrestricted Internet and local services. Selecting this clears scoped HTTP selections."
+              description: "Unrestricted Internet and local services. Selecting this clears scoped HTTP and public proxy selections."
               checked: review.network
               onClicked: review.network = !review.network
+            }
+            Toggle {
+              width: parent.width
+              visible: !!review.revision && review.revision.requests.networkProxy
+              objectName: "review-network-proxy"
+              label: review.requestLabel("networkProxy", "Public streaming proxy")
+              description: "Connect to public Internet destinations, including opaque TCP tunnels. Can transmit data. No local services or per-URL restrictions."
+              checked: review.networkProxy
+              onClicked: review.networkProxy = !review.networkProxy
             }
             Toggle {
               width: parent.width
@@ -116,6 +125,33 @@ Item {
               description: "Send bounded text notifications. No actions or images."
               checked: review.notifications
               onClicked: review.notifications = !review.notifications
+            }
+            Toggle {
+              width: parent.width
+              visible: !!review.revision && review.revision.requests.audioPlayback
+              objectName: "review-audio-playback"
+              label: review.requestLabel("audioPlayback", "Play audio")
+              description: "Play on the default output. No microphone, recording or control of other players."
+              checked: review.audioPlayback
+              onClicked: review.audioPlayback = !review.audioPlayback
+            }
+            Toggle {
+              width: parent.width
+              visible: !!review.revision && review.revision.requests.microphone
+              objectName: "review-microphone"
+              label: review.requestLabel("microphone", "Record microphone input")
+              description: "Record the default input, including a virtual source if you selected one. Captured audio cannot be retracted."
+              checked: review.microphone
+              onClicked: review.microphone = !review.microphone
+            }
+            Toggle {
+              width: parent.width
+              visible: !!review.revision && review.revision.requests.audioCapture
+              objectName: "review-audio-capture"
+              label: review.requestLabel("audioCapture", "Record system output")
+              description: "Record the default output monitor, including other applications' audio. Captured audio cannot be retracted."
+              checked: review.audioCapture
+              onClicked: review.audioCapture = !review.audioCapture
             }
             Repeater {
               model: review.settingRequests
@@ -256,6 +292,8 @@ Item {
             }
             Label {
               visible: !!review.revision && !review.revision.requests.network && !review.revision.requests.notifications && review.settingRequests.length === 0 && !review.revision.requests.openUrls
+                && !review.revision.requests.networkProxy
+                && !review.revision.requests.audioPlayback && !review.revision.requests.microphone && !review.revision.requests.audioCapture
                 && !review.revision.requests.media && !review.revision.requests.storage && !review.revision.requests.desktopGeometry && review.folderRequests.length === 0 && review.httpRequests.length === 0
               text: "This revision requests no additional access."
               color: Color.muted; width: parent.width

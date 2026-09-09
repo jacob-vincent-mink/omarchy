@@ -151,6 +151,17 @@ fn run(args: &[OsString], json: bool) -> io::Result<Outcome> {
 
 fn run_internal(args: &[OsString]) -> io::Result<()> {
   match args {
+    [mode] if mode == "--network-proxy-execute" => omarchy_ward::network_proxy::execute(),
+    [mode] if mode == "--network-proxy-bridge" => omarchy_ward::network_proxy::bridge(),
+    [mode] if mode == "--audio-playback" => {
+      omarchy_ward::audio::request(omarchy_ward::audio::Mode::Playback)
+    }
+    [mode] if mode == "--microphone" => {
+      omarchy_ward::audio::request(omarchy_ward::audio::Mode::Microphone)
+    }
+    [mode] if mode == "--audio-capture" => {
+      omarchy_ward::audio::request(omarchy_ward::audio::Mode::Capture)
+    }
     [mode] if mode == "--http-execute" => omarchy_ward::http::execute(),
     [mode, root] if mode == "--manage" => omarchy_ward::management::run(std::path::Path::new(root)),
     [mode, title, body] if mode == "--notify" => {
@@ -193,6 +204,7 @@ fn run_internal(args: &[OsString]) -> io::Result<()> {
     ),
     [mode, entry] if mode == "--runtime-worker" => {
       omarchy_ward::worker::restrict_bootstrap()?;
+      omarchy_ward::network_proxy::start_bridge()?;
       let entry = entry
         .to_str()
         .filter(|entry| omarchy_ward::runtime::valid_entry(entry))
@@ -205,6 +217,7 @@ fn run_internal(args: &[OsString]) -> io::Result<()> {
     }
     [mode] if mode == "--worker" => {
       omarchy_ward::worker::restrict_bootstrap()?;
+      omarchy_ward::network_proxy::start_bridge()?;
       Err(
         Command::new("/usr/bin/quickshell")
           .stdout(io::stderr().as_fd().try_clone_to_owned()?)
@@ -215,6 +228,7 @@ fn run_internal(args: &[OsString]) -> io::Result<()> {
     }
     [mode, entry] if mode == "--worker" => {
       omarchy_ward::worker::restrict_bootstrap()?;
+      omarchy_ward::network_proxy::start_bridge()?;
       let entry = std::path::Path::new(entry);
       if entry.as_os_str().is_empty()
         || entry

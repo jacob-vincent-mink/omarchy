@@ -2,6 +2,8 @@
 //! revision approval, host-connection admission, and explicit resource grants.
 //! These modules do not yet constitute an integrated shell plugin system.
 
+pub mod audio;
+pub mod network_proxy;
 pub mod channel;
 pub mod context;
 pub mod controller;

@@ -336,7 +336,7 @@ struct AddressPolicy {
 
 // Deliberately conservative address classes, not a claim of Internet
 // reachability. Exact IP origins can explicitly select a local API.
-fn public(ip: IpAddr) -> bool {
+pub(crate) fn public(ip: IpAddr) -> bool {
   match ip {
     IpAddr::V4(v) => {
       let [a, b, _, _] = v.octets();

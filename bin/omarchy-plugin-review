@@ -57,8 +57,12 @@ else
       "    Uses existing host accounts, files and network; completed effects cannot be undone by revocation."),
     ([
       {key: "network", label: "Network, including local services"},
+      {key: "networkProxy", label: "Public HTTP/CONNECT proxy, including opaque TCP tunnels and data transmission; no local services or per-URL restrictions"},
       {key: "media", label: "One selected media player"},
       {key: "notifications", label: "Text-only notifications"},
+      {key: "audioPlayback", label: "Play audio on the default output; no recording"},
+      {key: "microphone", label: "Record the default input (microphone or user-selected virtual source)"},
+      {key: "audioCapture", label: "Record the default output monitor, including audio from other applications"},
       {key: "desktopGeometry", label: "Desktop geometry: output/workspace layout and window rectangles; no titles or window control"},
       {key: "openUrls", label: "Open HTTP(S) links in browser sessions"},
       {key: "storage", label: "Private persistent storage; saved data remains after revocation"}
@@ -70,7 +74,7 @@ else
       and (($requests.http // {}) | length) == 0
       and (($requests.exec // {}) | length) == 0
       and (($requests.settings.read // []) | length) == 0 and (($requests.settings.write // []) | length) == 0
-      and ([$requests.network, $requests.media, $requests.notifications, $requests.desktopGeometry, $requests.openUrls, $requests.storage] | any(. != null and . != false) | not)
+      and ([$requests.network, $requests.networkProxy, $requests.media, $requests.notifications, $requests.audioPlayback, $requests.microphone, $requests.audioCapture, $requests.desktopGeometry, $requests.openUrls, $requests.storage] | any(. != null and . != false) | not)
       then "  None" else empty end),
     "", "No plugin code was run. Requests are not grants.",
     "Approve this exact revision with:",

@@ -198,8 +198,8 @@ impl Unit {
     )
   }
 
-  fn authenticate_peer(peer: &crate::channel::Channel, group: &Path) -> io::Result<()> {
-    use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+  fn authenticate_peer(peer: &impl std::os::fd::AsFd, group: &Path) -> io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     let credentials = rustix::net::sockopt::socket_peercred(peer)?;
     if credentials.uid.as_raw() != unsafe { libc::geteuid() } {
       return Err(io::Error::other("controller has unexpected uid"));
@@ -351,7 +351,7 @@ pub fn controller_identity() -> io::Result<String> {
 
 /// A broker endpoint belongs to this controller's service. Admit live workers
 /// and helpers from that service, not a caller-supplied plugin identifier.
-pub(crate) fn authenticate_member(peer: &crate::channel::Channel) -> io::Result<()> {
+pub(crate) fn authenticate_member(peer: &impl std::os::fd::AsFd) -> io::Result<()> {
   Unit::authenticate_peer(peer, &controller_group()?)
 }
 

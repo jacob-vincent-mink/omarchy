@@ -70,6 +70,8 @@ pub fn stage_plugin_assets(bundle: &Path, revision: &str, runtime: &Path) -> io:
 pub struct Resources<'a> {
   pub render_node: Option<&'a Path>,
   pub media: Option<&'a MediaProxy>,
+  pub audio: Option<&'a crate::audio::Broker>,
+  pub network_proxy: Option<&'a crate::network_proxy::Broker>,
   pub requests: Option<&'a crate::requests::Broker>,
   pub runtime: Option<&'a File>,
   pub context: Option<&'a File>,
@@ -131,6 +133,29 @@ pub fn spawn(
     (Some(name), Some(proxy)) => Some(proxy.socket(name)?),
     (None, None) => None,
     _ => return Err(io::Error::other("media grant and prepared proxy disagree")),
+  };
+  let audio = match (
+    crate::audio::Mode::ALL
+      .iter()
+      .any(|mode| mode.granted(grants)),
+    resources.audio,
+  ) {
+    (true, Some(broker)) => broker.sockets(grants)?,
+    (false, None) => Vec::new(),
+    _ => {
+      return Err(io::Error::other(
+        "audio grants and prepared endpoints disagree",
+      ));
+    }
+  };
+  let network_proxy = match (grants.network_proxy, resources.network_proxy) {
+    (true, Some(proxy)) if !grants.network => Some(proxy.socket()),
+    (false, None) => None,
+    _ => {
+      return Err(io::Error::other(
+        "network proxy grant and endpoint disagree",
+      ));
+    }
   };
   // The storage grant is only satisfiable when the controller prepared an
   // owned private directory; a grant without the directory (or vice versa) is
@@ -235,6 +260,30 @@ pub fn spawn(
       "/etc/ca-certificates",
       "/etc/ca-certificates",
     ]);
+  }
+  if grants.network_proxy {
+    // Client TLS stays inside the worker; no DNS configuration or shared net.
+    command.args([
+      "--ro-bind",
+      "/etc/ssl",
+      "/etc/ssl",
+      "--ro-bind",
+      "/etc/ca-certificates",
+      "/etc/ca-certificates",
+    ]);
+    for name in [
+      "http_proxy",
+      "https_proxy",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "ALL_PROXY",
+      "all_proxy",
+    ] {
+      command.args(["--setenv", name, crate::network_proxy::URL]);
+    }
+    for name in ["no_proxy", "NO_PROXY"] {
+      command.args(["--setenv", name, ""]);
+    }
   }
   if let Some(node) = resources.render_node {
     let metadata = node.metadata()?;
@@ -345,6 +394,18 @@ pub fn spawn(
     ]);
     descriptors.push(file.as_raw_fd());
   }
+  for (file, destination) in &audio {
+    command.args(["--ro-bind-fd", &file.as_raw_fd().to_string(), destination]);
+    descriptors.push(file.as_raw_fd());
+  }
+  if let Some(file) = network_proxy {
+    command.args([
+      "--ro-bind-fd",
+      &file.as_raw_fd().to_string(),
+      crate::network_proxy::PATH,
+    ]);
+    descriptors.push(file.as_raw_fd());
+  }
   // Runtime-readable view of the actually-granted access, authored by the
   // controller from its admitted record. Read-only so plugin code can adapt to
   // declined optional access but cannot rewrite its own grants.
@@ -447,6 +508,10 @@ pub fn restrict_bootstrap() -> io::Result<()> {
     "/run/plugin/settings",
     "/run/plugin/exec",
     "/run/plugin/open-url",
+    "/run/plugin/audio-playback",
+    "/run/plugin/microphone",
+    "/run/plugin/audio-capture",
+    crate::network_proxy::PATH,
   ] {
     match OpenOptions::new()
       .read(true)
