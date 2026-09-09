@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 1240" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="13">
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 z" fill="#333"/></marker>
+    <style>
+      .t { font-weight: 700; }
+      .lbl { font-weight: 600; }
+      .cap { fill: #555; font-size: 11px; }
+      .note { font-size: 11px; fill: #333; }
+      .ok { fill: #2a7; }
+      .no { fill: #b00; }
+      .gate { fill: #fff; stroke: #888; stroke-width: 1.2; rx: 6; }
+      .edge { stroke: #444; stroke-width: 1.4; fill: none; }
+    </style>
+  </defs>
+  <rect x="0" y="0" width="1180" height="1240" fill="#fafafa"/>
+  <text x="590" y="30" text-anchor="middle" class="t" font-size="18">Ward trust boundaries — eight gates, each fail-closed</text>
+  <text x="590" y="50" text-anchor="middle" class="cap">Authority flows only downward and in; each gate re-checks the caller. A boundary that cannot be crossed cleanly denies the capability — it never widens it.</text>
+
+  <!-- Title rows: left = what crosses, right = what is blocked -->
+  <text x="90" y="80" class="lbl" fill="#2a7">✓ permitted across the gate</text>
+  <text x="720" y="80" class="lbl" fill="#b00">✗ blocked / fails closed</text>
+
+  <!-- ===== TB-1 ===== -->
+  <g>
+    <rect x="60" y="96" width="1060" height="118" class="gate" fill="#f2f7ff"/>
+    <text x="80" y="120" class="t" fill="#346">TB-1 · Host ⇄ Store (approval)</text>
+    <text x="80" y="146" class="note" fill="#2a7">✓ human review imports a revision and selects grants; the record is ed25519-signed and revision-bound</text>
+    <text x="80" y="166" class="note" fill="#2a7">✓ re-approve bumps an epoch; the old epoch is rejected at the next authority check</text>
+    <text x="80" y="186" class="note" fill="#b00">✗ an unsigned or tampered record fails to load; a grant not requested by the manifest cannot be approved</text>
+    <text x="80" y="206" class="note" fill="#b00">✗ import does not approve; a failed approval attempt does not revoke a running revision (Stop/Disable first)</text>
+  </g>
+
+  <!-- ===== TB-2 ===== -->
+  <g>
+    <rect x="60" y="226" width="1060" height="118" class="gate" fill="#f2f7ff"/>
+    <text x="80" y="250" class="t" fill="#346">TB-2 · Store ⇄ Controller (admission)</text>
+    <text x="80" y="276" class="note" fill="#2a7">✓ controller admits a signed record and snapshots the grants it will enforce for the run</text>
+    <text x="80" y="296" class="note" fill="#2a7">✓ Grants.validate() checks counts, ids, and coverage against the manifest's requests (fail-closed)</text>
+    <text x="80" y="316" class="note" fill="#b00">✗ a corrupt/missing record is Unavailable, never a permission decision; the caller is not told to widen the grant</text>
+    <text x="80" y="336" class="note" fill="#b00">✗ a later grants.json edit cannot widen a running plugin — the admitted snapshot governs</text>
+  </g>
+
+  <!-- ===== TB-3 ===== -->
+  <g>
+    <rect x="60" y="356" width="1060" height="118" class="gate" fill="#fff8ee"/>
+    <text x="80" y="380" class="t" fill="#a60">TB-3 · Controller ⇄ Supervisor (spawn)</text>
+    <text x="80" y="406" class="note" fill="#2a7">✓ controller verifies cgroup limits, then hands the worker controller-owned bind-fd descriptors only</text>
+    <text x="80" y="426" class="note" fill="#2a7">✓ 512 MiB · 128 tasks · 50 % CPU · --timeout; cgroup.kill on Drop; guard() is async-signal-safe</text>
+    <text x="80" y="446" class="note" fill="#b00">✗ a worker RPC cannot select a limit, an executable, or an identity — all are controller-owned</text>
+    <text x="80" y="466" class="note" fill="#b00">✗ no --ro-bind of host paths; a grant without its prepared directory is an error, not a tmpfs downgrade</text>
+  </g>
+
+  <!-- ===== TB-4 ===== -->
+  <g>
+    <rect x="60" y="486" width="1060" height="130" class="gate" fill="#fff8ee"/>
+    <text x="80" y="510" class="t" fill="#a60">TB-4 · Supervisor ⇄ Worker (bwrap sandbox)</text>
+    <text x="80" y="536" class="note" fill="#2a7">✓ --unshare-all · --unshare-user · --unshare-cgroup · --disable-userns · --cap-drop ALL · --clearenv</text>
+    <text x="80" y="556" class="note" fill="#2a7">✓ restrict_bootstrap(): close_range(3..MAX) first, then re-open granted sockets O_PATH|O_NOFOLLOW, then Landlock</text>
+    <text x="80" y="576" class="note" fill="#2a7">✓ Landlock allows only RESOLVE_UNIX on the granted sockets; /tmp, /run/plugin are tmpfs; /home is tmpfs or storage bind</text>
+    <text x="80" y="596" class="note" fill="#b00">✗ a connected inherited socket bypasses path-Landlock — so all fds are closed before re-opening</text>
+    <text x="80" y="616" class="note" fill="#b00">✗ no file→IPC grant: the worker can open a path but cannot reach a host socket through it</text>
+  </g>
+
+  <!-- ===== TB-5 ===== -->
+  <g>
+    <rect x="60" y="628" width="1060" height="130" class="gate" fill="#fdeeee"/>
+    <text x="80" y="652" class="t" fill="#a33">TB-5 · Worker ⇄ Broker (requests)</text>
+    <text x="80" y="678" class="note" fill="#2a7">✓ authenticate_member: SO_PEERCRED uid == host uid AND the peer is in the controller's cgroup</text>
+    <text x="80" y="698" class="note" fill="#2a7">✓ per-kind token Budget; 15 bounded delivery slots; a failed auth is still charged to the admission window</text>
+    <text x="80" y="718" class="note" fill="#2a7">✓ with_request re-checks live authority under the store lock immediately before the host effect runs</text>
+    <text x="80" y="738" class="note" fill="#b00">✗ an unauthenticated peer is dropped, not queued; a revoked record aborts the whole loop</text>
+    <text x="80" y="758" class="note" fill="#b00">✗ a capability whose socket is absent (not admitted) cannot be connected at all</text>
+  </g>
+
+  <!-- ===== TB-6 ===== -->
+  <g>
+    <rect x="60" y="770" width="1060" height="118" class="gate" fill="#fdeeee"/>
+    <text x="80" y="794" class="t" fill="#a33">TB-6 · Worker ⇄ Compositor (input projection)</text>
+    <text x="80" y="820" class="note" fill="#2a7">✓ the host projects key/pointer/scroll into a private Smithay display; only the focused host item receives it</text>
+    <text x="80" y="840" class="note" fill="#2a7">✓ the keymap is built incrementally from host-delivered keys (≤ 760), never the full host keymap</text>
+    <text x="80" y="860" class="note" fill="#2a7">✓ a layer can gain OnDemand focus only after a real click; the host arms exclusive focus for a summoned panel</text>
+    <text x="80" y="880" class="note" fill="#b00">✗ the worker cannot request focus, grab, or key events — only the trusted host may arm them</text>
+  </g>
+
+  <!-- ===== TB-7 ===== -->
+  <g>
+    <rect x="60" y="900" width="1060" height="118" class="gate" fill="#fdeeee"/>
+    <text x="80" y="924" class="t" fill="#a33">TB-7 · Worker ⇄ Media proxy (MPRIS)</text>
+    <text x="80" y="950" class="note" fill="#2a7">✓ xdg-dbus-proxy is started in the controller's service and dies with it; the worker only sees a unix socket</text>
+    <text x="80" y="970" class="note" fill="#2a7">✓ a fixed allow-list: transport/Properties/Introspect + Next/Previous/Pause/Play/Seek/SetPosition</text>
+    <text x="80" y="990" class="note" fill="#b00">✗ no --talk, no --own, no wildcards; OpenUri/Raise/Quit/Properties.Set are denied</text>
+    <text x="80" y="1010" class="note" fill="#b00">✗ only one selected player name; a name mismatch is an error; the bus address must be a pathname Unix bus</text>
+  </g>
+
+  <!-- ===== TB-8 ===== -->
+  <g>
+    <rect x="60" y="1030" width="1060" height="130" class="gate" fill="#fdeeee"/>
+    <text x="80" y="1054" class="t" fill="#a33">TB-8 · Worker ⇄ Host (exec / http / settings / notify)</text>
+    <text x="80" y="1080" class="note" fill="#2a7">✓ exec: positive-only argv Tree, whole-argument regex \A…\z, exact executable digest, sealed copy, cgroup child</text>
+    <text x="80" y="1100" class="note" fill="#2a7">✓ http: origin+method+path+query+body scoped; AddressPolicy pins the resolved IP (anti DNS-rebinding)</text>
+    <text x="80" y="1120" class="note" fill="#2a7">✓ settings: exact own-entry keys, read/write independent, host-structure keys (id/sandbox/__proto__) rejected</text>
+    <text x="80" y="1140" class="note" fill="#b00">✗ a host command retains full CLI authority — argv matching is not semantic safety; the reviewer's choice is the boundary</text>
+    <text x="80" y="1160" class="note" fill="#b00">✗ notify escapes body and rejects control/RTL chars; open-url accepts only bounded http(s) with a non-empty host</text>
+  </g>
+
+  <!-- summary strip -->
+  <rect x="60" y="1176" width="1060" height="46" fill="#fff" stroke="#bbb" rx="6"/>
+  <text x="80" y="1198" class="note">Revocation is the common thread: every gate re-reads the live store; a revoked record aborts the loop and cgroup.kill on Drop bounds cleanup by the kernel.</text>
+  <text x="80" y="1214" class="note">Intentional limitation: the approving account is the same session account (not an independent human boundary), and a completed host effect cannot be undone by revocation.</text>
+</svg>

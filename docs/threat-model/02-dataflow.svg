@@ -1,0 +1,207 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 1320" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="13">
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 z" fill="#333"/></marker>
+    <marker id="ag" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 z" fill="#2a7"/></marker>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 z" fill="#b00"/></marker>
+    <marker id="ab" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 z" fill="#2b7"/></marker>
+    <style>
+      .t { font-weight: 700; }
+      .lbl { font-weight: 600; }
+      .cap { fill: #555; font-size: 11px; }
+      .note { font-size: 11px; fill: #333; }
+      .box { fill: #fff; stroke: #888; stroke-width: 1; rx: 6; }
+      .edge { stroke: #444; stroke-width: 1.4; fill: none; }
+      .eg { stroke: #2a7; stroke-width: 1.6; fill: none; }
+      .er { stroke: #b00; stroke-width: 1.6; fill: none; }
+      .eb { stroke: #2b7; stroke-width: 1.6; fill: none; }
+    </style>
+  </defs>
+  <rect x="0" y="0" width="1180" height="1320" fill="#fafafa"/>
+  <text x="590" y="30" text-anchor="middle" class="t" font-size="18">Ward data-flow: approval → admission → spawn → request → output</text>
+  <text x="590" y="50" text-anchor="middle" class="cap">Each hop re-validates against the live store and the admitted grants. A malformed or unauthorized record fails closed and denies the capability.</text>
+
+  <!-- Swim lanes -->
+  <rect x="30" y="70" width="1120" height="24" fill="#eaf3ff"/>
+  <text x="46" y="87" class="lbl" fill="#346">L0 shell / management</text>
+  <rect x="30" y="104" width="1120" height="200" fill="#f2f7ff"/>
+  <rect x="30" y="314" width="1120" height="250" fill="#fff8ee"/>
+  <rect x="30" y="574" width="1120" height="300" fill="#fdeeee"/>
+  <rect x="30" y="70" width="26" height="1104" fill="#eaf3ff"/>
+  <rect x="30" y="104" width="26" height="200" fill="#f2f7ff"/>
+  <rect x="30" y="314" width="26" height="250" fill="#fff8ee"/>
+  <rect x="30" y="574" width="26" height="300" fill="#fdeeee"/>
+  <text x="43" y="220" class="lbl" fill="#346" transform="rotate(-90 43 220)">L0 · trusted host</text>
+  <text x="43" y="470" class="lbl" fill="#a60" transform="rotate(-90 43 470)">L1 · supervisor / kernel</text>
+  <text x="43" y="740" class="lbl" fill="#a33" transform="rotate(-90 43 740)">L2 · untrusted sandbox</text>
+
+  <!-- ============ APPROVAL ============ -->
+  <text x="90" y="122" class="t">1 · Approval (human boundary, same account)</text>
+  <rect x="90" y="130" width="220" height="58" class="box"/>
+  <text x="104" y="152" class="lbl">omarchy management</text>
+  <text x="104" y="170" class="note">Import · Approve · Revoke · Stop</text>
+  <text x="104" y="184" class="note">stdin JSON, ≤ 64 KiB</text>
+
+  <rect x="360" y="130" width="240" height="58" class="box" fill="#eaf3ff"/>
+  <text x="374" y="152" class="lbl">store.approve(revision, grants)</text>
+  <text x="374" y="170" class="note">Grants.validate(requests) fail-closed</text>
+  <text x="374" y="184" class="note">ed25519 sign · atomically replace</text>
+
+  <rect x="650" y="130" width="250" height="58" class="box" fill="#eaf3ff"/>
+  <text x="664" y="152" class="lbl">Record (persisted, signed)</text>
+  <text x="664" y="170" class="note">revision + grants + epoch + enabled</text>
+  <text x="664" y="184" class="note">≤ 64 KiB · tamper-detected</text>
+
+  <path d="M 310 159 L 358 159" class="eg" marker-end="url(#ag)"/>
+  <path d="M 600 159 L 648 159" class="eg" marker-end="url(#ag)"/>
+
+  <!-- ============ ADMISSION ============ -->
+  <text x="90" y="216" class="t">2 · Admission (controller opens approval)</text>
+  <rect x="90" y="224" width="240" height="70" class="box"/>
+  <text x="104" y="246" class="lbl">controller.Approval::open</text>
+  <text x="104" y="264" class="note">verify_controller_limits</text>
+  <text x="104" y="280" class="note">store.admit(id, epoch, unit)</text>
+  <text x="104" y="294" class="note">snapshot admitted grants</text>
+
+  <path d="M 760 188 C 760 210 360 200 210 222" class="eg" marker-end="url(#ag)"/>
+  <text x="470" y="210" class="cap">signed record read back under the store lock</text>
+
+  <rect x="380" y="224" width="250" height="70" class="box" fill="#eaf3ff"/>
+  <text x="394" y="246" class="lbl">admitted grants snapshot</text>
+  <text x="394" y="264" class="note">the running session enforces THESE</text>
+  <text x="394" y="280" class="note">a later grants.json edit cannot</text>
+  <text x="394" y="294" class="note">widen a running plugin</text>
+
+  <path d="M 330 259 L 378 259" class="eg" marker-end="url(#ag)"/>
+
+  <rect x="680" y="224" width="250" height="70" class="box" fill="#eaf3ff"/>
+  <text x="694" y="246" class="lbl">grants.json (read-only view)</text>
+  <text x="694" y="264" class="note">authored from the record, not the plugin</text>
+  <text x="694" y="280" class="note">mounted ro-bind-fd at /run/plugin</text>
+  <text x="694" y="294" class="note">so a plugin can adapt to declined access</text>
+  <path d="M 630 259 L 678 259" class="eg" marker-end="url(#ag)"/>
+
+  <!-- ============ SPAWN (L1) ============ -->
+  <text x="90" y="340" class="t">3 · Supervised spawn (L0 → L1 → L2)</text>
+  <rect x="90" y="348" width="250" height="70" class="box" fill="#fff8ee"/>
+  <text x="104" y="370" class="lbl">worker::spawn (bwrap)</text>
+  <text x="104" y="388" class="note">controller-owned bind-fd mounts only</text>
+  <text x="104" y="404" class="note">no --ro-bind of host paths</text>
+  <text x="104" y="418" class="note">--cap-drop ALL · --die-with-parent</text>
+
+  <rect x="380" y="348" width="250" height="70" class="box" fill="#fff8ee"/>
+  <text x="394" y="370" class="lbl">restrict_bootstrap() (in worker)</text>
+  <text x="394" y="388" class="note">close_range(3, MAX) FIRST</text>
+  <text x="394" y="404" class="note">re-open granted sockets O_NOFOLLOW</text>
+  <text x="394" y="418" class="note">then Landlock RESOLVE_UNIX + seccomp</text>
+
+  <rect x="680" y="348" width="250" height="70" class="box" fill="#fff8ee"/>
+  <text x="694" y="370" class="lbl">guard() fork (supervisor)</text>
+  <text x="694" y="388" class="note">child subreaper · pidfd poll</text>
+  <text x="694" y="404" class="note">SIGKILL on timeout/abort</text>
+  <text x="694" y="418" class="note">cgroup.kill on Drop</text>
+
+  <path d="M 340 383 L 378 383" class="er" marker-end="url(#ar)"/>
+  <path d="M 215 418 C 215 470 215 520 215 560" class="er" marker-end="url(#ar)"/>
+  <path d="M 505 418 C 505 440 480 450 480 460" class="edge"/>
+  <path d="M 505 418 C 640 440 690 430 690 420" class="edge"/>
+
+  <!-- ============ REQUEST (L2 -> L0) ============ -->
+  <text x="90" y="600" class="t">4 · Worker request (L2 → broker → host effect)</text>
+  <rect x="90" y="608" width="250" height="90" class="box" fill="#fdeeee"/>
+  <text x="104" y="630" class="lbl">plugin → /run/plugin/{cap}</text>
+  <text x="104" y="648" class="note">notify · settings · open-url</text>
+  <text x="104" y="664" class="note">http · exec · ui</text>
+  <text x="104" y="680" class="note">bounded 4096 B / 4 fds</text>
+  <text x="104" y="694" class="note">memfd sealed payloads</text>
+
+  <rect x="380" y="608" width="250" height="90" class="box" fill="#fdeeee"/>
+  <text x="394" y="630" class="lbl">requests::Broker::dispatch</text>
+  <text x="394" y="648" class="note">authenticate_member (peer UID + cgroup)</text>
+  <text x="394" y="664" class="note">Budget::take (rate limit)</text>
+  <text x="394" y="680" class="note">with_request: re-check live authority</text>
+  <text x="394" y="694" class="note">under the store lock, per request</text>
+
+  <rect x="680" y="608" width="250" height="90" class="box" fill="#fdeeee"/>
+  <text x="694" y="630" class="lbl">host effect (supervised)</text>
+  <text x="694" y="648" class="note">timeout 1–10 s · helper in $OMARCHY_PATH</text>
+  <text x="694" y="664" class="note">exec: sealed copy, exact digest, cgroup</text>
+  <text x="694" y="680" class="note">http: AddressPolicy anti-rebinding</text>
+  <text x="694" y="694" class="note">reply: one of 8 machine statuses</text>
+
+  <path d="M 340 653 L 378 653" class="er" marker-end="url(#ar)"/>
+  <path d="M 630 653 L 678 653" class="er" marker-end="url(#ar)"/>
+
+  <!-- exec special -->
+  <rect x="380" y="718" width="250" height="70" class="box" fill="#ffd9d9"/>
+  <text x="394" y="740" class="lbl">exec policy match (host_job)</text>
+  <text x="394" y="758" class="note">positive-only argv Tree</text>
+  <text x="394" y="774" class="note">whole-argument regex \A…\z</text>
+  <text x="394" y="788" class="note">path-traversal guard on $TOKEN/rel</text>
+  <path d="M 505 698 L 505 716" class="edge"/>
+
+  <rect x="680" y="718" width="250" height="70" class="box" fill="#ffd9d9"/>
+  <text x="694" y="740" class="lbl">http scope match (http)</text>
+  <text x="694" y="758" class="note">origin+method+path+query+body</text>
+  <text x="694" y="774" class="note">AddressPolicy: pin resolved IP</text>
+  <text x="694" y="788" class="note">reject control/whitespace/backslash</text>
+  <path d="M 805 698 L 805 716" class="edge"/>
+
+  <!-- ============ OUTPUT (L2 -> L0) ============ -->
+  <text x="90" y="820" class="t">5 · Presentation output (L2 → L0) and 6 · Context (L0 → L2)</text>
+  <rect x="90" y="828" width="270" height="80" class="box" fill="#fdeeee"/>
+  <text x="104" y="850" class="lbl">worker → presentation Event</text>
+  <text x="104" y="868" class="note">Configured · Buffer · Frame · Mask</text>
+  <text x="104" y="884" class="note">Frames: strict slot/generation state machine</text>
+  <text x="104" y="900" class="note">no replay; no write to displayed slot</text>
+
+  <rect x="410" y="828" width="270" height="80" class="box" fill="#eaf3ff"/>
+  <text x="424" y="850" class="lbl">controller compositor (Smithay)</text>
+  <text x="424" y="868" class="note">render to gbm buffer · wait fence</text>
+  <text x="424" y="884" class="note">only completed frames forwarded to Qt</text>
+  <text x="424" y="900" class="note">worker buffers never reach Qt directly</text>
+
+  <rect x="730" y="828" width="250" height="80" class="box" fill="#eaf3ff"/>
+  <text x="744" y="850" class="lbl">Qt bridge (cxx)</text>
+  <text x="744" y="868" class="note">NativeEvent · BufferInfo · NativeRegion</text>
+  <text x="744" y="884" class="note">presented(serial) ack</text>
+  <text x="744" y="900" class="note">host project input back (TB-6)</text>
+
+  <path d="M 360 868 L 408 868" class="eb" marker-end="url(#ab)"/>
+  <path d="M 680 868 L 728 868" class="eb" marker-end="url(#ab)"/>
+
+  <!-- context down -->
+  <rect x="90" y="930" width="330" height="80" class="box" fill="#eaf3ff"/>
+  <text x="104" y="952" class="lbl">6 · Context (L0 → L2, one-way)</text>
+  <text x="104" y="970" class="note">UiContext.seal(): memfd F_SEAL (no grow/write)</text>
+  <text x="104" y="986" class="note">publish to /context/state.json (atomic replace)</text>
+  <text x="104" y="1002" class="note">filtered through ADMITTED grants, not live</text>
+
+  <rect x="470" y="930" width="330" height="80" class="box" fill="#fdeeee"/>
+  <text x="484" y="952" class="lbl">worker FileView</text>
+  <text x="484" y="970" class="note">onFileChanged → reload() → parse + validate</text>
+  <text x="484" y="986" class="note">bar/panel/geometry bounded &amp; finite</text>
+  <text x="484" y="1002" class="note">onLoadFailed → Qt.quit()</text>
+  <path d="M 420 970 L 468 970" class="eb" marker-end="url(#ab)"/>
+
+  <!-- revocation -->
+  <rect x="850" y="930" width="230" height="80" class="box" fill="#fff0f0" stroke="#b00"/>
+  <text x="864" y="952" class="lbl" fill="#b00">Revocation (async)</text>
+  <text x="864" y="970" class="note">store.revoke → enabled=false</text>
+  <text x="864" y="986" class="note">controller.check() every 100 ms</text>
+  <text x="864" y="1002" class="note">aborts the loop; cgroup.kill on Drop</text>
+  <path d="M 850 969 C 700 969 600 969 400 870" class="er" marker-end="url(#ar)"/>
+
+  <!-- legend -->
+  <rect x="30" y="1060" width="1120" height="230" fill="#fff" stroke="#bbb" rx="6"/>
+  <text x="46" y="1082" class="lbl">Invariants that make a hop safe</text>
+  <text x="46" y="1106" class="note">• Approval is ed25519-signed and revision-bound; a changed record is rejected, not trusted.</text>
+  <text x="46" y="1124" class="note">• Admission snapshots the grants; a mid-run grants.json edit cannot widen a running plugin (it takes effect only on the next launch).</text>
+  <text x="46" y="1142" class="note">• Spawn mounts only controller-owned descriptors; a connected socket bypasses path-Landlock, so the worker closes fds 3..MAX before re-opening granted sockets.</text>
+  <text x="46" y="1160" class="note">• Every request is peer-authenticated (UID + cgroup), rate-limited, and re-checked under the store lock before the host effect runs.</text>
+  <text x="46" y="1178" class="note">• Exec matches a positive-only argv tree with whole-argument regex and exact executable digest; a host command's authority is the reviewer's decision, not the matcher's.</text>
+  <text x="46" y="1196" class="note">• HTTP pins the resolved address (AddressPolicy) to defeat DNS rebinding; only http(s) with a non-empty host is openable.</text>
+  <text x="46" y="1214" class="note">• Presentation buffers are memfd-sealed and pass a strict slot/generation state machine; only completed controller-composited frames reach Qt.</text>
+  <text x="46" y="1232" class="note">• Context is one-way, sealed (F_SEAL), and filtered through the admitted grants; a malformed record fails the worker (Qt.quit), never the host.</text>
+  <text x="46" y="1250" class="note">• Revocation is detected by a 100 ms live-store poll; cleanup is bounded by the cgroup.empty event, not a guessed rmdir retry.</text>
+  <text x="46" y="1270" class="note">• Every size, rate, count, and descriptor budget is bounded; oversized or unknown records are rejected, not truncated (no silent partial grant).</text>
+</svg>
