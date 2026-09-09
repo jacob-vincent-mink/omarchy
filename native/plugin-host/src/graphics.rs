@@ -34,10 +34,10 @@ use smithay::{
   reexports::wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
   reexports::wayland_server::{
     Client, Display, ListeningSocket, Resource, Weak,
-    backend::{ClientData, ClientId, DisconnectReason},
+    backend::{ClientData, ClientId, DisconnectReason, GlobalId},
     protocol::{wl_buffer::WlBuffer, wl_output::WlOutput, wl_seat::WlSeat, wl_surface::WlSurface},
   },
-  utils::{Rectangle, SERIAL_COUNTER, Serial, Transform},
+  utils::{Logical, Rectangle, SERIAL_COUNTER, Serial, Transform},
   wayland::{
     buffer::BufferHandler,
     compositor::{
@@ -46,6 +46,9 @@ use smithay::{
       with_surface_tree_downward,
     },
     dmabuf::{DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
+    fractional_scale::{
+      FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
+    },
     output::{OutputHandler, OutputManagerState},
     shell::{
       wlr_layer::{
@@ -58,6 +61,7 @@ use smithay::{
       },
     },
     shm::{ShmHandler, ShmState},
+    viewporter::ViewporterState,
   },
 };
 use std::{
@@ -70,7 +74,42 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// One sub-rect of the single composite canvas surfaced as its own
+/// `wl_output`/`xdg-output` global (the "monitor wall" model). Coordinates
+/// and size are **logical**; `scale_fixed` is the output's fractional scale in
+/// units of 1/120 (`scale * 120`). The worker keeps one uniform scale across
+/// every output, so a wall decomposes the canvas into side-by-side outputs.
+pub struct OutputSpec {
+  pub x: i32,
+  pub y: i32,
+  pub width: u32,
+  pub height: u32,
+  pub scale_fixed: u32,
+}
+
+/// The wire state backing one wall output: its logical sub-rect plus the
+/// bound `wl_output` global (owned for enter/leave and global lifetime).
+struct OutputFlow {
+  spec: OutputSpec,
+  output: Output,
+  global: GlobalId,
+}
+
+impl OutputFlow {
+  fn logical_rect(&self) -> Rectangle<i32, Logical> {
+    Rectangle::new(
+      (self.spec.x, self.spec.y).into(),
+      (self.spec.width as i32, self.spec.height as i32).into(),
+    )
+  }
+}
+
 struct LayerRole(RefCell<Weak<ZwlrLayerSurfaceV1>>);
+
+/// Which wall output a layer surface was created against, stored in the
+/// surface's data map so layer geometry is constrained to that output's
+/// logical rect rather than the whole canvas.
+struct LayerOutput(usize);
 
 /// One private compositor in the already resource-limited controller process.
 /// Worker buffers are never forwarded to Qt: only completed controller output.
@@ -89,6 +128,8 @@ pub struct Graphics {
   last_mask: Vec<Region>,
   pointer: smithay::input::pointer::PointerHandle<App>,
   keyboard: smithay::input::keyboard::KeyboardHandle<App>,
+  // Worker layer requests cannot reactivate keyboard focus withdrawn by the host.
+  keyboard_active: bool,
   buttons: u8,
 }
 
@@ -111,7 +152,7 @@ impl Graphics {
     let keyboard = seat.add_keyboard(Default::default(), 200, 25)?;
     let pointer = seat.add_pointer();
     let output = Output::new(
-      "plugin".into(),
+      "plugin-0".into(),
       PhysicalProperties {
         size: (0, 0).into(),
         subpixel: Subpixel::Unknown,
@@ -119,7 +160,7 @@ impl Graphics {
         model: "Private".into(),
       },
     );
-    output.create_global::<App>(&dh);
+    let global = output.create_global::<App>(&dh);
     let mode = Mode {
       size: (pixels.0 as i32, pixels.1 as i32).into(),
       refresh: 60000,
@@ -131,17 +172,35 @@ impl Graphics {
       Some((0, 0).into()),
     );
     output.set_preferred(mode);
+    // The degenerate start of a monitor wall: one output covers the whole
+    // canvas at the integer start scale (fractional is set later via
+    // `configure_scaled`).
+    let primary = OutputFlow {
+      spec: OutputSpec {
+        x: 0,
+        y: 0,
+        width: viewport.width,
+        height: viewport.height,
+        scale_fixed: viewport.scale * 120,
+      },
+      output,
+      global,
+    };
     OutputManagerState::new_with_xdg_output::<App>(&dh);
     let app = App {
       compositor: CompositorState::new_v6::<App>(&dh),
       xdg: XdgShellState::new::<App>(&dh),
       layer: WlrLayerShellState::new::<App>(&dh),
       shm: ShmState::new::<App>(&dh, vec![]),
+      _viewporter: ViewporterState::new::<App>(&dh),
+      _fractional_scale: FractionalScaleManagerState::new::<App>(&dh),
       dmabuf,
       seats,
       renderer,
-      output,
+      outputs: vec![primary],
+      live_surfaces: Vec::new(),
       viewport,
+      render_scale: viewport.scale as f64,
       layers: Vec::new(),
       popups: Vec::new(),
       surfaces: 0,
@@ -167,6 +226,7 @@ impl Graphics {
       last_mask: Vec::new(),
       pointer,
       keyboard,
+      keyboard_active: false,
       buttons: 0,
     })
   }
@@ -232,6 +292,7 @@ impl Graphics {
       .app
       .popups
       .retain(|surface| surface.wl_surface().is_alive());
+    self.update_keyboard_focus();
     self.display.flush_clients()?;
     Ok(())
   }
@@ -240,12 +301,222 @@ impl Graphics {
     Ok(self.frames.presented(serial)?)
   }
 
+  fn update_keyboard_focus(&mut self) {
+    if !self.keyboard_active {
+      return;
+    }
+    let current = self.keyboard.current_focus();
+    let next = self.app.exclusive_keyboard_focus().or_else(|| {
+      current
+        .clone()
+        .filter(|surface| surface_mapped(surface) && self.app.accepts_keyboard(surface))
+    });
+    if next != current {
+      self
+        .keyboard
+        .set_focus(&mut self.app, next, SERIAL_COUNTER.next_serial());
+    }
+  }
+
   pub fn configure(&mut self, viewport: Viewport, time: u32) -> Result<()> {
     viewport.pixels()?;
+    let scale = f64::from(viewport.scale);
     self.requested = Some(viewport);
+    self.app.render_scale = scale;
+    // The primary (full-canvas) output's spec tracks the resized canvas so
+    // `sync_outputs` derives the correct wl_output mode on the next render.
+    if let Some(primary) = self.app.outputs.first_mut() {
+      primary.spec.x = 0;
+      primary.spec.y = 0;
+      primary.spec.width = viewport.width;
+      primary.spec.height = viewport.height;
+      primary.spec.scale_fixed = (scale * 120.0).round() as u32;
+    }
     // Geometry changes cancel private grabs, pressed input, and popup focus.
     // The host must resume input only after the new canvas has been presented.
     self.input(5, 0, 0, 0, time)
+  }
+
+  /// Configure with an explicit (possibly fractional) render scale, updating
+  /// the advertised `wp_fractional_scale` preference and the physical canvas
+  /// size while keeping the logical canvas (input/mask space) fixed.
+  ///
+  /// `render_scale` is a plain floating-point scale in `[1.0, 4.0]` such as
+  /// `1.5` (it is **not** a 120-based integer). The wire's
+  /// `wp_fractional_scale.preferred_scale` message carries the same value in
+  /// units of 1/120, which Smithay encodes for us. The actual rounded physical
+  /// canvas (``round(width * render_scale) x round(height * render_scale)``)
+  /// is validated against the pixel budget before any state is mutated, so an
+  /// oversized fractional canvas is rejected atomically.
+  ///
+  /// This is the worker-side entry point for fractional scaling. It is kept
+  /// separate from [`Self::configure`] so the shared `Viewport` contract stays
+  /// integer until the coordinated IPC change lands; the product path calls
+  /// [`Self::configure`] where `render_scale == viewport.scale`.
+  pub fn configure_scaled(
+    &mut self,
+    viewport: Viewport,
+    render_scale: f64,
+    time: u32,
+  ) -> Result<()> {
+    if !(1.0..=4.0).contains(&render_scale) {
+      return Err("render scale out of range [1.0, 4.0]".into());
+    }
+    // Validate the actual rounded physical dimensions before mutating state or
+    // allocating, so e.g. a 2048x2048 canvas at render_scale 4.0 (an 8192x8192
+    // 67M-pixel buffer) is rejected rather than silently exceeding the budget.
+    let physical = (
+      f64::round(f64::from(viewport.width) * render_scale) as u32,
+      f64::round(f64::from(viewport.height) * render_scale) as u32,
+    );
+    validate_physical(physical.0, physical.1)?;
+    self.configure(viewport, time)?;
+    self.app.render_scale = render_scale;
+    if let Some(primary) = self.app.outputs.first_mut() {
+      primary.spec.scale_fixed = (render_scale * 120.0).round() as u32;
+    }
+    Ok(())
+  }
+
+  /// Reconcile the wall of `wl_output`/`xdg-output` globals that surface the
+  /// single composite canvas as side-by-side sub-rects (the "monitor wall"
+  /// model). Each [`OutputSpec`] is a **logical** sub-rect; all must share one
+  /// uniform fractional scale (in wl_fixed units, `scale * 120`), since the
+  /// existing render path composites the whole canvas at a single scale.
+  ///
+  /// Surfaces are entered on exactly the outputs whose rects intersect the
+  /// surface's logical bounds and left on the rest; adding, removing, or
+  /// reassigning (index-remapping) outputs re-runs that reconciliation. This
+  /// is the worker-side entry point for multiple outputs; it is deliberately
+  /// not wired into the shared single-canvas `Viewport` IPC until the
+  /// coordinated geometry contract lands.
+  pub fn configure_outputs(&mut self, specs: &[OutputSpec], time: u32) -> Result<()> {
+    if specs.is_empty() || specs.len() > 8 {
+      return Err("output wall must have between 1 and 8 outputs".into());
+    }
+    let scale = f64::from(specs[0].scale_fixed) / 120.0;
+    if !(1.0..=4.0).contains(&scale) {
+      return Err("output scale out of range [1.0, 4.0]".into());
+    }
+    // Validate the whole list before mutating any wall state: uniform scale,
+    // non-degenerate rects, and (with overflow-safe arithmetic) every rect
+    // lying inside the host canvas.
+    for spec in specs {
+      if spec.width == 0 || spec.height == 0 {
+        return Err("output rect must be non-empty".into());
+      }
+      if f64::from(spec.scale_fixed) / 120.0 != scale {
+        return Err("output wall must use a uniform fractional scale".into());
+      }
+      if spec.x < 0 || spec.y < 0 {
+        return Err("output rect is outside the host canvas".into());
+      }
+      let x_end = i64::from(spec.x) + i64::from(spec.width);
+      let y_end = i64::from(spec.y) + i64::from(spec.height);
+      if x_end > i64::from(self.app.viewport.width) || y_end > i64::from(self.app.viewport.height) {
+        return Err("output rect is outside the host canvas".into());
+      }
+    }
+    // The spanning canvas is round(viewport x requested scale); reject a wall
+    // whose physical output would exceed the pixel budget before touching
+    // state. This must use the incoming scale, not the current render_scale,
+    // so raising the scale (e.g. 1.0 -> 4.0 on a 2048x2048 canvas) cannot
+    // validate the old, smaller physical size and slip an 8192x8192 buffer
+    // through the budget gate.
+    let new_physical = (
+      f64::round(f64::from(self.app.viewport.width) * scale) as u32,
+      f64::round(f64::from(self.app.viewport.height) * scale) as u32,
+    );
+    validate_physical(new_physical.0, new_physical.1)?;
+    let dh = self.display.handle();
+    // Grow (create new globals) or shrink (retire globals) to match specs.
+    while self.app.outputs.len() < specs.len() {
+      let idx = self.app.outputs.len();
+      let output = Output::new(
+        format!("plugin-{idx}"),
+        PhysicalProperties {
+          size: (0, 0).into(),
+          subpixel: Subpixel::Unknown,
+          make: "Omarchy".into(),
+          model: "Private".into(),
+        },
+      );
+      let global = output.create_global::<App>(&dh);
+      let spec = &specs[idx];
+      self.app.outputs.push(OutputFlow {
+        spec: OutputSpec {
+          x: spec.x,
+          y: spec.y,
+          width: spec.width,
+          height: spec.height,
+          scale_fixed: spec.scale_fixed,
+        },
+        output,
+        global,
+      });
+    }
+    while self.app.outputs.len() > specs.len() {
+      let flow = self.app.outputs.pop().unwrap();
+      dh.remove_global::<App>(flow.global);
+    }
+    self.app.render_scale = scale;
+    for (flow, spec) in self.app.outputs.iter_mut().zip(specs) {
+      flow.spec = OutputSpec {
+        x: spec.x,
+        y: spec.y,
+        width: spec.width,
+        height: spec.height,
+        scale_fixed: spec.scale_fixed,
+      };
+    }
+    self.app.sync_outputs();
+    self.app.reconcile_all_surfaces();
+    // Re-send layer configures whenever the wall topology or the owning
+    // output's logical bounds changed. This must run even when the physical
+    // canvas is unchanged (same-scale rect reassignment, which the realloc
+    // path below skips): an already-created layer panel has to learn its new
+    // width/height so it can repaint, and the client validates it via
+    // zwlr_layer_surface configure.
+    self.app.refresh_layers();
+    // A change in the spanning physical canvas (here: the scale, since the
+    // logical canvas is fixed) requires a new generation of exported buffers.
+    // Preserve frame ownership by reusing the `requested` handoff, which only
+    // reallocates/re-describes on the next render once the previous frame is
+    // owned. Same-size reconfigurations (pure rect reassignment) skip it.
+    let current = (
+      self.buffers[0].size().w as u32,
+      self.buffers[0].size().h as u32,
+    );
+    if self.app.physical() != current {
+      self.requested = Some(self.app.viewport);
+    }
+    self.app.dirty = true;
+    // Output reconfiguration is a geometry change: cancel private grabs etc.
+    self.input(5, 0, 0, 0, time)
+  }
+
+  /// Number of `wl_output` globals currently in the wall.
+  pub fn output_count(&self) -> usize {
+    self.app.outputs.len()
+  }
+
+  /// The current logical spec (sub-rect + uniform fractional scale) backing the
+  /// `index`-th wall output, if any.
+  pub fn output_spec(&self, index: usize) -> Option<&OutputSpec> {
+    self.app.outputs.get(index).map(|flow| &flow.spec)
+  }
+
+  /// The physical (rounded at the render scale) mode size of the `index`-th
+  /// wall output, if any.
+  pub fn output_mode(&self, index: usize) -> Option<(i32, i32)> {
+    let flow = self.app.outputs.get(index)?;
+    let size = flow.output.current_mode()?.size;
+    Some((size.w, size.h))
+  }
+
+  /// The global handle of the `index`-th wall output, if any.
+  pub fn output_global(&self, index: usize) -> Option<GlobalId> {
+    self.app.outputs.get(index).map(|flow| flow.global.clone())
   }
 
   pub fn render(&mut self, channel: &Channel, time: u32) -> Result<()> {
@@ -255,34 +526,21 @@ impl Graphics {
     if let Some(viewport) = self.requested.take() {
       // A pending old frame prevents entry here. Qt retains its imported old
       // buffers until it switches nodes; none are reused as new output storage.
-      self.buffers = allocate(&mut self.allocator, viewport.pixels()?)?;
+      self.app.viewport = viewport;
+      self.buffers = allocate(&mut self.allocator, self.app.physical())?;
       self.generation = self
         .generation
         .checked_add(1)
         .ok_or("viewport generation exhausted")?;
-      self.app.viewport = viewport;
-      let pixels = viewport.pixels()?;
-      let mode = Mode {
-        size: (pixels.0 as i32, pixels.1 as i32).into(),
-        refresh: 60000,
-      };
-      if let Some(old) = self.app.output.current_mode() {
-        self.app.output.delete_mode(old);
-      }
-      self.app.output.set_preferred(mode);
-      self.app.output.change_current_state(
-        Some(mode),
-        None,
-        Some(Scale::Integer(viewport.scale as i32)),
-        None,
-      );
+      self.app.sync_outputs();
       for (surface, _) in self.app.roots() {
         with_surface_tree_downward(
           &surface,
           (),
           |_, _, _| TraversalAction::DoChildren(()),
           |surface, states, _| {
-            send_surface_state(surface, states, viewport.scale as i32, Transform::Normal)
+            with_fractional_scale(states, |s| s.set_preferred_scale(self.app.render_scale));
+            send_surface_state(surface, states, self.app.surface_scale(), Transform::Normal)
           },
           |_, _, _| true,
         );
@@ -304,17 +562,19 @@ impl Graphics {
       return Ok(());
     }
     let surfaces = self.app.roots();
-    let scale = self.app.viewport.scale as i32;
-    let pixels = self.app.viewport.pixels()?;
-    let size = (pixels.0 as i32, pixels.1 as i32);
+    let scale = self.app.render_scale;
+    let size = self.app.render_size();
     let elements = surfaces
       .iter()
       .flat_map(|(surface, pos)| {
         render_elements_from_surface_tree(
           &mut self.app.renderer,
           surface,
-          (pos.0 * scale, pos.1 * scale),
-          scale as f64,
+          (
+            (f64::from(pos.0) * scale).round() as i32,
+            (f64::from(pos.1) * scale).round() as i32,
+          ),
+          scale,
           1.0,
           Kind::Unspecified,
         )
@@ -327,7 +587,7 @@ impl Graphics {
       .renderer
       .render(&mut target, size.into(), Transform::Normal)?;
     frame.clear(Color32F::new(0.0, 0.0, 0.0, 0.0), &[damage])?;
-    draw_render_elements(&mut frame, scale as f64, &elements, &[damage])?;
+    draw_render_elements(&mut frame, scale, &elements, &[damage])?;
     // This wait occurs only in the supervised per-plugin process. A stuck
     // worker fence cannot block the trusted shell's GUI/render thread.
     frame.finish()?.wait()?;
@@ -441,19 +701,23 @@ impl Graphics {
       if kind < 2 {
         if kind == 0 {
           self.buttons |= 1 << (code - 0x110);
+          self.keyboard_active = true;
         } else {
           self.buttons &= !(1 << (code - 0x110));
         }
-        if kind == 0
-          && focus
-            .as_ref()
-            .is_none_or(|(surface, _)| self.app.accepts_keyboard(surface))
-        {
-          self.keyboard.set_focus(
-            &mut self.app,
-            focus.map(|(surface, _)| surface),
-            SERIAL_COUNTER.next_serial(),
-          );
+        if kind == 0 {
+          let exclusive = self.app.exclusive_keyboard_focus();
+          if exclusive.is_some()
+            || focus
+              .as_ref()
+              .is_none_or(|(surface, _)| self.app.accepts_keyboard(surface))
+          {
+            self.keyboard.set_focus(
+              &mut self.app,
+              exclusive.or_else(|| focus.map(|(surface, _)| surface)),
+              SERIAL_COUNTER.next_serial(),
+            );
+          }
         }
         self.pointer.button(
           &mut self.app,
@@ -468,6 +732,7 @@ impl Graphics {
             },
           },
         );
+        self.update_keyboard_focus();
       }
       self.pointer.frame(&mut self.app);
     } else if kind <= 4 && (8..=767).contains(&code) && x == 0 && y == 0 {
@@ -484,6 +749,7 @@ impl Graphics {
         |_, _, _| FilterResult::Forward,
       );
     } else if kind == 5 && code == 0 && x == 0 && y == 0 {
+      self.keyboard_active = false;
       self
         .keyboard
         .set_focus(&mut self.app, None, SERIAL_COUNTER.next_serial());
@@ -536,6 +802,18 @@ impl Graphics {
   }
 }
 
+fn validate_physical(width: u32, height: u32) -> Result<()> {
+  if width == 0
+    || height == 0
+    || width > 8192
+    || height > 8192
+    || u64::from(width) * u64::from(height) > 8_388_608
+  {
+    return Err("presentation dimensions exceed limits".into());
+  }
+  Ok(())
+}
+
 fn allocate(allocator: &mut GbmAllocator<File>, pixels: (u32, u32)) -> Result<[Dmabuf; 2]> {
   let mut buffer = || -> Result<Dmabuf> {
     Ok(
@@ -552,11 +830,20 @@ struct App {
   xdg: XdgShellState,
   layer: WlrLayerShellState,
   shm: ShmState,
+  // Held only to keep the wp_viewporter global registration alive; requests
+  // are served by the delegate_viewporter! bindings below.
+  _viewporter: ViewporterState,
+  _fractional_scale: FractionalScaleManagerState,
   dmabuf: DmabufState,
   seats: SeatState<Self>,
   renderer: GlesRenderer,
-  output: Output,
+  // The composite canvas is surfaced as one or more `wl_output` globals
+  // (monitor wall). `outputs[0]` is the primary/degenerate full-canvas output;
+  // `configure_outputs` reconciles the list over the same single buffer.
+  outputs: Vec<OutputFlow>,
+  live_surfaces: Vec<Weak<WlSurface>>,
   viewport: Viewport,
+  render_scale: f64,
   layers: Vec<LayerSurface>,
   popups: Vec<PopupSurface>,
   surfaces: usize,
@@ -564,6 +851,132 @@ struct App {
   dirty: bool,
 }
 impl App {
+  fn exclusive_keyboard_focus(&self) -> Option<WlSurface> {
+    self.roots().into_iter().find_map(|(surface, _)| {
+      self.layers.iter().find_map(|layer| {
+        let state = layer_state(layer);
+        (layer.wl_surface() == &surface
+          && matches!(state.layer, Layer::Top | Layer::Overlay)
+          && state.keyboard_interactivity == KeyboardInteractivity::Exclusive
+          && surface_mapped(&surface))
+        .then(|| surface.clone())
+      })
+    })
+  }
+
+  fn physical(&self) -> (u32, u32) {
+    (
+      f64::round(f64::from(self.viewport.width) * self.render_scale) as u32,
+      f64::round(f64::from(self.viewport.height) * self.render_scale) as u32,
+    )
+  }
+  fn render_size(&self) -> (i32, i32) {
+    (self.physical().0 as i32, self.physical().1 as i32)
+  }
+  /// Integer scale advertised on the wire (`wl_surface` / `wl_output`); the
+  /// fractional precision is carried separately via `wp_fractional_scale`.
+  fn surface_scale(&self) -> i32 {
+    (self.render_scale.floor() as i32).max(1)
+  }
+
+  /// Reconcile every `wl_output` global's mode/scale/location to its spec's
+  /// physical size (rounded from the uniform render scale) and logical origin.
+  fn sync_outputs(&mut self) {
+    let scale = self.render_scale;
+    for flow in &self.outputs {
+      let (w, h) = (
+        f64::round(f64::from(flow.spec.width) * scale) as i32,
+        f64::round(f64::from(flow.spec.height) * scale) as i32,
+      );
+      let mode = Mode {
+        size: (w, h).into(),
+        refresh: 60000,
+      };
+      if let Some(old) = flow.output.current_mode() {
+        flow.output.delete_mode(old);
+      }
+      flow.output.set_preferred(mode);
+      // Advertise the integer scale on the wire (wl_output.scale) while keeping
+      // the fractional value internally so Smithay derives the correct
+      // xdg-output logical dimensions (physical / fractional) — a plain
+      // Scale::Integer would report physical dimensions as logical at 1.5x.
+      flow.output.change_current_state(
+        Some(mode),
+        Some(Transform::Normal),
+        Some(Scale::Custom {
+          advertised_integer: self.surface_scale(),
+          fractional: self.render_scale,
+        }),
+        Some((flow.spec.x, flow.spec.y).into()),
+      );
+    }
+  }
+
+  /// A surface's logical bounds on the canvas, mirroring how [`Self::roots`]
+  /// actually places it (following layer/popup/subsurface placement rather
+  /// than centering it), so `enter`/`leave` reflect real geometry.
+  fn surface_logical_rect(&self, surface: &WlSurface) -> Rectangle<i32, Logical> {
+    let bbox = smithay::desktop::utils::bbox_from_surface_tree(surface, (0, 0));
+    // Locate this surface (or its nearest root ancestor) in the placement list
+    // and use that root's on-canvas position, offset by the surface's own
+    // bounding-box origin, instead of always centering in the viewport.
+    let mut node = surface.clone();
+    let position = loop {
+      if let Some((_, pos)) = self.roots().iter().find(|(root, _)| root == &node) {
+        break Some(*pos);
+      }
+      match get_parent(&node) {
+        Some(parent) => node = parent,
+        None => break None,
+      }
+    };
+    let Some(pos) = position else {
+      // Not yet placed; fall back to centering in the logical canvas.
+      let pos = (
+        ((self.viewport.width as i32 - bbox.size.w) / 2)
+          .max(0)
+          .saturating_sub(bbox.loc.x),
+        ((self.viewport.height as i32 - bbox.size.h) / 2)
+          .max(0)
+          .saturating_sub(bbox.loc.y),
+      );
+      return Rectangle::new(pos.into(), bbox.size);
+    };
+    let loc = (
+      pos.0.saturating_add(bbox.loc.x),
+      pos.1.saturating_add(bbox.loc.y),
+    );
+    Rectangle::new(loc.into(), bbox.size)
+  }
+
+  /// Enter this surface on every output whose rect intersects its logical
+  /// bounds, and leave it on the rest.
+  fn reconcile_outputs_for(&mut self, surface: &WlSurface) {
+    let rect = self.surface_logical_rect(surface);
+    for flow in &self.outputs {
+      if rect.intersection(flow.logical_rect()).is_some() {
+        flow.output.enter(surface);
+      } else {
+        flow.output.leave(surface);
+      }
+    }
+  }
+
+  /// Re-run per-output enter/leave for every live surface (after the wall is
+  /// added to, removed from, or reassigned).
+  fn reconcile_all_surfaces(&mut self) {
+    self
+      .live_surfaces
+      .retain(|surface| surface.upgrade().is_ok());
+    let surfaces = self
+      .live_surfaces
+      .iter()
+      .filter_map(|surface| surface.upgrade().ok())
+      .collect::<Vec<WlSurface>>();
+    for surface in surfaces {
+      self.reconcile_outputs_for(&surface);
+    }
+  }
   fn accepts_keyboard(&self, surface: &WlSurface) -> bool {
     let mut root = surface.clone();
     while let Some(parent) = get_parent(&root) {
@@ -577,7 +990,34 @@ impl App {
   }
 
   fn layer_rect(&self, surface: &LayerSurface) -> Rectangle<i32, smithay::utils::Logical> {
-    layer_geometry(self.viewport, layer_state(surface))
+    // Anchor the layer within the logical rect of the wall output it was
+    // created against (falling back to the full canvas for a legacy client).
+    let output = with_states(surface.wl_surface(), |states| {
+      states
+        .data_map
+        .get::<LayerOutput>()
+        .map(|LayerOutput(index)| *index)
+    });
+    let output_rect = self
+      .outputs
+      .get(output.unwrap_or(0))
+      .map(|flow| flow.logical_rect())
+      .unwrap_or_else(|| {
+        Rectangle::from_size((self.viewport.width as i32, self.viewport.height as i32).into())
+      });
+    layer_geometry(output_rect, layer_state(surface))
+  }
+  fn refresh_layers(&mut self) {
+    // Re-derive each layer's committed size from its (possibly re-located or
+    // re-sized) owner output and send a fresh configure, so a live layer panel
+    // repaints its new bounds even when the wall changes at the same scale.
+    // The render realloc path also calls this, but a pure output-rect change
+    // never reallocates, so it must run directly from configure_outputs too.
+    for layer in &self.layers {
+      let rect = self.layer_rect(layer);
+      layer.with_pending_state(|state| state.size = Some(rect.size));
+      layer.send_pending_configure();
+    }
   }
   fn roots(&self) -> Vec<(WlSurface, (i32, i32))> {
     let mut roots = Vec::new();
@@ -757,6 +1197,11 @@ fn layer_state(surface: &LayerSurface) -> LayerSurfaceCachedState {
   })
 }
 
+fn surface_mapped(surface: &WlSurface) -> bool {
+  surface.is_alive()
+    && with_renderer_surface_state(surface, |state| state.buffer().is_some()).unwrap_or(false)
+}
+
 fn window_origin(surface: &WlSurface) -> (i32, i32) {
   with_states(surface, |states| {
     states
@@ -770,11 +1215,11 @@ fn window_origin(surface: &WlSurface) -> (i32, i32) {
 }
 
 fn layer_geometry(
-  viewport: Viewport,
+  output: Rectangle<i32, smithay::utils::Logical>,
   state: LayerSurfaceCachedState,
 ) -> Rectangle<i32, smithay::utils::Logical> {
   fn axis(
-    length: u32,
+    length: i32,
     requested: i32,
     start: bool,
     end: bool,
@@ -806,23 +1251,30 @@ fn layer_geometry(
     .clamp(-length, length);
     (position as i32, size as i32)
   }
-  let (x, width) = axis(
-    viewport.width,
+  let (rel_x, width) = axis(
+    output.size.w,
     state.size.w,
     state.anchor.contains(Anchor::LEFT),
     state.anchor.contains(Anchor::RIGHT),
     state.margin.left,
     state.margin.right,
   );
-  let (y, height) = axis(
-    viewport.height,
+  let (rel_y, height) = axis(
+    output.size.h,
     state.size.h,
     state.anchor.contains(Anchor::TOP),
     state.anchor.contains(Anchor::BOTTOM),
     state.margin.top,
     state.margin.bottom,
   );
-  Rectangle::new((x, y).into(), (width, height).into())
+  Rectangle::new(
+    (
+      output.loc.x.saturating_add(rel_x),
+      output.loc.y.saturating_add(rel_y),
+    )
+      .into(),
+    (width, height).into(),
+  )
 }
 
 fn popup_geometry(
@@ -914,6 +1366,7 @@ mod tests {
       height: 300,
       scale: 1,
     };
+    let full_canvas = Rectangle::from_size((viewport.width as i32, viewport.height as i32).into());
     let mut state = LayerSurfaceCachedState {
       anchor: Anchor::TOP | Anchor::LEFT | Anchor::RIGHT,
       size: (0, 36).into(),
@@ -926,24 +1379,39 @@ mod tests {
       ..Default::default()
     };
     assert_eq!(
-      layer_geometry(viewport, state),
+      layer_geometry(full_canvas, state),
       Rectangle::new((16, 8).into(), (360, 36).into())
     );
     state.size.w = 100;
-    assert_eq!(layer_geometry(viewport, state).loc.x, 146);
+    assert_eq!(layer_geometry(full_canvas, state).loc.x, 146);
     state.anchor = Anchor::RIGHT | Anchor::BOTTOM;
     state.size = (80, 40).into();
     state.margin.right = 20;
     state.margin.bottom = 30;
     assert_eq!(
-      layer_geometry(viewport, state),
+      layer_geometry(full_canvas, state),
       Rectangle::new((300, 230).into(), (80, 40).into())
     );
     state.anchor = Anchor::empty();
-    assert_eq!(layer_geometry(viewport, state).loc, (160, 130).into());
+    assert_eq!(layer_geometry(full_canvas, state).loc, (160, 130).into());
     state.anchor = Anchor::LEFT;
     state.margin.left = -10;
-    assert_eq!(layer_geometry(viewport, state).loc.x, -10);
+    assert_eq!(layer_geometry(full_canvas, state).loc.x, -10);
+    // A wall output anchored into the right-hand half of the canvas offsets the
+    // layer and constrains its extent to that output's rect.
+    let right_output = Rectangle::new((200, 0).into(), (200, 300).into());
+    state.anchor = Anchor::TOP | Anchor::LEFT | Anchor::RIGHT;
+    state.size = (0, 36).into();
+    state.margin = Margins {
+      top: 8,
+      left: 16,
+      right: 24,
+      bottom: 0,
+    };
+    assert_eq!(
+      layer_geometry(right_output, state),
+      Rectangle::new((216, 8).into(), (160, 36).into())
+    );
     for length in [1, 4096] {
       for value in [i32::MIN, -1, 0, 1, i32::MAX] {
         state.anchor = Anchor::all();
@@ -955,16 +1423,9 @@ mod tests {
         };
         state.size.w = value;
         state.size.h = value;
-        let rect = layer_geometry(
-          Viewport {
-            width: length,
-            height: length,
-            scale: 1,
-          },
-          state,
-        );
-        assert!((1..=length as i32).contains(&rect.size.w));
-        assert!((1..=length as i32).contains(&rect.size.h));
+        let rect = layer_geometry(Rectangle::from_size((length, length).into()), state);
+        assert!((1..=length).contains(&rect.size.w));
+        assert!((1..=length).contains(&rect.size.h));
         assert!((-i64::from(length)..=i64::from(length)).contains(&i64::from(rect.loc.x)));
         assert!((-i64::from(length)..=i64::from(length)).contains(&i64::from(rect.loc.y)));
       }
@@ -1042,7 +1503,7 @@ mod tests {
     assert_eq!(graphics.generation, 2);
     assert_eq!(graphics.app.viewport, next);
     assert_eq!(graphics.buffers[0].size(), (160, 120).into());
-    assert_eq!(graphics.app.output.modes().len(), 1);
+    assert_eq!(graphics.app.outputs[0].output.modes().len(), 1);
     while let Ok(packet) = consumer.receive() {
       Event::decode(packet).unwrap();
     }
@@ -1051,7 +1512,7 @@ mod tests {
     graphics.render(&producer, 4).unwrap();
     assert_eq!(graphics.generation, 3);
     assert_eq!(graphics.buffers[0].size(), (64, 48).into());
-    assert_eq!(graphics.app.output.modes().len(), 1);
+    assert_eq!(graphics.app.outputs[0].output.modes().len(), 1);
   }
 
   #[test]
@@ -1109,6 +1570,51 @@ mod tests {
     };
     assert!(append_mask(&mut Vec::new(), viewport, parent, Some(&too_many)).is_err());
   }
+
+  #[test]
+  fn configure_outputs_validates_the_requested_scales_physical_budget() {
+    if std::env::var("OMARCHY_TEST_GRAPHICS").as_deref() != Ok("1") {
+      return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let viewport = Viewport {
+      width: 2048,
+      height: 2048,
+      scale: 1,
+    };
+    let mut graphics = Graphics::new(&root.path().join("display"), viewport).unwrap();
+    // Scale 1.0 leaves the canvas at 2048x2048 (within budget). Raising the
+    // wall to 4.0 would allocate a round(2048*4) x round(2048*4) = 8192x8192
+    // buffer, which exceeds both the 8192 edge limit and the 8,388,608 pixel
+    // budget. The validation must use the incoming scale's physical size, not
+    // the wall's current (still 1.0) render_scale, and reject atomically.
+    let bad = [OutputSpec {
+      x: 0,
+      y: 0,
+      width: 2048,
+      height: 2048,
+      scale_fixed: 480, // 4.0
+    }];
+    assert!(
+      graphics.configure_outputs(&bad, 0).is_err(),
+      "wall scale 4.0 must reject the new 8192x8192 canvas, not validate the old 2048x2048 size"
+    );
+    assert_eq!(
+      graphics.output_mode(0),
+      Some((2048, 2048)),
+      "a rejected output update must preserve the existing mode"
+    );
+    // The same logical rect at its original scale stays legal so the wall can
+    // still be reconfigured outward after a rejected scale bump.
+    let ok = [OutputSpec {
+      x: 0,
+      y: 0,
+      width: 2048,
+      height: 2048,
+      scale_fixed: 120, // 1.0
+    }];
+    graphics.configure_outputs(&ok, 0).unwrap();
+  }
 }
 impl BufferHandler for App {
   fn buffer_destroyed(&mut self, _: &WlBuffer) {}
@@ -1119,6 +1625,16 @@ impl ShmHandler for App {
   }
 }
 impl OutputHandler for App {}
+impl FractionalScaleHandler for App {
+  fn new_fractional_scale(&mut self, surface: WlSurface) {
+    // Tell the surface the current preferred scale as soon as it binds the
+    // fractional-scale protocol, so a fractional-aware client (Quickshell)
+    // renders at the precise resolution without waiting for a commit.
+    with_states(&surface, |states| {
+      with_fractional_scale(states, |s| s.set_preferred_scale(self.render_scale));
+    });
+  }
+}
 impl CompositorHandler for App {
   fn compositor_state(&mut self) -> &mut CompositorState {
     &mut self.compositor
@@ -1155,30 +1671,26 @@ impl CompositorHandler for App {
     if self.surfaces > 64 {
       self.failed = true;
     }
+    self.live_surfaces.push(surface.downgrade());
     with_states(surface, |states| {
-      send_surface_state(
-        surface,
-        states,
-        self.viewport.scale as i32,
-        Transform::Normal,
-      )
+      with_fractional_scale(states, |s| s.set_preferred_scale(self.render_scale));
+      send_surface_state(surface, states, self.surface_scale(), Transform::Normal)
     });
   }
-  fn destroyed(&mut self, _: &WlSurface) {
+  fn destroyed(&mut self, surface: &WlSurface) {
     self.surfaces = self.surfaces.saturating_sub(1);
+    self
+      .live_surfaces
+      .retain(|live| live.upgrade().ok().as_ref() != Some(surface));
     self.dirty = true;
   }
   fn commit(&mut self, surface: &WlSurface) {
     with_states(surface, |states| {
-      send_surface_state(
-        surface,
-        states,
-        self.viewport.scale as i32,
-        Transform::Normal,
-      )
+      with_fractional_scale(states, |s| s.set_preferred_scale(self.render_scale));
+      send_surface_state(surface, states, self.surface_scale(), Transform::Normal)
     });
     on_commit_buffer_handler::<Self>(surface);
-    self.output.enter(surface);
+    self.reconcile_outputs_for(surface);
     self.dirty = true;
     let too_large = with_renderer_surface_state(surface, |state| {
       state
@@ -1240,7 +1752,25 @@ impl WlrLayerShellHandler for App {
   fn shell_state(&mut self) -> &mut WlrLayerShellState {
     &mut self.layer
   }
-  fn new_layer_surface(&mut self, surface: LayerSurface, _: Option<WlOutput>, _: Layer, _: String) {
+  fn new_layer_surface(
+    &mut self,
+    surface: LayerSurface,
+    output: Option<WlOutput>,
+    _: Layer,
+    _: String,
+  ) {
+    // Keep the layer pinned to the wall output it was created against so its
+    // geometry is constrained to that output's rect, not the whole canvas.
+    let output_index = output
+      .as_ref()
+      .and_then(Output::from_resource)
+      .and_then(|out| self.outputs.iter().position(|flow| flow.output == out))
+      .unwrap_or(0);
+    with_states(surface.wl_surface(), |states| {
+      states
+        .data_map
+        .insert_if_missing(|| LayerOutput(output_index));
+    });
     with_states(surface.wl_surface(), |states| {
       if let Some(role) = states.data_map.get::<LayerRole>() {
         states
@@ -1299,6 +1829,8 @@ smithay::delegate_compositor!(App);
 smithay::delegate_xdg_shell!(App);
 smithay::delegate_layer_shell!(App);
 smithay::delegate_shm!(App);
+smithay::delegate_viewporter!(App);
+smithay::delegate_fractional_scale!(App);
 smithay::delegate_dmabuf!(App);
 smithay::delegate_seat!(App);
 smithay::delegate_output!(App);

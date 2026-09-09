@@ -19,12 +19,17 @@ fn main() -> io::Result<()> {
       };
       omarchy_plugin_host::notification::request(text(title)?, text(body)?)
     }
-    [mode] if mode == "--worker" => {
+    [mode] if mode == "--worker" || mode == "--omarchy-worker" => {
       omarchy_plugin_host::worker::restrict_bootstrap()?;
       Err(
         Command::new("/usr/bin/quickshell")
           .stdout(io::stderr().as_fd().try_clone_to_owned()?)
-          .args(["--no-color", "-p", "/plugin"])
+          .args(["--no-color", "-p"])
+          .arg(if mode == "--omarchy-worker" {
+            "/runtime/shell/worker.qml"
+          } else {
+            "/plugin"
+          })
           .exec(),
       )
     }

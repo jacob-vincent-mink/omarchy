@@ -23,3 +23,9 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/Omarchy/PluginHost/qmldir
   ${CMAKE_CURRENT_BINARY_DIR}/Omarchy/PluginHost/omarchy_plugin_view.qmltypes
   DESTINATION lib/qml/Omarchy/PluginHost)
 install(PROGRAMS "${RUST_TARGET_DIR}/${RUST_PROFILE}/omarchy-plugin-host" DESTINATION lib)
+get_filename_component(OMARCHY_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
+install(FILES ../runtime/worker.qml DESTINATION lib/plugin-runtime/shell)
+install(DIRECTORY "${OMARCHY_SOURCE}/shell/Commons" "${OMARCHY_SOURCE}/shell/Ui"
+  DESTINATION lib/plugin-runtime/shell)
+install(FILES "${OMARCHY_SOURCE}/shell/services/PluginShellApi.qml"
+  DESTINATION lib/plugin-runtime/shell/Services)

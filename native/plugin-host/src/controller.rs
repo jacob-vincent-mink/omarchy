@@ -353,10 +353,27 @@ impl RunningGraphics {
           .open(path)?;
         let manifest =
           crate::grants::Manifest::read(&approval.store.revisions().join(&record.revision))?;
-        let args = [
-          std::ffi::OsString::from("--worker"),
-          std::ffi::OsString::from(&manifest.sandbox.entry_point),
-        ];
+        let (args, worker_runtime) = if let Some(entry) = &manifest.sandbox.entry_point {
+          (
+            vec![std::ffi::OsString::from("--worker"), entry.into()],
+            None,
+          )
+        } else {
+          let path = std::env::current_exe()?
+            .parent()
+            .ok_or_else(|| invalid("controller has no installation directory"))?
+            .join("plugin-runtime");
+          let directory = File::open(&path).map_err(|error| {
+            std::io::Error::new(
+              error.kind(),
+              format!("shared worker runtime {}: {error}", path.display()),
+            )
+          })?;
+          (
+            vec![std::ffi::OsString::from("--omarchy-worker")],
+            Some(directory),
+          )
+        };
         let media = record
           .grants
           .media
@@ -383,6 +400,7 @@ impl RunningGraphics {
             render_node: Some(display.render_node()),
             media: media.as_ref(),
             notifications: notifications.as_ref(),
+            runtime: worker_runtime.as_ref(),
           },
         )?;
         let fd = child

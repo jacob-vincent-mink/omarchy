@@ -206,6 +206,7 @@ fn media_controller_child() {
         render_node: None,
         media: Some(&proxy),
         notifications: None,
+        runtime: None,
       },
     )
     .unwrap(),

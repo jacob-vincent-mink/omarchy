@@ -23,6 +23,7 @@ pub struct Resources<'a> {
   pub render_node: Option<&'a Path>,
   pub media: Option<&'a MediaProxy>,
   pub notifications: Option<&'a crate::notification::Broker>,
+  pub runtime: Option<&'a File>,
 }
 
 /// Launch only from a resource-limited trusted controller. All arguments and
@@ -194,6 +195,20 @@ pub fn spawn(
   let mut descriptors = mounts.map(|(file, _)| file.as_raw_fd()).to_vec();
   for (file, destination) in mounts {
     command.args(["--ro-bind-fd", &file.as_raw_fd().to_string(), destination]);
+  }
+  if let Some(runtime) = resources.runtime {
+    if !runtime.metadata()?.is_dir() {
+      return Err(io::Error::other("shared worker runtime is not a directory"));
+    }
+    command.args([
+      "--ro-bind-fd",
+      &runtime.as_raw_fd().to_string(),
+      "/runtime",
+      "--setenv",
+      "OMARCHY_PATH",
+      "/runtime",
+    ]);
+    descriptors.push(runtime.as_raw_fd());
   }
   for (name, file) in &directories {
     command.args([

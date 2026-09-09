@@ -272,12 +272,11 @@ void PluginView::wheelEvent(QWheelEvent *event) {
   event->accept();
 }
 void PluginView::keyPressEvent(QKeyEvent *event) {
-  if (event->key() == Qt::Key_Escape) dismiss();
-  else if (!event->isAutoRepeat() && event->nativeScanCode() >= 8) input(3, event->nativeScanCode());
+  if (!event->isAutoRepeat() && event->nativeScanCode() >= 8) input(3, event->nativeScanCode());
   event->accept();
 }
 void PluginView::keyReleaseEvent(QKeyEvent *event) {
-  if (event->key() != Qt::Key_Escape && !event->isAutoRepeat() && event->nativeScanCode() >= 8) input(4, event->nativeScanCode());
+  if (!event->isAutoRepeat() && event->nativeScanCode() >= 8) input(4, event->nativeScanCode());
   event->accept();
 }
 void PluginView::dismiss() { input(5, 0); setFocus(false); }
