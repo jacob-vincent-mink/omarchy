@@ -1,0 +1,49 @@
+#!/bin/bash
+
+# omarchy:summary=Snapshot an installed sandbox plugin and review its requested access
+# omarchy:args=<id> [--json]
+# omarchy:examples=omarchy plugin review acme.weather
+
+set -euo pipefail
+
+if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
+  echo "Usage: omarchy plugin review <id> [--json]"
+  exit 0
+fi
+
+id="${1:-}"
+[[ -n $id ]] || { echo "omarchy-plugin-review: plugin id is required" >&2; exit 1; }
+shift
+if (( $# > 1 )) || { (( $# == 1 )) && [[ $1 != "--json" ]]; }; then
+  echo "omarchy-plugin-review: expected only --json after the id" >&2
+  exit 1
+fi
+
+plugin=$(omarchy-plugin-catalog | jq -ce --arg id "$id" 'map(select(.id == $id))[0] // empty') || {
+  echo "omarchy-plugin-review: plugin '$id' is not installed; use omarchy plugin add first" >&2
+  exit 1
+}
+jq -e '.sandbox != null' <<<"$plugin" >/dev/null || {
+  echo "omarchy-plugin-review: '$id' has no sandbox entry point; it uses the existing trusted in-process workflow" >&2
+  exit 1
+}
+source_dir=$(jq -r '.sourceDir' <<<"$plugin")
+review=$(jq -cn --arg path "$source_dir" '{operation: "import", path: $path}' | omarchy-plugin-runtime)
+
+if [[ ${1:-} == "--json" ]]; then
+  printf '%s\n' "$review"
+else
+  jq -r '
+    "\(.name) (\(.id)) — \(.version)",
+    "Revision: \(.revision)", "", "Requested access:",
+    (.requests.read[] | "  Read-only folder: \(.) (you select the folder)"),
+    (if .requests.network then "  Network, including local services" else empty end),
+    (if .requests.media then "  One selected media player" else empty end),
+    (if .requests.notifications then "  Text-only notifications" else empty end),
+    (if .requests.storage then "  Private storage (not available in this preview)" else empty end),
+    (if (.requests.read | length) == 0 and ([.requests.network, .requests.media, .requests.notifications, .requests.storage] | any) == false then "  None" else empty end),
+    "", "No plugin code was run. Requests are not grants.",
+    "Approve this exact revision with:",
+    "  omarchy plugin approve \(.id) --revision \(.revision)"
+  ' <<<"$review"
+fi

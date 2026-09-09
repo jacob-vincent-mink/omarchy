@@ -12,6 +12,7 @@ export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -oBatchMode=yes}"
 PLUGINS_DIR="$HOME/.config/omarchy/plugins"
 ASSUME_YES=0
 UPDATED_ANY=0
+UPDATED_LEGACY=0
 
 fail() {
   echo "omarchy-plugin-update: $*" >&2
@@ -39,6 +40,10 @@ valid_plugin_id() {
 update_one() {
   local id="$1"
   local dir="$PLUGINS_DIR/$id"
+  local sandboxed=false
+  if jq -e 'has("sandbox")' "$dir/manifest.json" >/dev/null; then
+    sandboxed=true
+  fi
 
   if ! git -C "$dir" fetch --quiet origin HEAD; then
     echo "omarchy-plugin-update: fetch failed for '$id'" >&2
@@ -48,6 +53,11 @@ update_one() {
   if [[ $(git -C "$dir" rev-parse HEAD) == $(git -C "$dir" rev-parse FETCH_HEAD) ]]; then
     echo "$id is up to date."
     return 0
+  fi
+
+  if [[ $sandboxed == "true" ]] && ! git -C "$dir" show FETCH_HEAD:manifest.json | jq -e 'has("sandbox")' >/dev/null; then
+    echo "omarchy-plugin-update: refusing to turn sandbox plugin '$id' into in-process code" >&2
+    return 1
   fi
 
   if (( ! ASSUME_YES )); then
@@ -76,6 +86,12 @@ update_one() {
   fi
 
   echo "Updated $id."
+  if jq -e 'has("sandbox")' "$dir/manifest.json" >/dev/null; then
+    echo "Checkout only; any approved revision and its grants are unchanged."
+    echo "Review the update with: omarchy plugin review $id"
+  else
+    UPDATED_LEGACY=1
+  fi
   UPDATED_ANY=1
 }
 
@@ -128,6 +144,10 @@ for id in "${targets[@]}"; do
 done
 
 if (( UPDATED_ANY )); then
-  omarchy-shell shell rescanPlugins >/dev/null
+  if (( UPDATED_LEGACY )); then
+    omarchy-shell shell rescanPlugins >/dev/null
+  else
+    omarchy-shell -q shell rescanPlugins >/dev/null
+  fi
 fi
 exit $rc
