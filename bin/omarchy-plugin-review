@@ -1,21 +1,21 @@
 #!/bin/bash
 
 # omarchy:summary=Snapshot an installed sandbox plugin and review its requested access
-# omarchy:args=<id> [--json]
+# omarchy:args=<id> [--json|--ui]
 # omarchy:examples=omarchy plugin review acme.weather
 
 set -euo pipefail
 
 if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
-  echo "Usage: omarchy plugin review <id> [--json]"
+  echo "Usage: omarchy plugin review <id> [--json|--ui]"
   exit 0
 fi
 
 id="${1:-}"
 [[ -n $id ]] || { echo "omarchy-plugin-review: plugin id is required" >&2; exit 1; }
 shift
-if (( $# > 1 )) || { (( $# == 1 )) && [[ $1 != "--json" ]]; }; then
-  echo "omarchy-plugin-review: expected only --json after the id" >&2
+if (( $# > 1 )) || { (( $# == 1 )) && [[ $1 != "--json" && $1 != "--ui" ]]; }; then
+  echo "omarchy-plugin-review: expected --json or --ui after the id" >&2
   exit 1
 fi
 
@@ -28,6 +28,12 @@ jq -e '.sandbox != null' <<<"$plugin" >/dev/null || {
   exit 1
 }
 source_dir=$(jq -r '.sourceDir' <<<"$plugin")
+if [[ ${1:-} == "--ui" ]]; then
+  payload=$(jq -cn --arg id "$id" '{id: $id}')
+  result=$(omarchy-shell shell summon omarchy.plugin-review "$payload")
+  [[ $result == "ok" ]] || { echo "omarchy-plugin-review: review panel is unavailable; restart the updated shell" >&2; exit 1; }
+  exit 0
+fi
 review=$(jq -cn --arg path "$source_dir" '{operation: "import", path: $path}' | omarchy-plugin-runtime)
 
 if [[ ${1:-} == "--json" ]]; then

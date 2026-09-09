@@ -119,7 +119,7 @@ QtObject {
     if (!Util.isPlainObject(manifest)) return ""
     // A declared sandbox entry point must never fall back to in-process QML,
     // including when the optional native runtime is absent or cannot start.
-    if (manifest.sandbox !== undefined) return ""
+    if (manifest.sandbox !== undefined || isSandboxed(manifest.id)) return ""
     var ep = manifest.entryPoints ? manifest.entryPoints[kind] : null
     if (!ep) return ""
     var dir = manifest.__sourceDir || ""
@@ -148,10 +148,20 @@ QtObject {
   //     summon them was a footgun: a stock shell.json with `plugins: []` would
   //     silently make `omarchy launch bar-settings` a no-op. Turning one off
   //     is therefore recorded the other way round, in `disabledPlugins[]`.
+  function isSandboxed(id) {
+    var manifest = installedPlugins[String(id)]
+    if (manifest && manifest.sandbox !== undefined) return true
+    var config = shellConfigProvider ? shellConfigProvider() : null
+    var location = findEntryLocation(config, String(id))
+    if (location.kind === "plugin") return config.plugins[location.index].sandbox === true
+    if (location.kind === "bar") return config.bar.layout[location.section][location.index].sandbox === true
+    return false
+  }
+
   function isEnabled(id) {
     var key = String(id)
     var manifest = installedPlugins[key]
-    if (manifest && manifest.sandbox !== undefined) return false
+    if (isSandboxed(key)) return false
     var config = shellConfigProvider ? shellConfigProvider() : null
     if (manifest) {
       if (Array.isArray(manifest.kinds) && manifest.kinds.indexOf("bar") !== -1) {
@@ -487,7 +497,7 @@ QtObject {
       console.warn("PluginRegistry.setEnabled: unknown plugin " + key)
       return false
     }
-    if (value && manifest.sandbox !== undefined) {
+    if (value && isSandboxed(key)) {
       lastEnableError = "sandbox plugins require the native host; review with: omarchy plugin review " + key
       return false
     }

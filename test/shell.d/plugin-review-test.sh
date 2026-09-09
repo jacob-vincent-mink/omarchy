@@ -45,6 +45,8 @@ try {
   assert(fs.existsSync(path.join(installed, '.git')), 'existing plugin add owns the sandbox Git checkout')
   run('omarchy-plugin-disable', ['acme.review'])
   assert(!fs.existsSync(store), 'disabling a never-reviewed plugin creates no store')
+  run('omarchy-plugin-review', ['acme.review', '--ui'])
+  assert(!fs.existsSync(store), 'opening the reviewer does not import or approve before its own command runs')
   const review = JSON.parse(run('omarchy-plugin-review', ['acme.review', '--json']))
   assertEqual(review.id, 'acme.review', 'review selects the installed catalog identity')
   assertEqual(review.requests.network, true, 'review shows requested network access')

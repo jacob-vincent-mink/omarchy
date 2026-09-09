@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "omarchy.plugin-review",
+  "name": "Plugin Access",
+  "version": "1.0.0",
+  "author": "Omarchy",
+  "description": "Review an exact sandbox revision and explicitly select access",
+  "kinds": ["panel"],
+  "entryPoints": {"panel": "Panel.qml"},
+  "keepLoaded": true
+}

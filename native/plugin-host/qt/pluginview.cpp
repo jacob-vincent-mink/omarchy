@@ -154,6 +154,8 @@ void PluginView::stop() {
   m_current = -1;
   m_serial = 0;
   m_ready = false;
+  m_hasSurface = false;
+  m_presented = false;
   m_resizing = true;
   setFocus(false);
   update();
@@ -174,6 +176,7 @@ void PluginView::poll() {
           m_viewport = QSize(event.width, event.height);
           m_scale = event.scale;
           m_mask = QRegion();
+          m_hasSurface = false;
           for (auto &buffer : m_buffers) buffer.reset();
           m_pending = -1;
           m_current = -1;
@@ -184,6 +187,9 @@ void PluginView::poll() {
         case omarchy::EventKind::Frame:
           m_pending = int(event.slot); m_serial = event.serial; update(); break;
         case omarchy::EventKind::Mask: {
+          // Every mapped surface contributes a clip row, even when it has an
+          // empty input region. No worker-authored readiness claim is needed.
+          m_hasSurface = !event.regions.empty();
           QRegion result, current;
           QRect clip;
           for (const auto &region : event.regions) {
@@ -192,7 +198,9 @@ void PluginView::poll() {
             else if (region.operation == 1) current += rect;
             else current -= rect;
           }
-          m_mask = (result + current.intersected(clip)).intersected(QRect(QPoint(), m_viewport));
+          const auto next = (result + current.intersected(clip)).intersected(QRect(QPoint(), m_viewport));
+          if (next.rectCount() > 1024) { fail("Plugin input region is too complex"); return; }
+          if (m_mask != next) { m_mask = next; emit stateChanged(); update(); }
           break;
         }
         case omarchy::EventKind::Failed: fail(QString::fromUtf8(event.error.data(), event.error.size())); return;
@@ -206,9 +214,13 @@ void PluginView::acknowledge(quint64 serial) {
   try {
     omarchy::presented(**m_session, serial);
     m_serial = 0;
+    if (!m_presented && m_hasSurface) { m_presented = true; emit stateChanged(); }
     if (m_resizing && m_generation != m_requestedAfter && m_viewport == m_requestedViewport && m_scale == m_requestedScale) {
       m_resizing = false;
       emit stateChanged();
+      // The host window's input mask changes on readiness. Schedule a frame
+      // so Quickshell polishes that mask even if plugin content is static.
+      update();
     }
   }
   catch (const rust::Error &error) { fail(QString::fromUtf8(error.what())); }
@@ -218,6 +230,12 @@ bool PluginView::contains(const QPointF &point) const {
   return m_ready && !m_resizing && width() > 0 && height() > 0 && std::isfinite(point.x()) && std::isfinite(point.y())
     && boundingRect().contains(point)
     && m_mask.contains(QPoint(point.x() * m_viewport.width() / width(), point.y() * m_viewport.height() / height()));
+}
+QVariantList PluginView::inputRegions() const {
+  QVariantList regions;
+  if (!m_ready || m_resizing) return regions;
+  for (const auto &rect : m_mask) regions.append(rect);
+  return regions;
 }
 void PluginView::input(uint32_t kind, uint32_t code, QPointF point) {
   if (!m_ready || m_resizing || !m_session || width() <= 0 || height() <= 0) return;
