@@ -457,6 +457,19 @@ ShellRoot {
     root.assertEqual(registry.localPluginIdForPath(cloneBase + "/.git/index"), "", "plugin git metadata is ignored")
     root.assertEqual(registry.localPluginIdForPath(registry.pluginsDir + "/.clone.abc123/manifest.json"), "", "hidden staging and backup dirs are ignored")
 
+    var sandboxed = manifest("third.sandbox", ["panel"], { panel: "worker.qml" })
+    sandboxed.sandbox = { version: 1, entryPoint: "worker.qml", requests: {} }
+    sandboxed.__sourceDir = "/third/sandbox"
+    sandboxed.__isFirstParty = false
+    var withSandbox = Object.assign({}, registry.installedPlugins)
+    withSandbox["third.sandbox"] = sandboxed
+    registry.installedPlugins = withSandbox
+    root.config.plugins = [{ id: "third.sandbox" }]
+    root.assertEqual(registry.entryPointUrl(sandboxed, "panel"), "", "sandbox entry points have no in-process URL")
+    root.assertTrue(!registry.isEnabled("third.sandbox"), "shell config cannot enable a sandbox in-process")
+    root.assertTrue(!registry.setEnabled("third.sandbox", true), "normal enable refuses sandbox entry points")
+    root.assertTrue(registry.lastEnableError.indexOf("native host") !== -1, "enable explains the required native host")
+
     root.assertTrue(changeCount > 0, "registry emits change notifications")
     writeResult()
   }

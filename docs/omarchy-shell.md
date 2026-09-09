@@ -88,6 +88,16 @@ bar from the CLI — `use | reset | defaults | position | transparent | put |
 move | set`, with placement flags such as `--section` and `--index`.
 The lower-level IPC methods remain available through `omarchy-shell shell ...`.
 
+## Sandboxed plugin development preview
+
+The command-first sandbox prototype uses the existing `omarchy plugin add` / `install` Git checkout workflow. A plugin with a `sandbox` manifest entry is never evaluated by the in-process loader, even if it appears in `shell.json`; missing native support does not downgrade it to trusted QML.
+
+`omarchy plugin review <id>` snapshots an installed plugin into the private native store and prints its SHA-256 revision and requested access. `--json` supplies the same review data for command clients. Review runs no plugin code and grants nothing. `omarchy plugin approve <id> --revision <sha256>` approves that exact snapshot; `--read slot=/folder`, `--media org.mpris.MediaPlayer2.Name`, `--allow-network`, and `--allow-notifications` explicitly select access, with everything else denied. Approval requires terminal confirmation or `--yes`, and it does not start a worker. `omarchy plugin disable <id>` revokes the sandbox record and stops its recorded controller independently of shell IPC.
+
+`omarchy plugin list` distinguishes approved revisions from enabled sessions. `update` changes the checkout, not its approval or grants, and directs the user to re-review; removing the sandbox declaration through an update is refused. `remove` revokes admission before deleting the checkout, even without a running shell, and retains the reviewed snapshots in the private store. Disabling a never-approved plugin is a no-op. Sandbox installation works without shell IPC; `add --enable` leaves it installed but reports that exact-revision approval is required.
+
+This remains an uninstalled development component. The commands use `$OMARCHY_PATH/lib/omarchy-plugin-host` as the native payload location; `OMARCHY_PLUGIN_HOST` can explicitly select a locally built development binary. State defaults to `$XDG_STATE_HOME/omarchy/plugin-host` (or `~/.local/state/omarchy/plugin-host`); `OMARCHY_PLUGIN_STORE` selects an isolated development/test store. Runtime packaging, `enable`/surface integration, and the graphical reviewer are still unfinished. See [`plans/sandboxed-quickshell.md`](../plans/sandboxed-quickshell.md) for the demo target and remaining gates.
+
 ## IPC
 
 The shell exposes a `shell` target (the host also registers

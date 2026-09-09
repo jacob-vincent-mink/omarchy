@@ -1,0 +1,64 @@
+#!/bin/bash
+
+# omarchy:summary=Approve an exact sandbox plugin revision and explicitly selected access
+# omarchy:args=<id> --revision <sha256> [--read <slot=folder>] [--media <service>] [--allow-network] [--allow-notifications] [--yes]
+# omarchy:examples=omarchy plugin approve acme.weather --revision <sha256> --allow-network
+
+set -euo pipefail
+
+fail() { echo "omarchy-plugin-approve: $*" >&2; exit 1; }
+if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
+  echo "Usage: omarchy plugin approve <id> --revision <sha256> [--read <slot=folder>] [--media <service>] [--allow-network] [--allow-notifications] [--yes]"
+  echo "All access defaults to denied. Approval does not start the plugin."
+  exit 0
+fi
+id="${1:-}"
+[[ -n $id ]] || fail "plugin id is required"
+shift
+revision=""
+selections='{"read":{},"network":false,"media":null,"notifications":false}'
+assume_yes=0
+while (( $# > 0 )); do
+  case "$1" in
+    --revision)
+      [[ -n ${2:-} && -z $revision ]] || fail "--revision requires one reviewed digest"
+      revision="$2"
+      shift 2
+      ;;
+    --read)
+      [[ ${2:-} == *=/* ]] || fail "--read requires slot=/absolute/folder"
+      slot="${2%%=*}"
+      folder="${2#*=}"
+      selections=$(jq -c --arg slot "$slot" --arg folder "$folder" '.read[$slot] = $folder' <<<"$selections")
+      shift 2
+      ;;
+    --media)
+      [[ -n ${2:-} ]] || fail "--media requires one exact org.mpris.MediaPlayer2 service"
+      selections=$(jq -c --arg name "$2" '.media = $name' <<<"$selections")
+      shift 2
+      ;;
+    --allow-network)
+      selections=$(jq -c '.network = true' <<<"$selections")
+      shift
+      ;;
+    --allow-notifications)
+      selections=$(jq -c '.notifications = true' <<<"$selections")
+      shift
+      ;;
+    --yes | -y)
+      assume_yes=1
+      shift
+      ;;
+    *) fail "unknown approval option: $1" ;;
+  esac
+done
+[[ $revision =~ ^[0-9a-f]{64}$ ]] || fail "--revision must be the exact SHA-256 from omarchy plugin review"
+if (( ! assume_yes )); then
+  [[ -t 0 && -t 1 ]] || fail "refusing approval without confirmation; pass --yes with explicit grants"
+  printf 'Plugin: %s\nRevision: %s\nSelected access:\n' "$id" "$revision"
+  jq . <<<"$selections"
+  gum confirm "Approve this revision and only this access?" || fail "aborted"
+fi
+jq -cn --arg id "$id" --arg revision "$revision" --argjson selections "$selections" \
+  '{operation: "approve", id: $id, revision: $revision, selections: $selections}' | omarchy-plugin-runtime >/dev/null
+echo "Approved $id at $revision. No plugin was started."

@@ -146,6 +146,15 @@ fi
 mv "$stage" "$target"
 echo "Added $id into $target"
 
+if jq -e 'has("sandbox")' "$target/manifest.json" >/dev/null; then
+  omarchy-shell -q shell rescanPlugins >/dev/null
+  echo "Review its requested access with: omarchy plugin review $id"
+  if [[ $enable_after == "true" ]]; then
+    fail "installed but not enabled; sandbox plugins require exact-revision approval first"
+  fi
+  exit 0
+fi
+
 omarchy-shell shell rescanPlugins >/dev/null
 
 if [[ -z $enable_after ]]; then

@@ -117,6 +117,9 @@ QtObject {
 
   function entryPointUrl(manifest, kind) {
     if (!Util.isPlainObject(manifest)) return ""
+    // A declared sandbox entry point must never fall back to in-process QML,
+    // including when the optional native runtime is absent or cannot start.
+    if (manifest.sandbox !== undefined) return ""
     var ep = manifest.entryPoints ? manifest.entryPoints[kind] : null
     if (!ep) return ""
     var dir = manifest.__sourceDir || ""
@@ -148,6 +151,7 @@ QtObject {
   function isEnabled(id) {
     var key = String(id)
     var manifest = installedPlugins[key]
+    if (manifest && manifest.sandbox !== undefined) return false
     var config = shellConfigProvider ? shellConfigProvider() : null
     if (manifest) {
       if (Array.isArray(manifest.kinds) && manifest.kinds.indexOf("bar") !== -1) {
@@ -481,6 +485,10 @@ QtObject {
     var manifest = installedPlugins[key]
     if (value && !manifest) {
       console.warn("PluginRegistry.setEnabled: unknown plugin " + key)
+      return false
+    }
+    if (value && manifest.sandbox !== undefined) {
+      lastEnableError = "sandbox plugins require the native host; review with: omarchy plugin review " + key
       return false
     }
     var isBarOption = manifest && Array.isArray(manifest.kinds) && manifest.kinds.indexOf("bar") !== -1

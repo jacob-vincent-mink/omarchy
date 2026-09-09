@@ -25,7 +25,28 @@ while (( $# > 0 )); do
   shift
 done
 
-plugins=$(omarchy-shell shell listPlugins)
+catalog=$(omarchy-plugin-catalog)
+if jq -e 'any(.[]; .sandboxed)' <<<"$catalog" >/dev/null; then
+  # The catalog remains usable with no running shell. Approval comes from
+  # Rust, while enabled continues to describe shell activation, not grants.
+  shell_plugins=$(omarchy-shell shell listPlugins 2>/dev/null) || shell_plugins='[]'
+  native=$(printf '%s' '{"operation":"list"}' | omarchy-plugin-runtime)
+  plugins=$(jq -cn --argjson catalog "$catalog" --argjson live "$shell_plugins" --argjson native "$native" '
+    $catalog | map(. as $entry |
+      (first($live[] | select(.id == $entry.id)) // {}) as $running |
+      (first($native[] | select(.id == $entry.id)) // {}) as $approval |
+      ($entry + {enabled: null} + $running) |
+      if $entry.sandboxed then . + {
+        enabled: ($running.enabled // false),
+        approved: ($approval.approved // false),
+        revision: ($approval.revision // null),
+        grants: ($approval.grants // {}),
+        error: ($approval.error // null)
+      } else . end)
+  ')
+else
+  plugins=$(omarchy-shell shell listPlugins)
+fi
 
 if [[ $json == "true" ]]; then
   printf '%s\n' "$plugins"
@@ -35,7 +56,11 @@ fi
 jq -r '
   .[] |
   [ .id,
-    (if .enabled then "enabled" else "disabled" end),
+    (if .error then "error"
+      elif .enabled then "enabled"
+      elif .approved then "approved"
+      elif .enabled == null then "unknown"
+      else "disabled" end),
     (if .firstParty then "first-party" else "third-party" end),
     ((.kinds // []) | join(",")),
     (.name // "")
