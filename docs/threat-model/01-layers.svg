@@ -1,0 +1,199 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 1180" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 z" fill="#333"/>
+    </marker>
+    <marker id="arrowR" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 z" fill="#b00"/>
+    </marker>
+    <style>
+      .t { font-weight: 700; }
+      .band { rx: 10; }
+      .comp { fill: #fff; stroke: #888; stroke-width: 1; rx: 6; }
+      .lbl { font-weight: 600; }
+      .cap { fill: #555; font-size: 11px; }
+      .note { font-size: 11px; fill: #444; }
+      .bnd { stroke-dasharray: 6 5; stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1180" height="1180" fill="#fafafa"/>
+  <text x="590" y="30" text-anchor="middle" class="t" font-size="18">Ward plugin isolation — trust layers L0 / L1 / L2</text>
+  <text x="590" y="50" text-anchor="middle" class="cap">Ward = Rust sandboxed Quickshell plugin runtime. One approval, one supervisor, one sandboxed worker. Nothing below a boundary can widen its own grant.</text>
+
+  <!-- ===================== L0 ===================== -->
+  <rect x="30" y="70" width="1120" height="352" class="band" fill="#eaf3ff" stroke="#3b6fb0" stroke-width="2"/>
+  <text x="52" y="98" class="t" fill="#245" font-size="15">L0 · Trusted host root</text>
+  <text x="210" y="98" class="cap">Full session authority. Owns approval, admission, rendering, and the host helpers. This is the root of trust; a compromise here is a compromise of the whole desktop.</text>
+
+  <!-- Desktop shell -->
+  <rect x="52" y="120" width="250" height="70" class="comp" fill="#dfeaff"/>
+  <text x="66" y="142" class="lbl">Omarchy desktop shell</text>
+  <text x="66" y="162" class="note">Quickshell + Qt bridge</text>
+  <text x="66" y="178" class="note">projects host input, reads completed output</text>
+
+  <!-- Controller -->
+  <rect x="322" y="120" width="300" height="70" class="comp" fill="#d7e8ff"/>
+  <text x="336" y="142" class="lbl">omarchy-ward controller (trusted process)</text>
+  <text x="336" y="162" class="note">admission · grants · supervision · requests broker</text>
+  <text x="336" y="178" class="note">private Smithay compositor (in-process)</text>
+
+  <!-- Store -->
+  <rect x="642" y="120" width="250" height="70" class="comp" fill="#d7e8ff"/>
+  <text x="656" y="142" class="lbl">Plugin store (ed25519-signed)</text>
+  <text x="656" y="162" class="note">~/.local/state/omarchy/... records</text>
+  <text x="656" y="178" class="note">revision-bound, tamper-detected</text>
+
+  <!-- Host helpers -->
+  <rect x="912" y="120" width="216" height="70" class="comp" fill="#dfeaff"/>
+  <text x="926" y="142" class="lbl">Host helpers (full CLI authority)</text>
+  <text x="926" y="162" class="note">notify · url-open · settings-apply</text>
+  <text x="926" y="178" class="note">pkg-add · omarchy-* CLIs</text>
+
+  <!-- Media proxy -->
+  <rect x="52" y="210" width="250" height="66" class="comp" fill="#e7f0ff"/>
+  <text x="66" y="232" class="lbl">Media proxy (xdg-dbus-proxy)</text>
+  <text x="66" y="252" class="note">in controller service, dies with it</text>
+  <text x="66" y="268" class="note">filtered MPRIS allow-list only</text>
+
+  <!-- Broker -->
+  <rect x="322" y="210" width="300" height="66" class="comp" fill="#e7f0ff"/>
+  <text x="336" y="232" class="lbl">Requests broker</text>
+  <text x="336" y="252" class="note">peer-credential UID check · cgroup member</text>
+  <text x="336" y="268" class="note">rate limits · 15 bounded delivery slots</text>
+
+  <!-- Input projection -->
+  <rect x="642" y="210" width="250" height="66" class="comp" fill="#e7f0ff"/>
+  <text x="656" y="232" class="lbl">Input projection (compositor)</text>
+  <text x="656" y="252" class="note">host key/pointer/scroll → private</text>
+  <text x="656" y="268" class="note">incremental host keymap, no full keymap</text>
+
+  <!-- Revision / grants -->
+  <rect x="912" y="210" width="216" height="66" class="comp" fill="#e7f0ff"/>
+  <text x="926" y="232" class="lbl">Grants record (admitted)</text>
+  <text x="926" y="252" class="note">fail-closed validation</text>
+  <text x="926" y="268" class="note">256-dir cap · 64 KiB · revocation live</text>
+
+  <!-- Supervisor -->
+  <rect x="200" y="300" width="470" height="70" class="comp" fill="#cfe0ff"/>
+  <text x="214" y="322" class="lbl">systemd transient unit — the supervisor</text>
+  <text x="214" y="342" class="note">one per plugin: 512 MB · 128 tasks · 50 % CPU · --timeout</text>
+  <text x="214" y="358" class="note">pidfd kill · child subreaper · cgroup.kill on drop</text>
+
+  <!-- Render output -->
+  <rect x="690" y="300" width="438" height="70" class="comp" fill="#cfe0ff"/>
+  <text x="704" y="322" class="lbl">Completed worker output → Qt</text>
+  <text x="704" y="342" class="note">only controller-composited buffers are forwarded</text>
+  <text x="704" y="358" class="note">worker buffers never reach Qt directly</text>
+
+  <!-- L0 internal arrow -->
+  <path d="M 322 155 L 302 155" class="bnd" stroke="#3b6fb0" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 622 155 L 642 155" class="bnd" stroke="#3b6fb0" fill="none" marker-end="url(#arrow)"/>
+
+  <!-- ===================== BOUNDARY 1 ===================== -->
+  <line x1="30" y1="432" x2="1150" y2="432" class="bnd" stroke="#b00"/>
+  <rect x="70" y="418" width="520" height="28" fill="#fff0f0" stroke="#b00"/>
+  <text x="84" y="437" class="lbl" fill="#b00" font-size="12">TB-3  supervisor boundary — resource limits verified; controller-owned descriptors only; no worker RPC selects a limit</text>
+
+  <!-- ===================== L1 ===================== -->
+  <rect x="30" y="452" width="1120" height="270" class="band" fill="#fff6e8" stroke="#c8841a" stroke-width="2"/>
+  <text x="52" y="480" class="t" fill="#a60" font-size="15">L1 · Supervisor / resource boundary</text>
+  <text x="290" y="480" class="cap">Kernel-enforced isolation. The supervisor runs the worker but owns its cgroup; it cannot grant authority, only bound it.</text>
+
+  <rect x="52" y="502" width="360" height="92" class="comp" fill="#ffedcc"/>
+  <text x="66" y="524" class="lbl">cgroup v2 child (controller_group)</text>
+  <text x="66" y="544" class="note">memory.max 512 MiB · pids.max 128</text>
+  <text x="66" y="560" class="note">cpu 50 % · cpu.stat · cpu.weight 100</text>
+  <text x="66" y="576" class="note">cgroup.kill + cgroup.events "populated 0"</text>
+
+  <rect x="432" y="502" width="360" height="92" class="comp" fill="#ffedcc"/>
+  <text x="446" y="524" class="lbl">guard() — forked after exec</text>
+  <text x="446" y="544" class="note">PR_SET_CHILD_SUBREAPER · async-signal-safe</text>
+  <text x="446" y="560" class="note">pidfd poll · SIGKILL on timeout/abort</text>
+  <text x="446" y="576" class="note">closes fds 3..512 before exec (keep pipe)</text>
+
+  <rect x="812" y="502" width="316" height="92" class="comp" fill="#ffedcc"/>
+  <text x="826" y="524" class="lbl">authentication (supervisor::authenticate_member)</text>
+  <text x="826" y="544" class="note">SO_PEERCRED uid == host uid</text>
+  <text x="826" y="560" class="note">SO_PEERPIDFD + cgroup membership</text>
+  <text x="826" y="576" class="note">failed auth still charged to the window</text>
+
+  <rect x="52" y="612" width="1076" height="92" class="comp" fill="#ffe4b3"/>
+  <text x="66" y="634" class="lbl">bubblewrap worker (bwrap) — one-shot, non-restartable</text>
+  <text x="66" y="654" class="note">--unshare-all --unshare-user --unshare-cgroup --disable-userns --assert-userns-disabled --die-with-parent --new-session --cap-drop ALL --clearenv</text>
+  <text x="66" y="674" class="note">bind-fd mounts from controller-owned descriptors only · no --ro-bind of host paths · RESOLVE_UNIX only in Landlock</text>
+  <text x="66" y="690" class="note">restrict_bootstrap(): close_range(3..MAX) then re-open granted sockets O_PATH|O_NOFOLLOW, then Landlock</text>
+
+  <!-- ===================== BOUNDARY 2 ===================== -->
+  <line x1="30" y1="722" x2="1150" y2="722" class="bnd" stroke="#b00"/>
+  <rect x="70" y="708" width="640" height="28" fill="#fff0f0" stroke="#b00"/>
+  <text x="84" y="727" class="lbl" fill="#b00" font-size="12">TB-4  worker sandbox boundary — namespaces + caps + Landlock + seccomp; a connected socket bypasses path Landlock, so fds are closed first</text>
+
+  <!-- ===================== L2 ===================== -->
+  <rect x="30" y="742" width="1120" height="398" class="band" fill="#fbeeee" stroke="#b0525f" stroke-width="2"/>
+  <text x="52" y="770" class="t" fill="#a33" font-size="15">L2 · Worker (untrusted sandbox)</text>
+  <text x="320" y="770" class="cap">The plugin's code runs here. It can only touch the sockets and files the controller mounted for it. It cannot widen its own grant.</text>
+
+  <!-- plugin code -->
+  <rect x="52" y="792" width="330" height="92" class="comp" fill="#ffd9d9"/>
+  <text x="66" y="814" class="lbl">plugin QML + native code (untrusted)</text>
+  <text x="66" y="834" class="note">Quickshell worker · entry point from manifest</text>
+  <text x="66" y="850" class="note">/plugin (ro-bind-fd) · /bootstrap · /home/plugin</text>
+  <text x="66" y="866" class="note">only admitted grants.json visible (read-only)</text>
+
+  <!-- sockets -->
+  <rect x="402" y="792" width="360" height="92" class="comp" fill="#ffd9d9"/>
+  <text x="416" y="814" class="lbl">Granted sockets (one per admitted capability)</text>
+  <text x="416" y="834" class="note">/run/plugin/wayland · media · notify</text>
+  <text x="416" y="850" class="note">settings · exec · open-url · ui</text>
+  <text x="416" y="866" class="note">absent when the capability is not admitted</text>
+
+  <!-- exec/http -->
+  <rect x="782" y="792" width="346" height="92" class="comp" fill="#ffd9d9"/>
+  <text x="796" y="814" class="lbl">Host request surface</text>
+  <text x="796" y="834" class="note">exec: positive-only argv tree, exact digest</text>
+  <text x="796" y="850" class="note">http: origin/method/path/query/body scoped</text>
+  <text x="796" y="866" class="note">DNS-rebinding guarded by AddressPolicy</text>
+
+  <!-- limits -->
+  <rect x="52" y="902" width="330" height="92" class="comp" fill="#ffd9d9"/>
+  <text x="66" y="924" class="lbl">Hard limits (cannot be raised by the worker)</text>
+  <text x="66" y="944" class="note">channel: 4096 B / 4 fds · memfd sealed</text>
+  <text x="66" y="960" class="note">context 64 KiB · geometry 48 KiB</text>
+  <text x="66" y="976" class="note">presentation 8.4 M px · 64 MiB buffer</text>
+
+  <!-- fs grants -->
+  <rect x="402" y="902" width="360" height="92" class="comp" fill="#ffd9d9"/>
+  <text x="416" y="924" class="lbl">Filesystem grants (/grants/*)</text>
+  <text x="416" y="944" class="note">read-only bind-fd by default</text>
+  <text x="416" y="960" class="note">read-write only for an admitted write slot</text>
+  <text x="416" y="976" class="note">writes affect real host data; not undoable</text>
+
+  <!-- tmpfs -->
+  <rect x="782" y="902" width="346" height="92" class="comp" fill="#ffd9d9"/>
+  <text x="796" y="924" class="lbl">Ephemeral surfaces</text>
+  <text x="796" y="944" class="note">/tmp 16 MiB · /run/plugin 8 MiB tmpfs</text>
+  <text x="796" y="960" class="note">/home/plugin 32 MiB tmpfs or storage bind</text>
+  <text x="796" y="976" class="note">/dev, /proc are synthetic; no host sockets</text>
+
+  <!-- request arrows up to broker -->
+  <path d="M 582 792 L 582 300" class="bnd" stroke="#b00" fill="none" marker-end="url(#arrowR)"/>
+  <text x="588" y="600" class="cap" fill="#b00" transform="rotate(-90 588 600)">TB-5  worker→broker: authenticated, rate-limited, re-checked under the store lock</text>
+
+  <!-- output arrow down from compositor -->
+  <path d="M 909 300 L 909 792" class="bnd" stroke="#3b6fb0" fill="none" marker-end="url(#arrow)"/>
+  <text x="902" y="600" class="cap" fill="#3b6fb0" transform="rotate(-90 902 600)">completed frames only</text>
+
+  <!-- legend -->
+  <rect x="52" y="1030" width="1076" height="96" fill="#fff" stroke="#bbb" rx="6"/>
+  <text x="66" y="1052" class="lbl">Legend</text>
+  <rect x="66" y="1066" width="18" height="14" fill="#eaf3ff" stroke="#3b6fb0"/>
+  <text x="90" y="1078" class="note">L0 trusted host</text>
+  <rect x="210" y="1066" width="18" height="14" fill="#fff6e8" stroke="#c8841a"/>
+  <text x="234" y="1078" class="note">L1 supervisor / kernel boundary</text>
+  <rect x="430" y="1066" width="18" height="14" fill="#fbeeee" stroke="#b0525f"/>
+  <text x="454" y="1078" class="note">L2 untrusted sandbox</text>
+  <line x1="590" y1="1073" x2="630" y2="1073" class="bnd" stroke="#b00"/>
+  <text x="636" y="1078" class="note">trust boundary (cannot be crossed to widen authority)</text>
+  <text x="66" y="1110" class="note">Red = request/effect direction (worker → host, must be admitted). Blue = host → worker (context, input, completed output). A boundary that fails closes the capability.</text>
+</svg>
