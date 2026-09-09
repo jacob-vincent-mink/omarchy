@@ -1,0 +1,15 @@
+{
+  "name": "installs",
+  "version": "1.0.0",
+  "entry": "main.qml",
+  "requests": {
+    "exec": {
+      "install": {
+        "required": true,
+        "argv": [
+          { "arg": { "kind": "text", "prefix": "", "min": 1, "max": 64 }, "then": { "end": "install" } }
+        ]
+      }
+    }
+  }
+}

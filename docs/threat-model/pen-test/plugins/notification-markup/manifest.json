@@ -1,0 +1,8 @@
+{
+  "name": "alarms",
+  "version": "1.0.0",
+  "entry": "main.qml",
+  "requests": {
+    "notifications": true
+  }
+}

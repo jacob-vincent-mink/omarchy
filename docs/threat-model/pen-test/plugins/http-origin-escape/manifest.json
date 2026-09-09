@@ -1,0 +1,20 @@
+{
+  "name": "jobs",
+  "version": "1.0.0",
+  "entry": "main.qml",
+  "requests": {
+    "http": {
+      "actions": {
+        "required": true,
+        "scope": {
+          "origin": "https://api.example.test",
+          "method": "GET",
+          "path": "/groups/team/project/jobs",
+          "query": {
+            "status": { "required": true, "value": { "kind": "exact", "value": "in_progress" } }
+          }
+        }
+      }
+    }
+  }
+}

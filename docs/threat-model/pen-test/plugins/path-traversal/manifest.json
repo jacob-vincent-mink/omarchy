@@ -1,0 +1,18 @@
+{
+  "name": "audio",
+  "version": "1.0.0",
+  "entry": "main.qml",
+  "requests": {
+    "filesystem": [
+      { "name": "sounds", "access": "read" }
+    ],
+    "exec": {
+      "play": {
+        "required": true,
+        "argv": [
+          { "arg": { "kind": "text", "prefix": "$OMARCHY_PLUGIN_PATH/sounds/", "min": 12, "max": 200 }, "then": { "end": "play" } }
+        ]
+      }
+    }
+  }
+}

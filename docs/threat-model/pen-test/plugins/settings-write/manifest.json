@@ -1,0 +1,12 @@
+{
+  "name": "prefs",
+  "version": "1.0.0",
+  "entry": "main.qml",
+  "requests": {
+    "settings": {
+      "read": ["theme"],
+      "write": ["volume"],
+      "required": true
+    }
+  }
+}
