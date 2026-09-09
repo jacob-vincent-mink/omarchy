@@ -19,6 +19,7 @@ pub enum Update {
   Ready,
   Presentation(Event),
   PanelState { serial: u32, open: bool },
+  WidgetSize { width: u32, height: u32 },
   Failed(String),
 }
 
@@ -245,6 +246,9 @@ fn dispatch(
           }
           Control::PanelState { serial, open } if ready => {
             emit(updates, Update::PanelState { serial, open })?;
+          }
+          Control::WidgetSize { width, height } if ready => {
+            emit(updates, Update::WidgetSize { width, height })?;
           }
           _ => return Err(io::Error::other("unexpected controller control record")),
         }

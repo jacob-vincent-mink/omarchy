@@ -9,6 +9,9 @@ QtObject {
   property var instances: ({})
   property var component: null
   property var bar: null
+  property QtObject geometrySource: PluginDesktopGeometry {
+    active: Object.keys(root.instances).length > 0
+  }
   property Connections workspaceChanges: Connections {
     target: Hyprland
     function onFocusedWorkspaceChanged() { root.dismissAll() }
@@ -41,7 +44,16 @@ QtObject {
     return settings
   }
 
-  function enable(id, entry) {
+  function coordinate(instance) {
+    const owner = instance.barOwner || instance
+    // Worker state alone cannot acquire host popup ownership.
+    if (instance.opened && instance.focusHeld) {
+      dismissAll(instance)
+      if (bar && typeof bar.requestPopout === "function") bar.requestPopout(owner)
+    } else if (bar && typeof bar.releasePopout === "function") bar.releasePopout(owner)
+  }
+
+  function enable(id, entry, placed) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) || id.indexOf("..") !== -1)
       return "invalid plugin id"
     var previous = instances[id]
@@ -52,7 +64,8 @@ QtObject {
     if (previous) disable(id)
     if (Object.keys(instances).length >= 16) return "too many active sandbox plugins"
     var instance = component.createObject(root, {
-      pluginId: id, store: store, controller: controller, settings: ownSettings(entry)
+      pluginId: id, store: store, controller: controller, settings: ownSettings(entry), geometrySource: geometrySource,
+      barPlacement: placed ? { x: 0, y: 0, width: 0, height: 0, size: 32, position: "top", visible: false } : null
     })
     if (!instance) return "could not create native plugin host: " + component.errorString()
     var next = Object.assign({}, instances)
@@ -65,11 +78,7 @@ QtObject {
     })
     var coordinate = function() {
       if (instances[id] !== instance) return
-      // Worker-reported state alone cannot take over host popup ownership.
-      if (instance.opened && instance.focusHeld) {
-        dismissAll(instance)
-        if (bar && typeof bar.requestPopout === "function") bar.requestPopout(instance)
-      } else if (bar && typeof bar.releasePopout === "function") bar.releasePopout(instance)
+      root.coordinate(instance)
     }
     instance.openedChanged.connect(coordinate)
     instance.focusHeldChanged.connect(coordinate)
@@ -80,7 +89,7 @@ QtObject {
   function disable(id) {
     var instance = instances[id]
     if (!instance) return
-    if (bar && typeof bar.releasePopout === "function") bar.releasePopout(instance)
+    if (bar && typeof bar.releasePopout === "function") bar.releasePopout(instance.barOwner || instance)
     var next = Object.assign({}, instances)
     delete next[id]
     instances = next
@@ -103,19 +112,24 @@ QtObject {
 
   // Closing private panels must not unmap their persistent bar widgets.
   function dismissAll(except) {
-    for (var id in instances) if (instances[id] !== except) instances[id].dismiss()
+    for (var id in instances) {
+      if (instances[id] !== except && instances[id].barOwner !== except) instances[id].dismiss()
+    }
   }
 
   function isOpen(id) { return !!instances[id] && instances[id].opened }
 
-  function sync(entries) {
+  function sync(entries, barEntries) {
+    barEntries = barEntries || []
+    const placedIds = barEntries.map(entry => entry.id)
+    entries = entries.concat(barEntries)
     var desired = ({})
     for (var i = 0; i < entries.length; i++) {
       var entry = entries[i]
       if (entry && entry.sandbox === true) {
         desired[String(entry.id)] = true
         if (!instances[entry.id]) {
-          var result = enable(String(entry.id), entry)
+          var result = enable(String(entry.id), entry, placedIds.indexOf(entry.id) !== -1)
           if (result !== "starting" && result !== "ok") console.warn(result)
         } else instances[entry.id].settings = ownSettings(entry)
       }

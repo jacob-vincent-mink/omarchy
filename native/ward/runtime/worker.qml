@@ -23,6 +23,29 @@ ShellRoot {
   onPanelStateChanged: Qt.callLater(reportPanelState)
   readonly property string section: manifest && manifest.barWidget
     ? (manifest.barWidget.defaultSection || "center") : "center"
+  readonly property var barPlacement: context ? context.bar : null
+  readonly property int widgetWidth: widgetLoader.item && widgetLoader.item.visible
+    ? Math.max(0, Math.min(1024, Math.ceil(widgetLoader.item.implicitWidth))) : 0
+  readonly property int widgetHeight: widgetLoader.item && widgetLoader.item.visible
+    ? Math.max(0, Math.min(1024, Math.ceil(widgetLoader.item.implicitHeight))) : 0
+  readonly property string widgetSize: widgetWidth + ":" + widgetHeight
+  property string sentWidgetSize: ""
+  onWidgetSizeChanged: widgetSizeTimer.restart()
+
+  function reportWidgetSize() {
+    if (!loaded || widgetSizeProcess.running || sentWidgetSize === widgetSize) return
+    sentWidgetSize = widgetSize
+    widgetSizeProcess.command = ["/bootstrap", "--widget-size", String(widgetWidth), String(widgetHeight)]
+    widgetSizeProcess.running = true
+  }
+  Timer { id: widgetSizeTimer; interval: 100; onTriggered: root.reportWidgetSize() }
+  Process {
+    id: widgetSizeProcess
+    onExited: function(code) {
+      if (code !== 0) root.sentWidgetSize = ""
+      widgetSizeTimer.restart()
+    }
+  }
 
   function entryUrl(path) {
     return "file:///plugin/" + path.split("/").map(encodeURIComponent).join("/")
@@ -50,6 +73,7 @@ ShellRoot {
     widgetLoader.setSource(entryUrl(entries.barWidget), { bar: barApi, settings: JSON.parse(JSON.stringify(context.settings)) })
     Qt.callLater(applyPanel)
     Qt.callLater(reportPanelState)
+    Qt.callLater(reportWidgetSize)
   }
 
   function applyPanel() {
@@ -119,6 +143,7 @@ ShellRoot {
 
   PluginShellApi {
     id: shellApi
+    readonly property var desktopGeometry: root.context ? root.context.geometry : null
     pluginId: root.manifest ? root.manifest.id : ""
     _serviceLookup: id => id === pluginId ? serviceLoader.item : null
     _summon: (id, payload) => {
@@ -236,7 +261,11 @@ ShellRoot {
     background: Color.bar.background
     urgent: Color.urgent
     fontFamily: Style.font.family
-    barSize: Style.bar.sizeHorizontal
+    position: root.barPlacement ? root.barPlacement.position : "top"
+    vertical: position === "left" || position === "right"
+    barSize: root.barPlacement ? root.barPlacement.size : Style.bar.sizeHorizontal
+    _showTooltip: (target, text) => tooltip.showFor(target, text)
+    _hideTooltip: target => { if (tooltip.target === target) tooltip.clear() }
     _registerClickTarget: target => { clickTargets = clickTargets.concat([target]) }
     _unregisterClickTarget: target => { clickTargets = clickTargets.filter(value => value !== target) }
     _requestPopout: owner => { activePopout = owner }
@@ -246,26 +275,70 @@ ShellRoot {
     _setCenterHoverRevealSuppressed: value => { _centerHoverRevealSuppressed = value }
   }
 
-  // Initial single-screen preview placement; host bar-slot integration follows.
+  // Mirror only the host-owned allocation. The private bar stays mapped while
+  // hidden so measuring a widget does not depend on its ancestor visibility.
   PanelWindow {
-    anchors { top: true; left: true; right: true }
-    implicitHeight: barApi.barSize
+    id: privateBar
+    anchors {
+      top: barApi.position === "top" || barApi.vertical
+      bottom: barApi.position === "bottom" || barApi.vertical
+      left: barApi.position === "left" || !barApi.vertical
+      right: barApi.position === "right" || !barApi.vertical
+    }
+    implicitWidth: barApi.vertical ? barApi.barSize : 0
+    implicitHeight: barApi.vertical ? 0 : barApi.barSize
     color: "transparent"
     exclusionMode: ExclusionMode.Ignore
     WlrLayershell.layer: WlrLayer.Top
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
     WlrLayershell.namespace: "omarchy-private-bar"
-    mask: Region { item: widgetLoader }
+    mask: Region { item: !root.barPlacement || root.barPlacement.visible ? widgetLoader : null }
 
     Loader {
       id: widgetLoader
-      x: root.section === "left" ? Style.gapsOut
+      x: root.barPlacement ? root.barPlacement.x : root.section === "left" ? Style.gapsOut
         : root.section === "right" ? parent.width - width - Style.gapsOut
         : (parent.width - width) / 2
-      anchors.verticalCenter: parent.verticalCenter
-      width: item ? item.implicitWidth : 0
-      height: item ? item.implicitHeight : 0
+      y: root.barPlacement ? root.barPlacement.y : (parent.height - height) / 2
+      width: root.barPlacement ? root.barPlacement.width : root.widgetWidth
+      height: root.barPlacement ? root.barPlacement.height : root.widgetHeight
+      opacity: !root.barPlacement || root.barPlacement.visible ? 1 : 0
+      clip: true
       onStatusChanged: root.checkLoader(this)
     }
+
+    BarToolTip {
+      id: tooltip
+      ownerWindow: privateBar
+      position: barApi.position
+      readonly property bool hovered: target !== null && target.visible !== false
+        && target.opacity !== 0 && target.tooltipHovered === true
+        && (!root.barPlacement || root.barPlacement.visible)
+      property bool shown: false
+      visible: shown && hovered && text !== ""
+      onHoveredChanged: if (!hovered) clear()
+
+      function clear() {
+        tooltipTimer.stop()
+        shown = false
+        target = null
+        text = ""
+      }
+      function showFor(item, value) {
+        clear()
+        if (!item || item.QsWindow.window !== privateBar || !value) return
+        target = item
+        text = value
+        // MouseArea emits entered before dependent hover bindings settle.
+        Qt.callLater(function() {
+          if (tooltip.target === item && tooltip.hovered) tooltipTimer.restart()
+        })
+      }
+    }
+  }
+  Timer {
+    id: tooltipTimer
+    interval: 400
+    onTriggered: tooltip.shown = tooltip.hovered
   }
 }

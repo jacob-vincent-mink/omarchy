@@ -166,11 +166,13 @@ void PluginView::stop() {
   m_presented = false;
   m_panelOpen = false;
   m_panelSerial = 0;
+  m_widgetSize = QSize(0, 0);
   m_resizing = true;
   setFocus(false);
   update();
   emit stateChanged();
   emit panelChanged();
+  emit widgetSizeChanged();
 }
 void PluginView::fail(const QString &message) { m_error = message; stop(); }
 
@@ -186,6 +188,10 @@ void PluginView::poll() {
           m_panelOpen = event.panel_open;
           m_panelSerial = event.panel_serial;
           emit panelChanged();
+          break;
+        case omarchy::EventKind::WidgetSize:
+          m_widgetSize = QSize(event.width, event.height);
+          emit widgetSizeChanged();
           break;
         case omarchy::EventKind::Configured:
           m_generation = event.generation;
@@ -265,7 +271,9 @@ void PluginView::input(uint32_t kind, uint32_t code, QPointF point) {
 void PluginView::mousePressEvent(QMouseEvent *event) { emit focusRequested(); forceActiveFocus(); input(0, buttonCode(event->button()), event->position()); event->accept(); }
 void PluginView::mouseReleaseEvent(QMouseEvent *event) { input(1, buttonCode(event->button()), event->position()); event->accept(); }
 void PluginView::mouseMoveEvent(QMouseEvent *event) { input(2, 0, event->position()); event->accept(); }
+void PluginView::hoverEnterEvent(QHoverEvent *event) { input(2, 0, event->position()); event->accept(); }
 void PluginView::hoverMoveEvent(QHoverEvent *event) { input(2, 0, event->position()); event->accept(); }
+void PluginView::hoverLeaveEvent(QHoverEvent *event) { input(6, 0); event->accept(); }
 void PluginView::wheelEvent(QWheelEvent *event) {
   // Unlike button releases, wheels have no implicit grab. Do not redirect an
   // event outside the worker's current mask (including during a resize).

@@ -37,6 +37,7 @@ QtObject {
   property var settings: ({read: [], write: []})
   property bool openUrls: false
   property bool storage: false
+  property bool desktopGeometry: false
   property string media: ""
   property var folders: ({})
   property var writableFolders: ({})
@@ -61,6 +62,7 @@ QtObject {
   onSettingsChanged: selectionApproved = false
   onOpenUrlsChanged: selectionApproved = false
   onStorageChanged: selectionApproved = false
+  onDesktopGeometryChanged: selectionApproved = false
   onMediaChanged: selectionApproved = false
   onFoldersChanged: selectionApproved = false
   onWritableFoldersChanged: selectionApproved = false
@@ -86,6 +88,7 @@ QtObject {
     settings = ({read: [], write: []})
     openUrls = false
     storage = false
+    desktopGeometry = false
     media = ""
     folders = ({})
     writableFolders = ({})
@@ -143,6 +146,7 @@ QtObject {
       for (var key of settings[access]) args.push("--" + access + "-setting", key)
     if (openUrls) args.push("--allow-open-urls")
     if (storage) args.push("--allow-storage")
+    if (desktopGeometry) args.push("--allow-desktop-geometry")
     if (media.trim()) args.push("--media", media.trim())
     for (var slot in folders) if (folders[slot].trim())
       args.push(writableFolders[slot] === true ? "--write" : "--read", slot + "=" + folders[slot].trim())

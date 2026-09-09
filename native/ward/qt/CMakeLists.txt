@@ -25,6 +25,7 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/Omarchy/Ward/qmldir
 install(PROGRAMS "${RUST_TARGET_DIR}/${RUST_PROFILE}/omarchy-ward" DESTINATION lib)
 get_filename_component(OMARCHY_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
 install(FILES ../runtime/worker.qml DESTINATION lib/ward-runtime/shell)
+install(DIRECTORY ../runtime/Ward DESTINATION lib/ward-runtime/shell)
 install(PROGRAMS ../runtime/open-url DESTINATION lib/ward-runtime/bin RENAME omarchy-launch-browser)
 install(PROGRAMS ../runtime/open-url DESTINATION lib/ward-runtime/bin RENAME omarchy-launch-webapp)
 install(PROGRAMS ../runtime/http DESTINATION lib/ward-runtime/bin RENAME omarchy-ward-http)

@@ -19,6 +19,7 @@ class PluginView : public QQuickItem {
   Q_PROPERTY(QVariantList inputRegions READ inputRegions NOTIFY stateChanged)
   Q_PROPERTY(bool panelOpen READ panelOpen NOTIFY panelChanged)
   Q_PROPERTY(uint panelSerial READ panelSerial NOTIFY panelChanged)
+  Q_PROPERTY(QSize widgetSize READ widgetSize NOTIFY widgetSizeChanged)
 public:
   explicit PluginView(QQuickItem *parent = nullptr);
   bool ready() const { return m_ready; }
@@ -27,6 +28,7 @@ public:
   QString error() const { return m_error; }
   bool panelOpen() const { return m_panelOpen; }
   uint panelSerial() const { return m_panelSerial; }
+  QSize widgetSize() const { return m_widgetSize; }
   QVariantList inputRegions() const;
   bool contains(const QPointF &) const override;
   Q_INVOKABLE void start(const QString &store, const QString &id, const QString &controller,
@@ -40,13 +42,16 @@ public:
 signals:
   void stateChanged();
   void panelChanged();
+  void widgetSizeChanged();
   void focusRequested();
 protected:
   QSGNode *updatePaintNode(QSGNode *, UpdatePaintNodeData *) override;
   void mousePressEvent(QMouseEvent *) override;
   void mouseReleaseEvent(QMouseEvent *) override;
   void mouseMoveEvent(QMouseEvent *) override;
+  void hoverEnterEvent(QHoverEvent *) override;
   void hoverMoveEvent(QHoverEvent *) override;
+  void hoverLeaveEvent(QHoverEvent *) override;
   void wheelEvent(QWheelEvent *) override;
   void keyPressEvent(QKeyEvent *) override;
   void keyReleaseEvent(QKeyEvent *) override;
@@ -58,6 +63,7 @@ private:
   std::array<std::optional<rust::Box<omarchy::NativeBuffer>>, 2> m_buffers;
   QTimer m_timer;
   QSize m_viewport;
+  QSize m_widgetSize = QSize(0, 0);
   QSize m_requestedViewport;
   int m_scale = 1;
   int m_requestedScale = 1;

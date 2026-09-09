@@ -170,6 +170,10 @@ fn run_internal(args: &[OsString]) -> io::Result<()> {
         .to_str()
         .ok_or_else(|| io::Error::other("invalid panel state"))?,
     ),
+    [mode, width, height] if mode == "--widget-size" => omarchy_ward::requests::report_widget_size(
+      width.to_str().ok_or_else(|| Status::Invalid.error())?,
+      height.to_str().ok_or_else(|| Status::Invalid.error())?,
+    ),
     [mode, settings] if mode == "--settings" => omarchy_ward::requests::save_settings(
       settings.to_str().ok_or_else(|| Status::Invalid.error())?,
     ),

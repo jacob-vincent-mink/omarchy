@@ -74,7 +74,12 @@ fn missing_or_invalid_shared_runtime_fails_without_presenting() {
           panic!("invalid runtime produced a frame");
         }
         // Ready acknowledges controller admission, not worker content.
-        Some(Update::Ready | Update::Presentation(_) | Update::PanelState { .. }) => (),
+        Some(
+          Update::Ready
+          | Update::Presentation(_)
+          | Update::PanelState { .. }
+          | Update::WidgetSize { .. },
+        ) => (),
         None => {
           assert!(
             Instant::now() < deadline,
@@ -94,7 +99,12 @@ fn wait_frame(
   name: &str,
   ready: impl Fn(&Frame) -> bool,
 ) {
-  let deadline = Instant::now() + Duration::from_secs(3);
+  let deadline = Instant::now()
+    + Duration::from_secs(if name == "ready" || name == "restored" {
+      8
+    } else {
+      3
+    });
   while Instant::now() < deadline {
     for frame in display.step(start.elapsed().as_millis() as u32) {
       if ready(&frame) {
@@ -145,19 +155,33 @@ fn shared_runtime(settings_granted: bool) {
     "schemaVersion": 1, "id": "test.shared", "name": "Shared runtime", "version": "1",
     "kinds": ["bar-widget", "service", "overlay"],
     "entryPoints": {"barWidget": "Widget #.qml", "service": "Service.qml", "overlay": "Overlay.qml"},
-    "barWidget": {"defaultSection": "right"}, "sandbox": {"version": 1, "requests": {"settings": {"read": ["width", "fontSize", "nested"], "write": ["width", "fontSize", "nested"]}}}
+    "barWidget": {"defaultSection": "right"}, "sandbox": {"version": 1, "requests": {"desktopGeometry": true, "settings": {"read": ["width", "fontSize", "nested"], "write": ["width", "fontSize", "nested"]}}}
   })).unwrap()).unwrap();
   fs::write(
     source.join("Service.qml"),
     r#"
 import QtQuick
 import Quickshell.Io
+import qs.Ward
 Item {
   id: service
   property var shell: null
   property var manifest: null
   property int presses: 0
   property bool jsonResult: false
+  property bool geometryGranted: false
+  property bool readOnlyContext: false
+  property int geometryChanges: 0
+  Connections { target: Desktop; function onChanged() { service.geometryChanges++ } }
+  Process {
+    command: ["/bin/bash", "-c", "! printf forbidden > /context/state.json && ! printf forbidden > /run/plugin/grants.json"]
+    running: true
+    onExited: function(code) { service.readOnlyContext = code === 0 }
+  }
+  FileView {
+    path: "/run/plugin/grants.json"
+    onLoaded: service.geometryGranted = JSON.parse(text()).desktopGeometry
+  }
   Process {
     command: ["/bootstrap", "--json", "--exec", "unselected"]
     running: true
@@ -176,32 +200,69 @@ Item {
     source.join("Widget #.qml"),
     r##"
 import QtQuick
+import Quickshell
 import qs.Ui
 import qs.Commons
+import qs.Ward
 BarWidget {
   id: root
   moduleName: "test.shared"
-  implicitWidth: settings.width
-  implicitHeight: barSize
+  implicitWidth: bar && bar.vertical ? barSize : settings.width
+  implicitHeight: bar && bar.vertical ? settings.width : barSize
+  readonly property bool tooltipHovered: hover.containsMouse
   readonly property var own: bar && bar.shell ? bar.shell.serviceFor(moduleName) : null
-  readonly property bool scoped: own && own.jsonResult && bar.shell.serviceFor("other.plugin") === null
+  readonly property var geometry: bar && bar.shell ? bar.shell.desktopGeometry : null
+  readonly property bool expectGeometry: own && own.geometryGranted && settings.fontSize !== 16
+  readonly property var monitor: Desktop.monitorFor(Quickshell.screens[0])
+  readonly property bool adapterValid: own && Desktop.granted === own.geometryGranted
+    && Desktop.monitorFor(null) === null && Desktop.monitorFor({}) === null
+    && Desktop.dispatch === undefined && Desktop.request === undefined
+    && (expectGeometry
+      ? Desktop.available && monitor !== null && monitor.x === -400 && monitor.width === 400
+        && monitor.scale === 1.25 && monitor.activeWorkspace.id === 2
+        && monitor.lastIpcObject.reserved[1] === 26 && monitor.name === undefined
+        && Desktop.toplevels.values.length === 1 && Desktop.toplevels.values[0].address === "3"
+        && Desktop.toplevels.values[0].workspace.id === 2
+        && Desktop.toplevels.values[0].lastIpcObject.at[0] === settings.fontSize * 5 - 20
+        && Desktop.toplevels.values[0].lastIpcObject.at[1] === -12.5
+        && Desktop.toplevels.values[0].lastIpcObject.size[0] === 200
+        && Desktop.toplevels.values[0].lastIpcObject.mapped === true
+        && Desktop.toplevels.values[0].lastIpcObject.hidden === false
+        && Desktop.toplevels.values[0].lastIpcObject.fullscreen === false
+        && Desktop.toplevels.values[0].lastIpcObject.title === undefined
+      : !Desktop.available && monitor === null && Desktop.toplevels.values.length === 0)
+  readonly property bool geometryValid: own && (expectGeometry
+    ? geometry !== null && geometry.viewport === 1 && geometry.outputs.length === 1
+      && geometry.workspaces[0].output === 1 && geometry.windows[0].id === 3
+      && geometry.windows[0].rect.x === settings.fontSize * 5 - 20
+      && geometry.windows[0].rect.y === -12.5 && geometry.windows[0].title === undefined
+    : geometry === null)
+  readonly property bool scoped: own && own.jsonResult && own.readOnlyContext
+    && (!own.geometryGranted || settings.fontSize === 12 || own.geometryChanges > 0)
+    && bar.shell.serviceFor("other.plugin") === null
     && bar.shell.summon("other.plugin", "") === false
     && bar.shell.updateEntryInline("other.plugin", {}) === false
     && settings.id === undefined && settings.sandbox === undefined
     && settings.hidden === undefined
     && settings.nested.text.length === 8192 && settings.nested.other === undefined
     && Style.fontBaseSize === settings.fontSize && Style.cornerRadius === 7 && Style.gapsOut === 4
-    && Style.resolvedFontFamily === "monospace"
+    && Style.resolvedFontFamily === "monospace" && geometryValid && adapterValid
   Rectangle {
     anchors.centerIn: parent
-    width: root.implicitWidth; height: 20
+    width: bar.vertical ? 20 : root.implicitWidth
+    height: bar.vertical ? root.implicitHeight : 20
     color: !root.scoped ? "#ee1122" : root.own.presses === 0 ? Color.accent
       : root.own.presses === 1 ? Color.foreground : Color.urgent
   }
   MouseArea {
+    id: hover
     anchors.fill: parent
+    hoverEnabled: true
+    onEntered: root.bar.showTooltip(root, "A deliberately long plain-text <b>tooltip</b> that wraps within the private output")
+    onExited: root.bar.hideTooltip(root)
     acceptedButtons: Qt.LeftButton | Qt.RightButton
     onClicked: mouse => {
+      root.bar.hideTooltip(root)
       if (mouse.button === Qt.RightButton) {
         var entry = Object.assign({}, root.settings, { id: root.moduleName, width: 80 })
         root.settings = entry
@@ -250,6 +311,7 @@ Item {
     .approve(
       &revision.digest,
       Grants {
+        desktop_geometry: settings_granted,
         settings: omarchy_ward::settings::Grant {
           read: ["width".into(), "fontSize".into(), "nested".into()].into(),
           write: if settings_granted {
@@ -322,6 +384,7 @@ Item {
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Wayland
 import qs.Commons
 import "Services"
 ShellRoot {
@@ -329,18 +392,28 @@ ShellRoot {
   property var shellConfig: ({plugins: []})
   property var builtinShellConfig: ({})
   property alias sandboxedPlugins: plugins
+  property string barPosition: "top"
+  property int barOffset: 4
+  property bool barVisible: true
   function persistShellConfig(config) {
     shellConfig = config
-    plugins.sync(config.plugins)
+    plugins.sync([], config.bar.layout.right)
     var context = JSON.parse(data.text())
-    context.settings = config.plugins[0]
+    context.settings = config.bar.layout.right[0]
     data.setText(JSON.stringify(context))
   }
   IpcHandler {
     target: "shell"
     @SAVE_SETTINGS@
   }
-  SandboxedPlugins { id: plugins }
+  SandboxedPlugins {
+    id: plugins
+    onChanged: console.log("SHARED", JSON.stringify(status("test.shared")))
+    geometrySource: QtObject {
+      property var snapshot: null
+      function forScreen(screen) { return snapshot }
+    }
+  }
   FileView {
     id: data
     path: Quickshell.env("TEST_CONTEXT")
@@ -348,22 +421,57 @@ ShellRoot {
     onFileChanged: reload()
     onLoaded: {
       var context = JSON.parse(text())
+      plugins.geometrySource.snapshot = context.fontSize === 16 ? null : {
+        viewport: 1,
+        outputs: [{id: 1, rect: {x: -400, y: 0, width: 400, height: 240}, scale: 1.25, reserved: [0, 26, 0, 0], activeWorkspaces: [2]}],
+        workspaces: [{id: 2, output: 1}],
+        windows: [{id: 3, workspace: 2, rect: {x: context.fontSize * 5 - 20, y: -12.5, width: 200, height: 100}, mapped: true, hidden: false, fullscreen: false}]
+      }
       Color.accent = "#eeaa22"
       Color.foreground = context.foreground
       Color.urgent = "#aa44dd"
-      Color.shellValues = { "font.base-size": String(context.fontSize), "bar.size-horizontal": "26", "bar.scale-with-font": "false" }
+      Color.shellValues = { "font.base-size": String(context.fontSize), "bar.size-horizontal": "26", "bar.scale-with-font": "false", "tooltip.background": "#123456" }
       Style.applyShellValues(Color.shellValues)
       Style.cornerRadius = 7
       Style.gapsOut = 4
       Style.resolvedFontFamily = "monospace"
-      shell.shellConfig = {plugins: [JSON.parse(JSON.stringify(context.settings))]}
-      plugins.sync(context.enabled ? [context.settings] : [])
+      shell.barPosition = context.position || "top"
+      shell.barOffset = context.offset === undefined ? 4 : context.offset
+      shell.barVisible = context.barVisible !== false
+      shell.shellConfig = {plugins: [], bar: {layout: {right: [JSON.parse(JSON.stringify(context.settings))]}}}
+      plugins.sync([], context.enabled ? [context.settings] : [])
       // Subsequent mutation of the caller's object must not mutate the copy.
       context.settings.nested.other = "not for the worker"
     }
   }
+  PanelWindow {
+    id: barWindow
+    readonly property bool vertical: shell.barPosition === "left" || shell.barPosition === "right"
+    anchors {
+      top: shell.barPosition === "top" || vertical
+      bottom: shell.barPosition === "bottom" || vertical
+      left: shell.barPosition === "left" || !vertical
+      right: shell.barPosition === "right" || !vertical
+    }
+    implicitWidth: vertical ? 26 : 0
+    implicitHeight: vertical ? 0 : 26
+    color: "transparent"
+    exclusionMode: ExclusionMode.Ignore
+    WlrLayershell.layer: WlrLayer.Top
+    mask: Region {}
+    SandboxedBarWidget {
+      manager: plugins
+      moduleName: "test.shared"
+      visible: shell.barVisible
+      bar: QtObject { property int barSize: 26; property string position: shell.barPosition }
+      x: barWindow.vertical ? 0 : parent.width - width - shell.barOffset
+      y: barWindow.vertical ? parent.height - height - shell.barOffset : 0
+      width: implicitWidth; height: implicitHeight
+    }
+  }
   FloatingWindow {
     implicitWidth: 400; implicitHeight: 240; color: "#24303a"
+    mask: Region { x: 15; y: 65; width: 30; height: 30 }
     Rectangle {
       x: 15; y: 65; width: 30; height: 30; color: "#bb6633"
       MouseArea { anchors.fill: parent; onClicked: parent.color = "#ee5599" }
@@ -457,6 +565,19 @@ ShellRoot {
       wait_frame(&mut display, start, &log, "live-context", |frame| {
         frame.count([0x11, 0xcc, 0x99]) == 1200
       });
+      for (font_size, color, rgb, name) in [
+        (16, "#33bb88", [0x33, 0xbb, 0x88], "geometry-unavailable"),
+        (14, "#11cc99", [0x11, 0xcc, 0x99], "geometry-recovered"),
+      ] {
+        fs::write(
+          &host_context,
+          serde_json::to_vec(&context(60, font_size, color)).unwrap(),
+        )
+        .unwrap();
+        wait_frame(&mut display, start, &log, name, |frame| {
+          frame.count(rgb) == 1200
+        });
+      }
     }
   }
   for kind in [2, 0, 1] {
@@ -505,6 +626,103 @@ ShellRoot {
     "saving selected keys must preserve unreadable settings"
   );
   assert_eq!(saved["untouched"]["otherPlugin"], "preserved");
+  // The real host spacer receives worker size, then moves the existing worker
+  // through every bar orientation. Settings and service state must survive.
+  let width = if settings_granted { 80 } else { 60 };
+  let pixel = |frame: &Frame, x: usize, y: usize, rgb: [u8; 3]| {
+    let offset = (y * frame.size().0 as usize + x) * 4;
+    frame.pixels()[offset..offset + 3] == rgb
+  };
+  for (position, x, y) in [
+    ("top", 320 - width / 2, 13),
+    ("bottom", 320 - width / 2, 227),
+    ("left", 13, 160 - width / 2),
+    ("right", 387, 160 - width / 2),
+  ] {
+    saved["position"] = position.into();
+    saved["offset"] = 80.into();
+    fs::write(&host_context, serde_json::to_vec(&saved).unwrap()).unwrap();
+    wait_frame(&mut display, start, &log, position, |frame| {
+      frame.count([0xaa, 0x44, 0xdd]) == width * 20 && pixel(frame, x, y, [0xaa, 0x44, 0xdd])
+    });
+    display
+      .graphics
+      .input(2, 0, x as i32, y as i32, start.elapsed().as_millis() as u32)
+      .unwrap();
+    let hovered_at = Instant::now();
+    while hovered_at.elapsed() < Duration::from_millis(200) {
+      for frame in display.step(start.elapsed().as_millis() as u32) {
+        assert_eq!(
+          frame.count([0x12, 0x34, 0x56]),
+          0,
+          "tooltip skipped its hover delay"
+        );
+      }
+      std::thread::sleep(Duration::from_millis(5));
+    }
+    wait_frame(
+      &mut display,
+      start,
+      &log,
+      &format!("tooltip-{position}"),
+      |frame| frame.count([0x12, 0x34, 0x56]) > 1000,
+    );
+    if position == "top" {
+      // The first painted popup precedes Qt's queued mask polish and the
+      // private-to-host input-region round trip.
+      let mask_deadline = Instant::now() + Duration::from_millis(200);
+      while Instant::now() < mask_deadline {
+        display.step(start.elapsed().as_millis() as u32);
+        std::thread::sleep(Duration::from_millis(5));
+      }
+      assert!(
+        !display.mask().iter().any(|region| {
+          region.operation == 1
+            && region.x <= 30
+            && 30 < region.x + region.width
+            && region.y <= 50
+            && 50 < region.y + region.height
+        }),
+        "the tooltip must not add an input region: {:?}",
+        display.mask()
+      );
+    }
+    display
+      .graphics
+      .input(2, 0, 30, 80, start.elapsed().as_millis() as u32)
+      .unwrap();
+    wait_frame(&mut display, start, &log, "tooltip-dismissed", |frame| {
+      frame.count([0x12, 0x34, 0x56]) == 0
+    });
+    click(&mut display, x as i32, y as i32);
+    wait_frame(&mut display, start, &log, "relocated-click", |frame| {
+      frame.count([0x44, 0xee, 0x22]) == 24000
+    });
+    // Pointer departure must not dismiss or defocus the keyboard panel.
+    display
+      .graphics
+      .input(2, 0, 30, 80, start.elapsed().as_millis() as u32)
+      .unwrap();
+    for kind in [3, 4] {
+      display
+        .graphics
+        .input(kind, 9, 0, 0, start.elapsed().as_millis() as u32)
+        .unwrap();
+    }
+    wait_frame(&mut display, start, &log, "relocated-close", |frame| {
+      frame.count([0x44, 0xee, 0x22]) == 0 && frame.count([0xaa, 0x44, 0xdd]) == width * 20
+    });
+  }
+  saved["barVisible"] = false.into();
+  fs::write(&host_context, serde_json::to_vec(&saved).unwrap()).unwrap();
+  wait_frame(&mut display, start, &log, "bar-hidden", |frame| {
+    frame.count([0xaa, 0x44, 0xdd]) == 0
+  });
+  saved["barVisible"] = true.into();
+  fs::write(&host_context, serde_json::to_vec(&saved).unwrap()).unwrap();
+  wait_frame(&mut display, start, &log, "bar-visible", |frame| {
+    frame.count([0xaa, 0x44, 0xdd]) == width * 20
+  });
   saved["enabled"] = false.into();
   fs::write(&host_context, serde_json::to_vec(&saved).unwrap()).unwrap();
   wait_frame(&mut display, start, &log, "stopped", |frame| {

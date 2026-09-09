@@ -6,13 +6,37 @@ use std::{collections::BTreeMap, fs::File, io, os::fd::OwnedFd};
 
 const MAX_BYTES: usize = 65536;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UiContext {
   pub settings: serde_json::Map<String, serde_json::Value>,
   pub theme: Option<Theme>,
   /// Desired own-panel state. Repeated context updates do not replay an action.
   pub panel: Option<PanelCommand>,
+  pub geometry: Option<crate::geometry::Snapshot>,
+  /// Host allocation inside the bar on this worker's output. Not desktop observation.
+  pub bar: Option<BarPlacement>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BarPlacement {
+  pub x: f64,
+  pub y: f64,
+  pub width: f64,
+  pub height: f64,
+  pub size: u32,
+  pub position: BarPosition,
+  pub visible: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BarPosition {
+  Top,
+  Bottom,
+  Left,
+  Right,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,12 +67,34 @@ impl UiContext {
       return Err(io::Error::other("UI context exceeds 64 KiB"));
     }
     let context: Self = serde_json::from_slice(bytes)?;
+    if let Some(geometry) = &context.geometry {
+      geometry.validate()?;
+    }
+    if context.bar.as_ref().is_some_and(|bar| {
+      ![bar.x, bar.y]
+        .into_iter()
+        .all(|v| v.is_finite() && v.abs() <= 4096.)
+        || ![bar.width, bar.height]
+          .into_iter()
+          .all(|v| v.is_finite() && (0.0..=1024.).contains(&v))
+        || !(1..=1024).contains(&bar.size)
+    }) {
+      return Err(io::Error::other("invalid bar allocation"));
+    }
     if context.panel.as_ref().is_some_and(|panel| {
       panel.serial == 0 || panel.payload.len() > 4096 || (!panel.open && !panel.payload.is_empty())
     }) {
       return Err(io::Error::other("invalid own-panel command"));
     }
     Ok(context)
+  }
+
+  #[cfg(any(feature = "graphics", test))]
+  pub(crate) fn filter(&mut self, grants: &crate::grants::Grants) {
+    grants.settings.filter(&mut self.settings);
+    if !grants.desktop_geometry {
+      self.geometry = None;
+    }
   }
 
   fn bytes(&self) -> io::Result<Vec<u8>> {
@@ -80,6 +126,34 @@ impl UiContext {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn bar_allocation_is_host_owned_bounded_and_independent_of_grants() {
+    let json = br#"{"settings":{},"bar":{"x":123.5,"y":2,"width":60,"height":32,"size":40,"position":"bottom","visible":true}}"#;
+    let mut context = UiContext::parse(json).unwrap();
+    context.filter(&crate::grants::Grants::default());
+    assert!(context.bar.is_some());
+    assert_eq!(
+      UiContext::unseal(context.seal().unwrap().into()).unwrap(),
+      context
+    );
+    for (field, value) in [
+      ("x", "4097"),
+      ("y", "-4097"),
+      ("width", "1025"),
+      ("height", "-1"),
+      ("size", "0"),
+      ("position", "\"elsewhere\""),
+      ("visible", "1"),
+    ] {
+      let mut value_json: serde_json::Value = serde_json::from_slice(json).unwrap();
+      value_json["bar"][field] = serde_json::from_str(value).unwrap();
+      assert!(
+        UiContext::parse(&serde_json::to_vec(&value_json).unwrap()).is_err(),
+        "{field}"
+      );
+    }
+  }
 
   #[test]
   fn panel_commands_are_optional_bounded_and_survive_transport() {

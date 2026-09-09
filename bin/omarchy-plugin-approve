@@ -1,26 +1,27 @@
 #!/bin/bash
 
 # omarchy:summary=Approve an exact Ward plugin revision and explicitly selected access
-# omarchy:args=<id> --revision <sha256> [--read <slot=folder>] [--write <slot=folder>] [--read-setting <key>] [--write-setting <key>] [--http <scope>] [--exec <name:leaf>] [--media <service>] [--allow-network] [--allow-notifications] [--allow-open-urls] [--allow-storage] [--yes]
+# omarchy:args=<id> --revision <sha256> [--read <slot=folder>] [--write <slot=folder>] [--read-setting <key>] [--write-setting <key>] [--http <scope>] [--exec <name:leaf>] [--media <service>] [--allow-network] [--allow-notifications] [--allow-open-urls] [--allow-storage] [--allow-desktop-geometry] [--yes]
 # omarchy:examples=omarchy plugin approve acme.weather --revision <sha256> --allow-network
 
 set -euo pipefail
 
 fail() { echo "omarchy-plugin-approve: $*" >&2; exit 1; }
 if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
-  echo "Usage: omarchy plugin approve <id> --revision <sha256> [--read <slot=folder>] [--write <slot=folder>] [--read-setting <key>] [--write-setting <key>] [--http <scope>] [--exec <name:leaf>] [--media <service>] [--allow-network] [--allow-notifications] [--allow-open-urls] [--allow-storage] [--yes]"
+  echo "Usage: omarchy plugin approve <id> --revision <sha256> [--read <slot=folder>] [--write <slot=folder>] [--read-setting <key>] [--write-setting <key>] [--http <scope>] [--exec <name:leaf>] [--media <service>] [--allow-network] [--allow-notifications] [--allow-open-urls] [--allow-storage] [--allow-desktop-geometry] [--yes]"
   echo "All access defaults to denied. Approval does not start the plugin."
   echo "--write allows reading and changing real host files. Revocation cannot undo completed writes."
   echo "--http selects one reviewed HTTP scope. It cannot be combined with unrestricted --allow-network."
   echo "--exec selects one command-tree leaf for a host executable, including its existing account and file access."
   echo "--allow-storage permits private plugin data to persist across restarts. Revocation retains saved data."
+  echo "--allow-desktop-geometry reveals output/workspace layout and all window rectangles, without titles or window control."
   exit 0
 fi
 id="${1:-}"
 [[ -n $id ]] || fail "plugin id is required"
 shift
 revision=""
-selections='{"read":{},"write":{},"network":false,"http":[],"media":null,"notifications":false,"settings":{"read":[],"write":[]},"openUrls":false,"storage":false}'
+selections='{"read":{},"write":{},"network":false,"http":[],"media":null,"notifications":false,"settings":{"read":[],"write":[]},"openUrls":false,"storage":false,"desktopGeometry":false}'
 assume_yes=0
 while (( $# > 0 )); do
   case "$1" in
@@ -80,6 +81,10 @@ while (( $# > 0 )); do
       ;;
     --allow-storage)
       selections=$(jq -c '.storage = true' <<<"$selections")
+      shift
+      ;;
+    --allow-desktop-geometry)
+      selections=$(jq -c '.desktopGeometry = true' <<<"$selections")
       shift
       ;;
     --yes | -y)
