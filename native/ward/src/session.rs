@@ -254,8 +254,11 @@ fn launch(
     }
   })();
   // Unit::Drop also retries cleanup on failure. No manager work runs on GUI Drop.
-  let stopped = unit.stop();
-  result.and(stopped)
+  let stopped = unit.stop().and_then(|()| store.finish_session(&id, record.epoch, unit.name()));
+  match (result, stopped) {
+    (Err(error), Err(cleanup)) => Err(io::Error::other(format!("{error}; could not retire session: {cleanup}"))),
+    (result, stopped) => result.and(stopped),
+  }
 }
 
 fn emit(updates: &SyncSender<Update>, update: Update) -> io::Result<()> {

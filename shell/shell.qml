@@ -23,6 +23,13 @@ ShellRoot {
     bar: shell.bar
     onChanged: shell.pluginRegistry.pluginsChanged()
   }
+  property SandboxedPluginActivation sandboxActivation: SandboxedPluginActivation {
+    manager: shell.sandboxedPlugins
+    registry: shell.pluginRegistry
+    config: shell.shellConfig
+    writeConfig: next => shell.persistShellConfig(next)
+  }
+  readonly property var sandboxPresentationConfig: sandboxActivation.previewConfig
 
   property string home: Quickshell.env("HOME")
 
@@ -72,12 +79,16 @@ ShellRoot {
     if (failedBarId !== "") failedBarId = ""
     pluginRegistry.registryRevision++
     pluginRegistry.pluginsChanged()
-    var layout = shellConfig.bar && shellConfig.bar.layout ? shellConfig.bar.layout : {}
+  }
+
+  onSandboxPresentationConfigChanged: {
+    var config = sandboxPresentationConfig
+    var layout = config.bar && config.bar.layout ? config.bar.layout : {}
     var barEntries = []
     for (var section of ["left", "center", "right"]) {
       if (Array.isArray(layout[section])) barEntries = barEntries.concat(layout[section])
     }
-    sandboxedPlugins.sync(Array.isArray(shellConfig.plugins) ? shellConfig.plugins : [], barEntries)
+    sandboxedPlugins.sync(Array.isArray(config.plugins) ? config.plugins : [], barEntries)
   }
 
   function applyShellConfig() {
@@ -123,7 +134,7 @@ ShellRoot {
     userConfigFile.setText(JSON.stringify(payload, null, 2) + "\n")
   }
 
-  readonly property var barConfig: renderingBarConfig(shellConfig && Util.isPlainObject(shellConfig.bar) ? shellConfig.bar : builtinShellConfig.bar)
+  readonly property var barConfig: renderingBarConfig(sandboxPresentationConfig && Util.isPlainObject(sandboxPresentationConfig.bar) ? sandboxPresentationConfig.bar : builtinShellConfig.bar)
   onBarConfigChanged: {
     if (bar && "barConfig" in bar)
       bar.barConfig = shell.barConfigFor(shell.activeBarManifest)
@@ -1661,7 +1672,7 @@ ShellRoot {
     function setPluginEnabled(id: string, enabled: string): string {
       if (shell.pluginRegistry.isSandboxed(id)) {
         if (enabled === "true") return "use omarchy plugin enable after approving a revision"
-        shell.sandboxedPlugins.disable(id)
+        shell.sandboxActivation.disable(id)
       }
       return shell.pluginRegistry.setEnabled(id, enabled === "true") ? "ok" : "unknown"
     }
@@ -1670,30 +1681,7 @@ ShellRoot {
       try {
         var placement = JSON.parse(placementJson || "{}")
         if (shell.pluginRegistry.isSandboxed(id)) {
-          var manifest = shell.pluginRegistry.installedPlugins[id]
-          var placed = manifest && manifest.entryPoints.barWidget && !manifest.sandbox?.entryPoint
-          if (!placed && Object.keys(placement).length) return "this plugin has no shared bar widget"
-          var location = shell.pluginRegistry.findEntryLocation(shell.shellConfig, id)
-          var existing = location.kind === "bar" ? shell.shellConfig.bar.layout[location.section][location.index]
-            : location.kind === "plugin" ? shell.shellConfig.plugins[location.index] : { id: id }
-          var wasActive = !!shell.sandboxedPlugins.instances[id]
-          var result = shell.sandboxedPlugins.enable(id, existing, !!placed)
-          if (result === "starting" || result === "ok") {
-            if (placed) {
-              var error = shell.pluginRegistry.placeSandboxedWidget(id, placement)
-              if (error) {
-                if (!wasActive) shell.sandboxedPlugins.disable(id)
-                return error
-              }
-            } else {
-              shell.mutateShellConfig(function(config) {
-                if (!Array.isArray(config.plugins)) config.plugins = []
-                config.plugins = config.plugins.filter(function(entry) { return entry.id !== id })
-                config.plugins.push(Object.assign({}, existing, { id: id, sandbox: true }))
-              })
-            }
-          }
-          return result
+          return shell.sandboxActivation.enable(id, placement)
         }
         if (shell.pluginRegistry.setEnabled(id, true, placement)) return "ok"
         return shell.pluginRegistry.lastEnableError || "unknown"
@@ -1703,7 +1691,7 @@ ShellRoot {
     }
 
     function pluginStatus(id: string): string {
-      return JSON.stringify(shell.sandboxedPlugins.status(id))
+      return JSON.stringify(shell.sandboxActivation.status(id))
     }
 
     function saveSandboxSettings(id: string, settingsJson: string): string {

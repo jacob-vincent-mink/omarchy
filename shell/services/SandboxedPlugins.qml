@@ -7,6 +7,7 @@ import Quickshell.Hyprland
 QtObject {
   id: root
   property var instances: ({})
+  property var lastErrors: ({})
   property var component: null
   property var bar: null
   property QtObject geometrySource: PluginDesktopGeometry {
@@ -34,7 +35,7 @@ QtObject {
 
   function status(id) {
     var instance = instances[id]
-    if (!instance) return { state: "disabled", error: "" }
+    if (!instance) return lastErrors[id] ? { state: "error", error: lastErrors[id] } : { state: "disabled", error: "" }
     return { state: instance.state, error: instance.error }
   }
 
@@ -63,6 +64,9 @@ QtObject {
   function enable(id, entry, placed) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) || id.indexOf("..") !== -1)
       return "invalid plugin id"
+    const errors = Object.assign({}, lastErrors)
+    delete errors[id]
+    lastErrors = errors
     var previous = instances[id]
     if (previous && previous.state !== "error") return previous.state === "running" ? "ok" : "starting"
     if (!component) component = Qt.createComponent("native/SandboxedPluginSession.qml")
@@ -105,6 +109,9 @@ QtObject {
   }
 
   function disable(id) {
+    const errors = Object.assign({}, lastErrors)
+    delete errors[id]
+    lastErrors = errors
     var instance = instances[id]
     if (!instance) return
     if (bar && typeof bar.releasePopout === "function") bar.releasePopout(instance.barOwner || instance)
@@ -113,6 +120,14 @@ QtObject {
     instances = next
     instance.stop()
     instance.destroy()
+    changed()
+  }
+
+  function fail(id, error) {
+    disable(id)
+    const errors = Object.assign({}, lastErrors)
+    errors[id] = String(error)
+    lastErrors = errors
     changed()
   }
 
@@ -156,8 +171,10 @@ QtObject {
       if (entry && entry.sandbox === true) {
         desired[String(entry.id)] = true
         if (!instances[entry.id]) {
-          var result = enable(String(entry.id), entry, placedIds.indexOf(entry.id) !== -1)
-          if (result !== "starting" && result !== "ok") console.warn(result)
+          if (!lastErrors[entry.id]) {
+            var result = enable(String(entry.id), entry, placedIds.indexOf(entry.id) !== -1)
+            if (result !== "starting" && result !== "ok") console.warn(result)
+          }
         } else {
           instances[entry.id].settings = ownSettings(entry)
           instances[entry.id].overlayOutputs = entry.sandboxPresentation && entry.sandboxPresentation.overlayOutputs === "all" ? "all" : "owner"

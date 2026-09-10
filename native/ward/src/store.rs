@@ -285,12 +285,22 @@ impl Store {
       id.into(),
       record.epoch.to_string().into(),
     ];
-    let unit = unit.launch(
+    let launched = unit.launch(
       program,
       &args.iter().map(OsString::as_os_str).collect::<Vec<_>>(),
       Limits::default(),
-    )?;
-    Ok((unit, record))
+    );
+    match launched {
+      Ok(unit) => Ok((unit, record)),
+      Err(error) => {
+        // A reservation was published before systemd was called. Failed exec
+        // must retire it too, but only after confirming any service is stopped.
+        self.stop_record(&mut record).map_err(|cleanup| {
+          io::Error::other(format!("{error}; could not retire failed startup: {cleanup}"))
+        })?;
+        Err(error)
+      }
+    }
   }
 
   /// Keep admission serialized through the beginning/completion of a bounded
@@ -377,12 +387,30 @@ impl Store {
       ));
     }
     let mut record = self.record(id)?;
-    self.deny_and_stop(&record)?;
+    self.stop_record(&mut record)?;
+    Ok(record)
+  }
+
+  /// Retire only this host session's reservation. Cleanup racing a newer
+  /// launch/revocation must not stop it, clear its record, or recover denial.
+  pub(crate) fn finish_session(&self, id: &str, epoch: u64, unit: &str) -> io::Result<()> {
+    let _lock = self.lock(id)?;
+    if self.pending(id)? {
+      return Ok(());
+    }
+    let mut record = self.record(id)?;
+    if record.epoch != epoch || record.active_unit.as_deref() != Some(unit) {
+      return Ok(());
+    }
+    self.stop_record(&mut record)
+  }
+
+  fn stop_record(&self, record: &mut Record) -> io::Result<()> {
+    self.deny_and_stop(record)?;
     record.active_unit = None;
     record.epoch = record.epoch.saturating_add(1);
     // The signed approval content is unchanged; stopping needs no private key.
-    self.finish(&record, &mut |_| Ok(()))?;
-    Ok(record)
+    self.finish(record, &mut |_| Ok(()))
   }
 
   /// Explicit recovery only disables authority; it never completes a pending
@@ -621,6 +649,42 @@ mod tests {
     let store = Store::initialize(&root.path().join("state")).unwrap();
     let revision = Revision::import(&source, &store.revisions()).unwrap();
     (root, store, revision)
+  }
+
+  #[test]
+  fn stale_session_cleanup_preserves_newer_and_denied_authority() {
+    let (_root, store, revision) = fixture();
+    let mut record = store.approve(&revision.digest, Grants::default()).unwrap();
+    let unit = Unit::prepare().unwrap();
+    record.active_unit = Some(unit.name().into());
+    record.epoch += 1;
+    let original = serde_json::to_vec(&record).unwrap();
+    fs::write(store.path(&record.id, "json"), &original).unwrap();
+    store.finish_session(&record.id, record.epoch - 1, unit.name()).unwrap();
+    assert_eq!(fs::read(store.path(&record.id, "json")).unwrap(), original);
+    store.finish_session(&record.id, record.epoch, Unit::prepare().unwrap().name()).unwrap();
+    assert_eq!(fs::read(store.path(&record.id, "json")).unwrap(), original);
+    store.mark_denied(&record.id).unwrap();
+    store.finish_session(&record.id, record.epoch, unit.name()).unwrap();
+    assert!(store.pending(&record.id).unwrap());
+    assert_eq!(fs::read(store.path(&record.id, "json")).unwrap(), original);
+    assert!(store.read(&record.id).is_err());
+  }
+
+  #[test]
+  fn failed_service_exec_retires_reservation_without_revoking_approval() {
+    if std::env::var("OMARCHY_TEST_SYSTEMD").as_deref() != Ok("1") {
+      return;
+    }
+    let (root, store, revision) = fixture();
+    let approved = store.approve(&revision.digest, Grants::default()).unwrap();
+    assert!(store.launch(&approved.id, &root.path().join("missing-controller"), &root.path().join("host")).is_err());
+    let stopped = store.read(&approved.id).unwrap();
+    assert!(stopped.enabled);
+    assert!(stopped.active_unit.is_none());
+    assert_eq!(stopped.signature, approved.signature);
+    assert!(stopped.epoch > approved.epoch);
+    store.approve(&revision.digest, Grants::default()).unwrap();
   }
 
   /// Build a store + revision whose manifest declares `count` optional

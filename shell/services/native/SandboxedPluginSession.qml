@@ -28,6 +28,7 @@ QtObject {
   property string localError: ""
   property string sentTopology: ""
   property bool started: false
+  property bool startupComplete: false
   property bool panelAuthorized: false
   readonly property var nativeSession: session
   readonly property var activeRow: screenRows.find(row => row.id === activeOutputId) || null
@@ -42,7 +43,10 @@ QtObject {
   readonly property string state: error ? "error" : session.ready && (!screenRows.length || screenRows.some(row => row.surface.presented)) ? "running" : "starting"
   signal statusChanged()
   signal panelSwitchRequested(int direction)
-  onStateChanged: statusChanged()
+  onStateChanged: {
+    if (state === "running") startupComplete = true
+    statusChanged()
+  }
   onOpenedChanged: {
     panelGestureTimer.stop()
     if (opened && activeRow) Qt.callLater(() => {
@@ -56,6 +60,14 @@ QtObject {
   onOverlayOutputsChanged: { for (const row of screenRows) row.surface.updateMask() }
 
   property PluginSession session: PluginSession { id: session }
+  property Timer startupDeadline: Timer {
+    interval: 8000
+    running: !root.startupComplete && root.state === "starting"
+    onTriggered: {
+      root.localError = "Ward plugin startup timed out before presenting content"
+      root.stop()
+    }
+  }
   property Timer panelGestureTimer: Timer {
     interval: 1000
     onTriggered: { if (!root.opened) root.panelAuthorized = false }

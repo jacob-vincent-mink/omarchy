@@ -479,11 +479,11 @@ ShellRoot {
     sandboxed.entryPoints = {barWidget: "Widget.qml"}
     sandboxed.barWidget = {defaultSection: "right"}
     root.config.plugins[0].volume = 0.5
-    root.assertEqual(registry.placeSandboxedWidget("third.sandbox", {}), "", "native activation places a host-owned bar slot")
+    root.assertEqual(registry.placeSandboxedWidgetIn(root.config, "third.sandbox", {}), "", "native activation places a host-owned bar slot")
     root.assertEqual(root.config.plugins.length, 0, "moving a preview entry leaves one canonical settings record")
     root.assertDeepEqual(root.config.bar.layout.right, [{id: "third.sandbox", sandbox: true, volume: 0.5}], "bar placement preserves settings and native marker")
     root.assertEqual(registry.entryPointUrl(sandboxed, "barWidget"), "", "bar slot cannot fall back to plugin QML")
-    root.assertEqual(registry.placeSandboxedWidget("third.sandbox", {section: "left", index: 0}), "", "native widget uses ordinary relative placement")
+    root.assertEqual(registry.placeSandboxedWidgetIn(root.config, "third.sandbox", {section: "left", index: 0}), "", "native widget uses ordinary relative placement")
     root.assertEqual(root.config.bar.layout.right.length, 0, "native move does not duplicate the widget")
     root.assertEqual(root.config.bar.layout.left[0].volume, 0.5, "moving native widget preserves inline settings")
     root.assertTrue(!registry.isEnabled("third.sandbox"), "native bar slot is never an in-process activation")
