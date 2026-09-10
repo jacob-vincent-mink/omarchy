@@ -247,7 +247,7 @@ fn notification_controller_child() {
     .unwrap();
   fs::write(
     root.join("grants.json"),
-    serde_json::to_vec(&record.grants).unwrap(),
+    serde_json::to_vec(&record.grants.worker_view()).unwrap(),
   )
   .unwrap();
   let grants_json = fs::File::open(root.join("grants.json")).unwrap();

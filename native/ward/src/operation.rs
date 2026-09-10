@@ -2,11 +2,11 @@
 //! failures; a completed external command may itself have a nonzero exit code.
 use crate::{
   channel::{Channel, Packet},
-  grants::Grants,
   requests::Kind,
 };
 use serde::{Deserialize, Serialize};
 use std::{
+  collections::BTreeMap,
   fmt,
   fs::File,
   io::{self, Read},
@@ -104,9 +104,33 @@ pub(crate) fn await_reply(channel: &Channel) -> io::Result<()> {
   }
 }
 
+// The worker gets an adaptation view, not host authority. In particular its
+// exec entries contain no executable identity/tree and filesystem slots contain
+// no host paths/inodes. Do not deserialize this as the persisted Grants type.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkerGrants {
+  #[serde(default)]
+  notifications: bool,
+  #[serde(default)]
+  settings: crate::settings::Grant,
+  #[serde(default)]
+  open_urls: bool,
+  #[serde(default)]
+  http: BTreeMap<String, serde::de::IgnoredAny>,
+  #[serde(default)]
+  pub exec: BTreeMap<String, WorkerExec>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct WorkerExec {
+  #[serde(default)]
+  pub lifetime: crate::host_job::Lifetime,
+}
+
 /// The read-only admission snapshot explains intentionally absent sockets.
 /// This is caller feedback, not authority: the broker rechecks every request.
-pub(crate) fn grants() -> io::Result<Grants> {
+pub(crate) fn grants() -> io::Result<WorkerGrants> {
   let mut bytes = Vec::new();
   File::open("/run/plugin/grants.json")
     .and_then(|file| {
@@ -145,6 +169,39 @@ pub(crate) fn connect(kind: Kind) -> io::Result<Channel> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn helpers_read_redacted_worker_grants_without_host_authority_fields() {
+    use crate::{
+      grants::{Access, FileSystemGrant, Grants, Target},
+      host_job::Lifetime,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let mut grants = Grants::default();
+    grants.notifications = true;
+    grants.filesystem.insert(
+      "notes".into(),
+      FileSystemGrant::select(directory.path(), Access::Read, Target::Directory).unwrap(),
+    );
+    let ask: crate::exec::Ask = serde_json::from_value(serde_json::json!({
+      "executable":"/usr/bin/printf", "tree":{"end":"run"}, "lifetime":"plugin"
+    }))
+    .unwrap();
+    grants.exec.insert(
+      "tool".into(),
+      crate::exec::Grant::select(&ask, ["run".into()].into()).unwrap(),
+    );
+    let view = grants.worker_view();
+    assert!(serde_json::from_value::<Grants>(view.clone()).is_err());
+    let worker: WorkerGrants = serde_json::from_value(view).unwrap();
+    assert!(worker.notifications);
+    assert_eq!(worker.exec["tool"].lifetime, Lifetime::Plugin);
+    assert!(!worker.open_urls);
+    assert!(worker.http.is_empty());
+    let denied: WorkerGrants = serde_json::from_value(Grants::default().worker_view()).unwrap();
+    assert!(denied.exec.is_empty());
+    assert!(!denied.notifications);
+  }
 
   #[test]
   fn policy_and_operation_errors_keep_distinct_machine_statuses() {
