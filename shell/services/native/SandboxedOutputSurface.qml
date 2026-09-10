@@ -14,7 +14,12 @@ PanelWindow {
   readonly property var bars: owner.placements.filter(view => view.output === outputId).map(view => view.bar)
   readonly property bool ownsPanel: owner.activeOutputId === outputId
   readonly property bool opened: ownsPanel && owner.opened
-  readonly property bool panelsAllowed: !owner.opened || ownsPanel || owner.overlayOutputs === "all"
+  // Presenting and receiving input over the whole output is authorized only on
+  // the panel's own output while it is open, or where the reviewer explicitly
+  // approved roaming (sandboxPresentation.overlayOutputs === "all"). A closed
+  // plugin is confined to its own bar slot; it must not widen to the whole
+  // desktop content area or swallow clicks before it is summoned.
+  readonly property bool panelsAllowed: ownsPanel || owner.overlayOutputs === "all"
   readonly property bool presented: view.presented
   readonly property var presentationRegions: panelsAllowed ? [{x: 0, y: 0, width: width, height: height}]
     : PluginInput.barSlots(bars, width, height)

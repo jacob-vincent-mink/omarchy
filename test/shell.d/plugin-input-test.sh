@@ -2,6 +2,22 @@
 
 set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
+# The input mask helper (PluginInput.js) behaves correctly given an explicit
+# `allowed` flag; the caller must not pass that flag as true merely because no
+# panel is open. Pin the caller's computation in SandboxedOutputSurface.qml: a
+# closed plugin is confined to its own bar slot and may not widen to the whole
+# output or swallow unsummoned clicks, unless the reviewer approved roaming.
+qml_matches() {
+  tr '\n\r\t' '   ' < "$1" | grep -Eq "$2"
+}
+surface="$ROOT/shell/services/native/SandboxedOutputSurface.qml"
+qml_matches "$surface" \
+  'panelsAllowed: +ownsPanel +\|\| +owner\.overlayOutputs *=== *"all"' ||
+  fail "closed-panel presentation/input must be confined to the owning output or approved roaming"
+if qml_matches "$surface" '!owner\.opened *\|\| *ownsPanel'; then
+  fail "a closed plugin must not widen to the whole output"
+fi
+pass "closed sandbox outputs stay confined to their bar slot"
 
 run_node_test <<'JS'
 const fs = require('fs')
