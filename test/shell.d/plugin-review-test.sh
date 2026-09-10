@@ -21,6 +21,7 @@ const installed = path.join(home, '.config/omarchy/plugins/acme.review')
 for (const directory of [home, source, stubs]) fs.mkdirSync(directory)
 const env = {
   ...process.env, HOME: home, OMARCHY_PATH: root,
+  XDG_STATE_HOME: path.join(home, '.local/state'),
   OMARCHY_WARD_HOST: process.env.OMARCHY_TEST_WARD_HOST,
   OMARCHY_WARD_STORE: store, PATH: `${stubs}:${root}/bin:${process.env.PATH}`
 }
@@ -100,6 +101,29 @@ try {
   let listed = JSON.parse(run('omarchy-plugin-list', ['--json'])).find(row => row.id === 'acme.review')
   assertEqual(listed.approved, true, 'plugin list exposes exact-revision approval')
   assertEqual(listed.enabled, false, 'plugin list does not confuse approval with activation')
+  const manifestPath = path.join(installed, 'manifest.json')
+  const originalManifest = fs.readFileSync(manifestPath, 'utf8')
+  const downgraded = JSON.parse(originalManifest)
+  delete downgraded.sandbox
+  fs.writeFileSync(manifestPath, JSON.stringify(downgraded))
+  // Exercise native identity independently of the install marker. No native
+  // activation or config marker has ever existed in this fixture.
+  fs.rmSync(path.join(home, '.local/state/omarchy/plugin-isolation/acme.review'), {recursive: true})
+  listed = JSON.parse(run('omarchy-plugin-list', ['--json'])).find(row => row.id === 'acme.review')
+  assertEqual(listed.sandboxed, true, 'approved before first enable remains isolated after sandbox declaration removal')
+  assertEqual(listed.approved, true, 'classification uses host identity, not the changed manifest')
+  fs.writeFileSync(manifestPath, '{')
+  listed = JSON.parse(run('omarchy-plugin-list', ['--json'])).find(row => row.id === 'acme.review')
+  assertEqual(listed.approved, true, 'malformed checkout remains manageable')
+  const runtime = env.OMARCHY_WARD_HOST
+  env.OMARCHY_WARD_HOST = path.join(temp, 'missing-runtime')
+  listed = JSON.parse(run('omarchy-plugin-list', ['--json'])).find(row => row.id === 'acme.review')
+  assertEqual(listed.sandboxed, true, 'isolation discovery needs no runtime binary')
+  assertEqual(listed.approved, null, 'unavailable approval is unknown, not silently disabled')
+  assert(listed.error.includes('unavailable'), 'runtime failure is reported in the catalog')
+  run('omarchy-plugin-enable', ['acme.review'], false)
+  env.OMARCHY_WARD_HOST = runtime
+  fs.writeFileSync(manifestPath, originalManifest)
   assert(run('omarchy-plugin-list', []).includes('approved'), 'human list distinguishes approved from enabled')
   fs.appendFileSync(path.join(source, 'worker.qml'), '// New revision\n')
   run('git', ['-C', source, 'add', '.'])
@@ -126,6 +150,8 @@ try {
   record = JSON.parse(fs.readFileSync(path.join(store, 'acme.review.json')))
   assertEqual(record.enabled, false, 'remove revokes approval even without a legacy enabled entry')
   assert(fs.existsSync(path.join(store, 'revisions', updated.revision)), 'remove preserves reviewed snapshots')
+  run('omarchy-plugin-disable', ['acme.review'])
+  assert(run('omarchy-plugin-remove', ['acme.review', '--yes']).includes('approval revoked'), 'missing checkout still permits revocation and removal')
 } finally {
   fs.rmSync(temp, { recursive: true, force: true })
 }

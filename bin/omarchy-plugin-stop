@@ -22,7 +22,8 @@ fi
 id="${1:-}"
 [[ -n $id ]] || fail "plugin id is required"
 
-if omarchy-plugin-catalog | jq -e --arg id "$id" 'any(.[]; .id == $id and .sandboxed)' >/dev/null; then
+catalog=$(omarchy-plugin-catalog)
+if jq -e --arg id "$id" 'any(.[]; .id == $id and .sandboxed)' <<<"$catalog" >/dev/null; then
   jq -cn --arg id "$id" '{operation: "stop", id: $id}' | omarchy-ward-runtime >/dev/null
   # The stop operation stops the controller/worker and clears the active unit
   # (so a re-approval, which requires no running instance, can follow) while

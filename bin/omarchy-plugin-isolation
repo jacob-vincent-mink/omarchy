@@ -1,0 +1,37 @@
+#!/bin/bash
+
+# omarchy:summary=Read or retain host-owned isolated plugin identities
+# omarchy:hidden=true
+
+# This is classification, never approval. Markers are monotonic and live
+# outside editable checkouts. Native records also identify older approvals,
+# including damaged/revoked records, without needing an installed runtime.
+set -euo pipefail
+
+state="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
+identities="$state/plugin-isolation"
+store="${OMARCHY_WARD_STORE:-$state/ward}"
+[[ $state == /* && $store == /* ]] || exit 1
+
+if [[ ${1:-} == "mark" ]]; then
+  id="${2:-}"
+  [[ $id =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$ && $id != *..* ]] || exit 1
+  umask 077
+  mkdir -p -- "$identities/$id"
+elif (( $# == 0 )); then
+  {
+    for directory in "$identities" "$store/identities"; do
+      if [[ -e $directory || -L $directory ]]; then
+        [[ -d $directory && ! -L $directory ]] || exit 1
+        find "$directory" -mindepth 1 -maxdepth 1 -printf '%f\n'
+      fi
+    done
+    if [[ -e $store || -L $store ]]; then
+      [[ -d $store && ! -L $store ]] || exit 1
+      find "$store" -mindepth 1 -maxdepth 1 \( -name '*.json' -o -name '*.pending' \) -printf '%f\n' |
+        sed -E 's/\.(json|pending)$//'
+    fi
+  } | jq -Rsc 'split("\n") | map(select(test("^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$") and (contains("..") | not))) | unique'
+else
+  exit 1
+fi

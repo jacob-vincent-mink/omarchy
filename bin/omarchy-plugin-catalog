@@ -10,7 +10,9 @@
 # single source of truth used by bar selection and plugin enable/clone, so
 # those commands never re-implement manifest walking.
 
-set -o pipefail
+set -euo pipefail
+
+identities=$(omarchy-plugin-isolation)
 
 paths=()
 
@@ -26,27 +28,31 @@ if [[ -d $user_dir ]]; then
     ! -path "$user_dir/.*/*" 2>/dev/null | sort)
 fi
 
-if (( ${#paths[@]} == 0 )); then
-  echo "[]"
-  exit 0
-fi
-
-jq -n '
+{
+  for manifest in "${paths[@]}"; do
+    # One malformed checkout must not hide other plugins or native identities.
+    jq -c --arg path "$manifest" '{manifest: ., path: $path}' "$manifest" ||
+      echo "omarchy-plugin-catalog: invalid manifest: $manifest" >&2
+  done
+} | jq -n --argjson identities "$identities" --arg bundled "$OMARCHY_PATH/shell/plugins/" --arg user "$user_dir/" '
   [ inputs
-    | . as $manifest
-    | input_filename as $manifestPath
+    | .manifest as $manifest
+    | .path as $manifestPath
     | ($manifestPath | sub("/manifest.json$"; "") | sub("/[^/]+\\.manifest\\.json$"; "")) as $sourceDir
+    | ($manifestPath | startswith($bundled)) as $firstParty
+    | ($sourceDir | split("/") | last) as $directoryId
+    | select($firstParty or ($manifest.id | startswith("omarchy.") | not))
     | {
         id: ($manifest.id // ""),
         name: ($manifest.name // $manifest.id // ""),
         description: ($manifest.description // ""),
         kinds: ($manifest.kinds // []),
-        firstParty: (($manifest.id // "") | startswith("omarchy.")),
+        firstParty: $firstParty,
         manifestPath: $manifestPath,
         sourceDir: $sourceDir,
         entryPoints: ($manifest.entryPoints // {}),
         sandbox: ($manifest.sandbox // null),
-        sandboxed: ($manifest | has("sandbox")),
+        sandboxed: (($manifest | has("sandbox")) or ($identities | index($manifest.id) != null or index($directoryId) != null)),
         barWidget: ($manifest.barWidget // null),
         bar: ($manifest.bar // null)
       }
@@ -60,5 +66,10 @@ jq -n '
         else null end)
     | select(.id != "")
   ]
+  | . as $catalog
+  | . + [$identities[] as $id | select(all($catalog[]; .id != $id)) |
+      {id: $id, name: $id, sandboxed: true, firstParty: false, kinds: [], entryPoints: {},
+       sourceDir: ($user + $id), manifestPath: null, sandbox: null,
+       error: "Isolated plugin checkout is missing or invalid"}]
   | unique_by(.id)
-' "${paths[@]}"
+'

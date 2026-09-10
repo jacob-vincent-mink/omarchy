@@ -4,7 +4,7 @@ Ward runs plugin QML outside the desktop shell and admits host access through ex
 
 ## Scope and trust
 
-The intended boundary is third-party code distributed through the Omarchy plugin registry. Omarchy's first-party plugins remain trusted and in-process; users must retain an explicit trusted in-process installation path for their own code. A downloaded manifest cannot establish that trust. The current preview selects Ward with a manifest `sandbox` declaration or retained native config marker; registry provenance and mandatory registry-install routing are not implemented yet.
+The intended boundary is third-party code distributed through the Omarchy plugin registry. Omarchy's first-party plugins remain trusted and in-process; users retain the trusted in-process installation path for their own code. Once an installation is isolated, a downloaded or edited manifest cannot make it trusted. The host records monotonic identity outside the checkout at installation and native review/approval, before first activation; existing native record names also identify older approvals without requiring a working native executable. CLI and shell discovery consult these identities before loading third-party QML and fail closed if identity discovery fails. Missing or malformed checkouts remain listed for revocation. Revocation/removal retains isolation identity and reviewed snapshots. Registry provenance and mandatory registry-install routing remain unfinished.
 
 ![Ward architecture: review authorizes a per-plugin controller; the existing shell exchanges bounded input and rendered pixels with a sandboxed worker through that controller.](images/ward-architecture.svg)
 

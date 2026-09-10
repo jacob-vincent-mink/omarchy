@@ -56,8 +56,6 @@ while (( $# > 0 )); do
   esac
 done
 
-[[ -d $PLUGINS_DIR ]] || fail "no plugins installed"
-
 if [[ -z $id ]]; then
   interactive || fail "a plugin-id is required"
   id=$(find "$PLUGINS_DIR" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) \
@@ -69,13 +67,14 @@ fi
 valid_plugin_id "$id" || fail "invalid plugin id '$id'"
 
 target="$PLUGINS_DIR/$id"
-[[ -e $target || -L $target ]] || fail "plugin '$id' is not installed"
+catalog=$(omarchy-plugin-catalog)
 
 was_enabled=""
 sandboxed=false
-if [[ -f $target/manifest.json ]] && jq -e 'has("sandbox")' "$target/manifest.json" >/dev/null; then
+if jq -e --arg id "$id" 'any(.[]; .id == $id and .sandboxed)' <<<"$catalog" >/dev/null; then
   sandboxed=true
 else
+  [[ -e $target || -L $target ]] || fail "plugin '$id' is not installed"
   shell_plugins=$(omarchy-shell shell listPlugins)
   if [[ -n $shell_plugins ]]; then
     was_enabled=$(jq -r --arg id "$id" '
@@ -85,11 +84,13 @@ else
 fi
 
 cloned_from=""
-if [[ -f $target/manifest.json ]]; then
+if [[ $sandboxed != "true" && -f $target/manifest.json ]]; then
   cloned_from=$(jq -r '.omarchy.clonedFrom // empty' "$target/manifest.json")
 fi
 
-if [[ -L $target ]]; then
+if [[ ! -e $target && ! -L $target ]]; then
+  confirm "Revoke '$id' whose checkout is missing?" || fail "aborted"
+elif [[ -L $target ]]; then
   confirm "Unlink '$id' (symlink -> $(readlink "$target"))?" || fail "aborted"
 elif [[ -d $target/.git ]]; then
   confirm "Delete '$id'? Its git repo remains upstream." || fail "aborted"
@@ -105,7 +106,9 @@ elif [[ $was_enabled == "true" ]]; then
   omarchy-shell shell setPluginEnabled "$id" false >/dev/null
 fi
 
-if [[ -L $target ]]; then
+if [[ ! -e $target && ! -L $target ]]; then
+  echo "No checkout remains for $id."
+elif [[ -L $target ]]; then
   rm -f "$target"
   echo "Unlinked $id."
 elif [[ -d $target/.git ]]; then

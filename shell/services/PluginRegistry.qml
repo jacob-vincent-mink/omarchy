@@ -24,6 +24,8 @@ QtObject {
   property var installedPlugins: ({})
   property int registryRevision: 0
   property bool scanning: false
+  property var isolatedIdentities: ({})
+  property bool isolationAvailable: false
   property string lastEnableError: ""
 
   signal pluginsChanged()
@@ -150,6 +152,10 @@ QtObject {
   //     is therefore recorded the other way round, in `disabledPlugins[]`.
   function isSandboxed(id) {
     var manifest = installedPlugins[String(id)]
+    if (isolatedIdentities[String(id)]) return true
+    if (manifest && !manifest.__isFirstParty
+        && isolatedIdentities[String(manifest.__sourceDir || "").split("/").pop()]) return true
+    if (!isolationAvailable && !(manifest && manifest.__isFirstParty)) return true
     if (manifest && manifest.sandbox !== undefined) return true
     var config = shellConfigProvider ? shellConfigProvider() : null
     var location = findEntryLocation(config, String(id))
@@ -628,12 +634,22 @@ QtObject {
     var currentSource = null
     var currentKind = null
     var currentJson = []
+    var identities = null
 
     function flush() {
       if (!currentSource) return
       var raw = currentJson.join("\n").trim()
       try {
         var manifest = JSON.parse(raw)
+        if (currentKind === "isolation") {
+          if (!Array.isArray(manifest)) throw new Error("invalid isolation identities")
+          identities = {}
+          for (var identity of manifest) identities[String(identity)] = true
+          currentSource = null
+          currentKind = null
+          currentJson = []
+          return
+        }
         manifest.__sourceDir = currentSource
         manifest.__isFirstParty = (currentKind === "firstparty")
         var validated = validateManifest(manifest, currentSource + "/manifest.json")
@@ -667,6 +683,23 @@ QtObject {
     }
     flush()
 
+    if (identities === null) {
+      isolationAvailable = false
+      var retained = {}
+      for (var retainedId in installedPlugins) {
+        if (installedPlugins[retainedId].__isFirstParty) retained[retainedId] = installedPlugins[retainedId]
+      }
+      installedPlugins = retained
+      registryRevision++
+      scanning = false
+      console.warn("PluginRegistry: isolation identity unavailable; refusing third-party loading")
+      pluginsChanged()
+      scanFinished()
+      return
+    }
+    isolatedIdentities = identities
+    isolationAvailable = true
+
     stampHostCapabilities(firstParty, thirdParty)
 
     var merged = {}
@@ -692,6 +725,10 @@ QtObject {
 
   property Process scanProcess: Process {
     onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        registry.parseScanOutput("")
+        return
+      }
       var output = scanStdout.text || ""
       registry.parseScanOutput(output)
     }
@@ -748,7 +785,7 @@ QtObject {
       + "emit_manifest() { local kind=\"$1\"; local manifest=\"$2\"; local sub; "
       + "  if [[ ${manifest##*/} == \"manifest.json\" ]]; then sub=\"${manifest%/manifest.json}\"; else sub=\"$(dirname -- \"$manifest\")\"; fi; "
       + "  printf '===%s::%s===\\n' \"$kind\" \"$sub\"; "
-      + "  cat \"$manifest\"; "
+      + "  jq -c . \"$manifest\"; "
       + "  printf '\\n=== EOM ===\\n'; "
       + "}; "
       + "scan_firstparty() { local dir=\"$1\"; "
@@ -762,6 +799,8 @@ QtObject {
       + "    emit_manifest thirdparty \"$sub/manifest.json\"; "
       + "  done; "
       + "}; "
+      + "identities=$(omarchy-plugin-isolation) || exit 1; "
+      + "printf '===isolation::host===\\n%s\\n=== EOM ===\\n' \"$identities\"; "
       + "scan_firstparty \"$0\"; "
       + "scan_thirdparty \"$1\""
     scanProcess.command = ["bash", "-c", script, registry.firstPartyDir, registry.pluginsDir]

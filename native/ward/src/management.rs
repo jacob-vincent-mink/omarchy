@@ -142,7 +142,10 @@ fn execute(root: &Path, bytes: &[u8]) -> io::Result<Value> {
         return Err(invalid("select an absolute plugin folder"));
       }
       let revision = Revision::import(&path, &store.revisions())?;
-      review(&store, &revision.digest)
+      let result = review(&store, &revision.digest)?;
+      let id = result["id"].as_str().ok_or_else(|| invalid("missing reviewed identity"))?;
+      store.retain_identity(id)?;
+      Ok(result)
     }
     Request::Approve {
       id,

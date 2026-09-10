@@ -143,6 +143,9 @@ if [[ -e $target || -L $target ]]; then
   fail "plugin '$id' is already installed; update it with: omarchy plugin update $id"
 fi
 
+if jq -e 'has("sandbox")' "$stage/manifest.json" >/dev/null; then
+  omarchy-plugin-isolation mark "$id"
+fi
 mv "$stage" "$target"
 echo "Added $id into $target"
 

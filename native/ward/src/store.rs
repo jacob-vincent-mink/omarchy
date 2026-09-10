@@ -189,6 +189,28 @@ impl Store {
     self.root.join("revisions")
   }
 
+  /// Host-readable, monotonic isolation identity, not an approval. Keep it
+  /// after revocation and checkout removal, including before first activation.
+  pub fn retain_identity(&self, id: &str) -> io::Result<()> {
+    validate_id(id)?;
+    let directory = self.root.join("identities");
+    match DirBuilder::new().mode(0o700).create(&directory) {
+      Ok(()) => (),
+      Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+      Err(error) => return Err(error),
+    }
+    require_private_directory(&directory)?;
+    let marker = directory.join(id);
+    match DirBuilder::new().mode(0o700).create(&marker) {
+      Ok(()) => (),
+      Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+      Err(error) => return Err(error),
+    }
+    require_private_directory(&marker)?;
+    File::open(&directory)?.sync_all()?;
+    File::open(&self.root)?.sync_all()
+  }
+
   pub fn read(&self, id: &str) -> io::Result<Record> {
     let _lock = self.lock(id)?;
     self.require_ready(id)?;
@@ -200,6 +222,7 @@ impl Store {
   pub fn approve(&self, revision: &str, grants: Grants) -> io::Result<Record> {
     Revision::verify(&self.revisions(), revision)?;
     let manifest = Manifest::read(&self.revisions().join(revision))?;
+    self.retain_identity(&manifest.id)?;
     grants.validate(&manifest.sandbox.requests)?;
     for directory in grants.filesystem.values() {
       directory.open()?;

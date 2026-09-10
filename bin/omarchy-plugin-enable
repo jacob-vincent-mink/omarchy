@@ -82,7 +82,8 @@ placement=$(jq -cn \
     + (if $after == "" then {} else {after: $after} end)
   ')
 
-if omarchy-plugin-catalog | jq -e --arg id "$id" 'any(.[]; .id == $id and .sandboxed)' >/dev/null; then
+catalog=$(omarchy-plugin-catalog)
+if jq -e --arg id "$id" 'any(.[]; .id == $id and .sandboxed)' <<<"$catalog" >/dev/null; then
   approvals=$(printf '%s' '{"operation":"list"}' | omarchy-ward-runtime)
   jq -e --arg id "$id" 'any(.[]; .id == $id and .approved and .error == null)' <<<"$approvals" >/dev/null ||
     fail "review and approve an exact revision first: omarchy plugin review $id"

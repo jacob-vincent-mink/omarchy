@@ -78,7 +78,7 @@ ShellRoot {
   }
 
   function runChecks() {
-    var scan = ""
+    var scan = block("isolation", "host", [])
     scan += block("firstparty", "/first/widgets/clock", manifest("omarchy.first-widget", ["bar-widget"], { barWidget: "Widget.qml" }))
     scan += block("firstparty", "/first/bar", manifest("omarchy.bar", ["bar"], { bar: "Bar.qml" }))
     scan += block("firstparty", "/first/panels/grouped", manifest("omarchy.grouped-panel", ["panel"], { panel: "Panel.qml" }))
@@ -489,6 +489,21 @@ ShellRoot {
     root.assertTrue(!registry.isEnabled("third.sandbox"), "native bar slot is never an in-process activation")
 
     root.assertTrue(changeCount > 0, "registry emits change notifications")
+    // A Ward identity is permanent even when approval preceded activation.
+    config = {plugins: [], bar: {layout: {left: [], center: [], right: []}}}
+    var isolated = manifest("third.isolated", ["panel"], {panel: "Panel.qml"})
+    registry.parseScanOutput(block("isolation", "host", ["third.isolated"])
+      + block("thirdparty", "/third/third.isolated", isolated))
+    root.assertTrue(registry.isSandboxed("third.isolated"), "host identity survives a removed sandbox declaration without config")
+    root.assertEqual(registry.entryPointUrl(registry.installedPlugins["third.isolated"], "panel"), "", "identity blocks trusted QML URL")
+    isolated.id = "third.renamed"
+    registry.parseScanOutput(block("isolation", "host", ["third.isolated"])
+      + block("thirdparty", "/third/third.isolated", isolated))
+    root.assertEqual(registry.entryPointUrl(registry.installedPlugins["third.renamed"], "panel"), "", "changing the manifest id cannot escape installation identity")
+    registry.parseScanOutput(block("isolation", "host", ["third.isolated"]))
+    root.assertTrue(registry.isSandboxed("third.isolated"), "missing checkout retains isolated identity")
+    registry.parseScanOutput(block("thirdparty", "/third/panel", manifest("third.panel", ["panel"], {panel: "Panel.qml"})))
+    root.assertTrue(registry.isSandboxed("third.panel"), "unavailable identity discovery fails closed")
     writeResult()
   }
 

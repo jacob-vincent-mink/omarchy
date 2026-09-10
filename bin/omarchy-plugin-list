@@ -30,18 +30,22 @@ if jq -e 'any(.[]; .sandboxed)' <<<"$catalog" >/dev/null; then
   # The catalog remains usable with no running shell. Approval comes from
   # Rust, while enabled continues to describe shell activation, not grants.
   shell_plugins=$(omarchy-shell shell listPlugins 2>/dev/null) || shell_plugins='[]'
-  native=$(printf '%s' '{"operation":"list"}' | omarchy-ward-runtime)
-  plugins=$(jq -cn --argjson catalog "$catalog" --argjson live "$shell_plugins" --argjson native "$native" '
+  native_error=""
+  if ! native=$(printf '%s' '{"operation":"list"}' | omarchy-ward-runtime); then
+    native='[]'
+    native_error="Ward management unavailable; approval and running state are unknown"
+  fi
+  plugins=$(jq -cn --argjson catalog "$catalog" --argjson live "$shell_plugins" --argjson native "$native" --arg nativeError "$native_error" '
     $catalog | map(. as $entry |
       (first($live[] | select(.id == $entry.id)) // {}) as $running |
       (first($native[] | select(.id == $entry.id)) // {}) as $approval |
       ($entry + {enabled: null} + $running) |
       if $entry.sandboxed then . + {
         enabled: ($running.enabled // false),
-        approved: ($approval.approved // false),
+        approved: (if $nativeError != "" then null else ($approval.approved // false) end),
         revision: ($approval.revision // null),
         grants: ($approval.grants // {}),
-        error: ($approval.error // null)
+        error: (if $nativeError != "" then $nativeError else ($approval.error // $entry.error // null) end)
       } else . end)
   ')
 else

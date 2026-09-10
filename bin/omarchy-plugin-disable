@@ -19,7 +19,8 @@ fi
 id="${1:-}"
 [[ -n $id ]] || fail "plugin id is required"
 
-if omarchy-plugin-catalog | jq -e --arg id "$id" 'any(.[]; .id == $id and .sandboxed)' >/dev/null; then
+catalog=$(omarchy-plugin-catalog)
+if jq -e --arg id "$id" 'any(.[]; .id == $id and .sandboxed)' <<<"$catalog" >/dev/null; then
   jq -cn --arg id "$id" '{operation: "revoke", id: $id}' | omarchy-ward-runtime >/dev/null
   # Revocation is durable and stops the controller even without a running shell.
   omarchy-shell -q shell setPluginEnabled "$id" false >/dev/null
