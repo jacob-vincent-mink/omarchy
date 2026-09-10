@@ -122,6 +122,8 @@ The single quotes deliberately prevent Bash expansion. In a QML `Process.command
 
 Token-relative `.`/`..`, empty components and traversal are rejected. This lexical check is not a host-filesystem sandbox or a promise about symlinks created in writable data. An approved CLI retains its own account, configuration, filesystem and network authority; constrain arguments accordingly. Prefer exact shipped filenames to open-ended text prefixes. Host asset staging is an implementation detail, not a stable path to cache across launches.
 
+A text prefix naming the bare PATH or DATA root matches that directory and its descendants, not a sibling whose name begins with the same bytes. Ordinary filename prefixes beneath the root retain text-prefix semantics. This component-boundary check does not resolve the separate mutable-file/symlink confinement problem.
+
 ## Sandbox manifest schema
 
 This is the complete current `sandbox` request vocabulary. Unknown fields inside `sandbox`, requests and request objects are rejected. Omitted request fields default to denied/not requested. Declaration is not approval. The serialized manifest and saved approval are each limited to 64 KiB, which can bind before count limits.

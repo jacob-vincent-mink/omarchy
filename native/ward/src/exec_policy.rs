@@ -180,7 +180,7 @@ pub fn resolve_plugin_path(value: &str, dirs: &[PluginDir]) -> io::Result<String
       return Ok(value.to_owned());
     }
     let prefix = format!("{}/", dir.value);
-    if value.len() > prefix.len() && value.starts_with(&prefix) {
+    if value.starts_with(&prefix) {
       guard(&value[prefix.len()..])?;
       return Ok(value.to_owned());
     }
@@ -231,6 +231,24 @@ impl Argument {
         max,
       } => value.len() <= *max && pattern(expected).is_ok_and(|pattern| pattern.is_match(value)),
     }
+  }
+
+  fn accepts_with(&self, value: &str, dirs: &[PluginDir]) -> bool {
+    if !self.accepts(value) {
+      return false;
+    }
+    if let Self::Text { prefix, .. } = self {
+      // A bare token/root text prefix denotes this directory, not a sibling
+      // whose name happens to begin with it. Preserve ordinary text prefixes
+      // (including filename prefixes already beneath a plugin root).
+      for dir in dirs {
+        if prefix == &dir.value && value != dir.value
+          && !value.starts_with(&format!("{}/", dir.value)) {
+          return false;
+        }
+      }
+    }
+    true
   }
 
   /// Substitute the admitted plugin directories into path-like constraint
@@ -303,18 +321,22 @@ impl Tree {
   /// command-line reparsing, wildcard suffixes, normalization or first-match
   /// precedence: a complete path to any selected terminal is sufficient.
   pub fn check(&self, selected: &BTreeSet<String>, argv: &[String]) -> io::Result<()> {
+    self.check_resolved(&[], selected, argv)
+  }
+
+  fn check_resolved(&self, dirs: &[PluginDir], selected: &BTreeSet<String>, argv: &[String]) -> io::Result<()> {
     if !selected.is_subset(&self.leaves()?) {
       return Err(invalid("command selection was not requested"));
     }
     validate_argv(argv)?;
-    if self.matches(selected, argv) {
+    if self.matches(dirs, selected, argv) {
       Ok(())
     } else {
       Err(invalid("command invocation was not granted"))
     }
   }
 
-  fn matches(&self, selected: &BTreeSet<String>, argv: &[String]) -> bool {
+  fn matches(&self, dirs: &[PluginDir], selected: &BTreeSet<String>, argv: &[String]) -> bool {
     match argv.split_first() {
       None => self
         .end
@@ -323,7 +345,7 @@ impl Tree {
       Some((arg, rest)) => self
         .next
         .iter()
-        .any(|step| step.arg.accepts(arg) && step.then.matches(selected, rest)),
+        .any(|step| step.arg.accepts_with(arg, dirs) && step.then.matches(dirs, selected, rest)),
     }
   }
 
@@ -362,7 +384,7 @@ impl Tree {
       .iter()
       .map(|arg| resolve_plugin_path(arg, dirs))
       .collect::<io::Result<Vec<_>>>()?;
-    self.resolve(dirs)?.check(selected, &argv)
+    self.resolve(dirs)?.check_resolved(dirs, selected, &argv)
   }
 }
 
@@ -604,6 +626,27 @@ mod tests {
         .check(&selected(&["auth", "status"]), &args(&["auth", "status"]))
         .is_err()
     );
+  }
+
+  #[test]
+  fn plugin_root_text_prefixes_require_a_path_component_boundary() {
+    for dir in [PluginDir::data("/private/data".into()), PluginDir::assets("/private/assets".into())] {
+      let dirs = [dir.clone()];
+      for prefix in [dir.token.to_owned(), dir.value.clone()] {
+        let policy = tree(vec![step(Argument::Text {prefix, min: 1, max: 1024}, terminal("read"))]);
+        for candidate in [dir.token.to_owned(), dir.value.clone(), format!("{}/save.json", dir.token), format!("{}/save.json", dir.value)] {
+          assert!(policy.check_with(&dirs, &selected(&["read"]), &[candidate.clone()]).is_ok(), "{candidate}");
+        }
+        for candidate in [format!("{}.vault/secret", dir.value), format!("{}-other/file", dir.value),
+          format!("{}/", dir.value), format!("{}/../secret", dir.value), format!("{}/./file", dir.value)] {
+          assert!(policy.check_with(&dirs, &selected(&["read"]), &[candidate.clone()]).is_err(), "{candidate}");
+        }
+      }
+      let policy = tree(vec![step(Argument::Text {
+        prefix: format!("{}/image-", dir.token), min: 1, max: 1024
+      }, terminal("read"))]);
+      assert!(policy.check_with(&dirs, &selected(&["read"]), &[format!("{}/image-one.png", dir.value)]).is_ok());
+    }
   }
 
   #[test]
