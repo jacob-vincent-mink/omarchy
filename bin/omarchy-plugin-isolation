@@ -18,8 +18,11 @@ if [[ ${1:-} == "mark" ]]; then
   [[ $id =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$ && $id != *..* ]] || exit 1
   umask 077
   mkdir -p -- "$identities/$id"
-elif (( $# == 0 )); then
+elif (( $# == 0 )) || [[ ${1:-} == "retained" && $# == 1 ]]; then
   {
+    if (( $# == 0 )); then
+      omarchy-plugin-installation list | jq -r '.[] | select(.mode == "ward" or .mode == "blocked") | .id'
+    fi
     for directory in "$identities" "$store/identities"; do
       if [[ -e $directory || -L $directory ]]; then
         [[ -d $directory && ! -L $directory ]] || exit 1

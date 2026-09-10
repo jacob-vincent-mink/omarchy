@@ -47,9 +47,7 @@ Full schema: [`shell/services/PluginRegistry.qml`](../shell/services/PluginRegis
 
 ## Installing a third-party plugin
 
-A plugin is a **git repo** with a `manifest.json` at its root. Adding one
-clones it straight into `~/.config/omarchy/plugins/<id>/`; updating is a
-fast-forward pull:
+A plugin is a **git repo** with a `manifest.json` at its root. Adding stages and validates a clone before publishing it at `~/.config/omarchy/plugins/<id>/`; updating validates the candidate before a fast-forward merge:
 
 ```bash
 omarchy plugin add https://github.com/acme/omarchy-weather.git
@@ -57,11 +55,7 @@ omarchy plugin update                # fetches, shows a diff, fast-forwards
 omarchy plugin remove acme.weather
 ```
 
-**Setup › Plugins** offers Enable, Disable, Add, Clone, and Remove. Enable and
-Disable include built-ins as well as installed plugins. Clone is limited to
-built-ins, while Remove is limited to installed plugins since a built-in has
-no checkout to delete. Add, Clone, and Remove open a terminal so their warning,
-editor, confirmation, and output stay visible.
+**Setup › Plugins › Manage Plugins** (`omarchy plugin manage`) opens the graphical installer/manager. Add accepts a Git URL or local Git folder, validates without installing or executing code, shows the exact commit, then installs only that validated commit. Ward is the default. Adding hands off to the existing permission reviewer; approval and enabling remain separate. The explicit YOLO switch requires an additional trust acknowledgement and visibly labels unsandboxed installs. The manager also provides review, enable, disable/revoke and confirmed removal. The existing Enable/Disable pickers still include built-ins; Clone remains limited to built-ins and opens a terminal/editor.
 
 Sandbox previews additionally appear under **Review Plugin Access**. Choosing Enable for a sandbox plugin opens that same reviewer; it does not approve or start the plugin automatically.
 
@@ -80,7 +74,9 @@ one replaces the active bar, and it is therefore never offered under Disable.
 Bar widgets may set `barWidget.defaultSection` to `left`, `center`, or `right`;
 widgets that omit it default to `center`.
 
-Plugins run as **unsandboxed code** inside `omarchy-shell`. Adding warns you before cloning, plugins land disabled so you can review the code before `omarchy plugin enable`, and updates show a diff before touching anything. Commands confirm in a terminal even when given arguments; without one they refuse rather than guess. Add `--yes` to skip every prompt (the path for scripts and agents). The scoped interfaces remove direct access to authentication services and avoid handing generic cross-plugin service factories to replacement bars, but visual plugins can still traverse ordinary objects in their shared QML scene. Plugin code also has the same user-level file and process access as the shell.
+New Git installations default to Ward and reject non-compatible content. `omarchy plugin add <source> --yolo` explicitly chooses **unsandboxed code** inside `omarchy-shell`; `--trusted-local` is limited to existing local Git folders. `--yes` skips confirmation but never selects either mode. YOLO retains the shell's user-level file, process and network access; scoped QML facades are not containment. Existing legacy trusted installs and built-in clones are unchanged. All new plugins land disabled. `--inspect --json` validates without installation; `--commit <sha>` requires the inspected commit at installation.
+
+Host-owned records at `$XDG_STATE_HOME/omarchy/plugin-installations/<id>/record.json` (default `~/.local/state`) bind source, commit and execution mode separately from Ward approval. Same-source updates retain explicit YOLO trust; changed source, identity or missing/corrupt records block managed loading and require explicit removal/reinstallation. A retained Ward identity cannot become YOLO, even after removal. Records are traceability, not publisher authentication or a security boundary against the same account. Removal retains records and Ward snapshots; revocation removes active authority.
 
 You can still install by hand: drop a plugin into
 `~/.config/omarchy/plugins/<id>/`, run `omarchy-shell shell rescanPlugins`, then

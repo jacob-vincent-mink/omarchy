@@ -633,6 +633,7 @@ QtObject {
     var currentKind = null
     var currentJson = []
     var identities = null
+    var installations = {}
 
     function flush() {
       if (!currentSource) return
@@ -643,6 +644,14 @@ QtObject {
           if (!Array.isArray(manifest)) throw new Error("invalid isolation identities")
           identities = {}
           for (var identity of manifest) identities[String(identity)] = true
+          currentSource = null
+          currentKind = null
+          currentJson = []
+          return
+        }
+        if (currentKind === "installations") {
+          if (!Array.isArray(manifest)) throw new Error("invalid installation records")
+          for (var installation of manifest) installations[String(installation.id)] = installation
           currentSource = null
           currentKind = null
           currentJson = []
@@ -711,6 +720,10 @@ QtObject {
           + " rejected: id is reserved for first-party Omarchy plugins")
         continue
       }
+      var directoryId = String(thirdParty[tk].__sourceDir).split("/").pop()
+      var record = installations[directoryId]
+      thirdParty[tk].__executionMode = record ? record.mode : (thirdParty[tk].sandbox !== undefined || identities[tk] || identities[directoryId] ? "ward" : "legacy-trusted")
+      thirdParty[tk].__installationError = record ? String(record.error || "") : ""
       merged[tk] = thirdParty[tk]
     }
 
@@ -798,7 +811,9 @@ QtObject {
       + "  done; "
       + "}; "
       + "identities=$(omarchy-plugin-isolation) || exit 1; "
+      + "installations=$(omarchy-plugin-installation list) || exit 1; "
       + "printf '===isolation::host===\\n%s\\n=== EOM ===\\n' \"$identities\"; "
+      + "printf '===installations::host===\\n%s\\n=== EOM ===\\n' \"$installations\"; "
       + "scan_firstparty \"$0\"; "
       + "scan_thirdparty \"$1\""
     scanProcess.command = ["bash", "-c", script, registry.firstPartyDir, registry.pluginsDir]

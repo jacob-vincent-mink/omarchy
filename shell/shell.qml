@@ -1782,6 +1782,9 @@ ShellRoot {
           // work it out again.
           canDisable: !isBarOption,
           firstParty: !!plugins[id].__isFirstParty,
+          executionMode: plugins[id].__isFirstParty ? "first-party" : plugins[id].__executionMode || "legacy-trusted",
+          sandboxed: shell.pluginRegistry.isSandboxed(id),
+          error: plugins[id].__installationError || null,
           clonedFrom: clonedFrom
         })
       }

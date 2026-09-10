@@ -48,6 +48,7 @@ fn native_slots_share_real_and_replacement_bars_without_loading_plugin_qml() {
     .unwrap();
   }
   std::os::unix::fs::symlink(repo.join("bin"), source.join("bin")).unwrap();
+  std::os::unix::fs::symlink(repo.join("default"), source.join("default")).unwrap();
   let config = root.path().join("home/.config/omarchy/shell.json");
   fs::create_dir_all(config.parent().unwrap()).unwrap();
   let initial = serde_json::to_vec(&serde_json::json!({

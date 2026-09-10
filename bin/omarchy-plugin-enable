@@ -83,6 +83,8 @@ placement=$(jq -cn \
   ')
 
 catalog=$(omarchy-plugin-catalog)
+installation_error=$(jq -r --arg id "$id" 'first(.[] | select(.id == $id)) | .installation.error // empty' <<<"$catalog")
+[[ -z $installation_error ]] || fail "$installation_error"
 if jq -e --arg id "$id" 'any(.[]; .id == $id and .sandboxed)' <<<"$catalog" >/dev/null; then
   approvals=$(printf '%s' '{"operation":"list"}' | omarchy-ward-runtime)
   jq -e --arg id "$id" 'any(.[]; .id == $id and .approved and .error == null)' <<<"$approvals" >/dev/null ||

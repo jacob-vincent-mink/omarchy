@@ -48,6 +48,7 @@ fn failed_and_never_presenting_startups_preserve_config_and_allow_retry() {
     .unwrap();
   }
   std::os::unix::fs::symlink(repo.join("bin"), source.join("bin")).unwrap();
+  std::os::unix::fs::symlink(repo.join("default"), source.join("default")).unwrap();
   let config = root.path().join("home/.config/omarchy/shell.json");
   fs::create_dir_all(config.parent().unwrap()).unwrap();
   let initial = serde_json::to_vec(&serde_json::json!({

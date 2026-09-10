@@ -12,7 +12,7 @@ If Ward ships, all new remote Git plugin installations default to Ward unless th
 
 The trusted host-selected worker runtime directory is implemented; see its [contract and staging workflow](../docs/ward-runtime.md). The broader ownership split below records the direction; it does not authorize new environment or host-execution capabilities without discussion.
 
-Remote-install provenance/routing, package publication, and disk-budget enforcement remain planned follow-up work. Writing this plan does not authorize implementation of those follow-ups or another live plugin trial.
+Direct Git/local-folder installation provenance, explicit YOLO routing and graphical management are implemented in the preview. Registry-specific ingress/authentication, package publication and disk-budget enforcement remain follow-up work. Writing this plan does not authorize those follow-ups or another live plugin trial.
 
 Existing first-party plugins and explicitly trusted local code keep their in-process path. Existing v1 installations are not silently reclassified or migrated by this work.
 
@@ -24,7 +24,7 @@ The [architecture reference](../docs/ward-architecture.md) describes the impleme
 - The [controller](../native/ward/src/controller.rs) receives an explicitly host-selected runtime directory descriptor before graphics starts. The generic bootstrap executes its version-validated entry point inside the sandbox. Omarchy owns the [shared worker](../shell/ward-runtime/worker.qml) and its sandbox-local environment/aliases; there is no adjacent-directory fallback or `--omarchy-worker` mode.
 - The [request broker](../native/ward/src/requests.rs) selects Omarchy host helpers through `OMARCHY_PATH`. Moving only QML files would therefore leave the dependency inverted.
 - [SandboxedPlugins](../shell/services/SandboxedPlugins.qml) now owns one shared session per plugin with per-output native importers and independent bar placements. Mixed-DPI streams, stable identities, owner-only/default roaming, panel transfer, hotplug and shared service state have synthetic coverage. See the [architecture reference](../docs/ward-architecture.md#pixels-input-and-context) for the implemented contract.
-- Install routing still depends on the manifest's `sandbox` declaration or a retained host marker. There is no complete host-owned installation provenance policy yet.
+- Direct installs now default to Ward with host-owned source/mode records and explicit YOLO/trusted-local exceptions. Registry-specific ingress/authentication is still absent.
 - Individual revisions and temporary filesystems have limits, but aggregate revision storage and persistent plugin data have no enforced disk budget.
 
 ## A. Make Omarchy an adapter on top of Ward
@@ -65,9 +65,9 @@ Names and layout are implementation choices. A host-neutral Qt import and execut
 Done means a Ward-only source tree builds and passes generic tests, and Omarchy uses that same build through its own adapter. No Ward-owned source/build rule imports Commons, Ui, PluginShellApi, or Omarchy host commands. Existing focused isolation, grant, graphics, lifecycle, and shell integration tests still pass.
 
 
-## B. Remote-install provenance and routing — follow-up
+## B. Remote-install provenance and routing — direct Git implemented
 
-The default is decided: new remote Git installs use Ward, with an explicit Yolo exception. Implementation remains outside the immediate runtime-directory work.
+New Git installs use Ward, with an explicit YOLO exception. The CLI and graphical manager implement host-owned records, inspect-before-add with commit pinning, visible mode labels, changed-source rejection and fail-closed damaged-record handling. Registry-specific routing/authentication remains an acceptance gap. The policy checklist is:
 
 - Add a host-owned installation record outside the downloaded bundle, binding plugin identity, source kind/URL, installed commit/content revision, and execution mode. Keep installation provenance distinct from exact-revision capability approval.
 - Apply the same routing to registry and direct-URL ingress. First-party status comes from an actual trusted installation source/path, never an ID prefix or a manifest claim.
@@ -77,7 +77,7 @@ The default is decided: new remote Git installs use Ward, with an explicit Yolo 
 - Preserve existing first-party, trusted-local, and legacy-v1 installations without silently converting their trust model. Document any later migration as a separate decision.
 - Record URLs and commits for traceability, but do not present them as publisher authentication. Registry identity, signing, and source-change verification need their own policy.
 
-Open: whether Yolo approval persists across updates from the same source, and which source changes force renewed confirmation. Recommended baseline: persist the explicit mode in the host record for ordinary same-source updates, prominently label it, and require renewed trust for a source/identity change. Switching a Yolo install to Ward requires compatible content and ordinary revision/grant review before activation.
+Implemented policy: explicit YOLO trust persists across ordinary same-source updates. Source/identity changes require removal and explicit reinstallation. Switching a YOLO install to Ward requires compatible content, reinstallation and ordinary revision/grant review before activation. A retained Ward identity cannot convert to YOLO. Legacy trusted installations are not migrated.
 
 Acceptance must cover a new direct URL, registry install, explicit Yolo install, local trusted install, manifest removal on update, changed source, conflicting identity, missing record, and missing/incompatible Ward. All isolated failure cases stay out of the in-process loader.
 

@@ -71,7 +71,7 @@ catalog=$(omarchy-plugin-catalog)
 
 was_enabled=""
 sandboxed=false
-if jq -e --arg id "$id" 'any(.[]; .id == $id and .sandboxed)' <<<"$catalog" >/dev/null; then
+if jq -e --arg id "$id" 'any(.[]; .id == $id and .sandboxed and .wardIdentity != false)' <<<"$catalog" >/dev/null; then
   sandboxed=true
 else
   [[ -e $target || -L $target ]] || fail "plugin '$id' is not installed"

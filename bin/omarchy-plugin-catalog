@@ -13,6 +13,8 @@
 set -euo pipefail
 
 identities=$(omarchy-plugin-isolation)
+retained=$(omarchy-plugin-isolation retained)
+installations=$(omarchy-plugin-installation list)
 
 paths=()
 
@@ -34,13 +36,14 @@ fi
     jq -c --arg path "$manifest" '{manifest: ., path: $path}' "$manifest" ||
       echo "omarchy-plugin-catalog: invalid manifest: $manifest" >&2
   done
-} | jq -n --argjson identities "$identities" --arg bundled "$OMARCHY_PATH/shell/plugins/" --arg user "$user_dir/" '
+} | jq -n --argjson identities "$identities" --argjson retained "$retained" --argjson installations "$installations" --arg bundled "$OMARCHY_PATH/shell/plugins/" --arg user "$user_dir/" '
   [ inputs
     | .manifest as $manifest
     | .path as $manifestPath
     | ($manifestPath | sub("/manifest.json$"; "") | sub("/[^/]+\\.manifest\\.json$"; "")) as $sourceDir
     | ($manifestPath | startswith($bundled)) as $firstParty
     | ($sourceDir | split("/") | last) as $directoryId
+    | (first($installations[] | select(.id == $directoryId)) // {}) as $installation
     | select($firstParty or ($manifest.id | startswith("omarchy.") | not))
     | {
         id: ($manifest.id // ""),
@@ -53,6 +56,10 @@ fi
         entryPoints: ($manifest.entryPoints // {}),
         sandbox: ($manifest.sandbox // null),
         sandboxed: (($manifest | has("sandbox")) or ($identities | index($manifest.id) != null or index($directoryId) != null)),
+        wardIdentity: (($manifest | has("sandbox")) or ($retained | index($manifest.id) != null or index($directoryId) != null)),
+        executionMode: (if $firstParty then "first-party" else $installation.mode // (if ($manifest | has("sandbox")) then "ward" else "legacy-trusted" end) end),
+        installation: (if $firstParty then null else $installation end),
+        error: (if $firstParty then null else $installation.error // null end),
         barWidget: ($manifest.barWidget // null),
         bar: ($manifest.bar // null)
       }
@@ -68,7 +75,7 @@ fi
   ]
   | . as $catalog
   | . + [$identities[] as $id | select(all($catalog[]; .id != $id)) |
-      {id: $id, name: $id, sandboxed: true, firstParty: false, kinds: [], entryPoints: {},
+      {id: $id, name: $id, sandboxed: true, wardIdentity: ($retained | index($id) != null), firstParty: false, kinds: [], entryPoints: {}, executionMode: "blocked",
        sourceDir: ($user + $id), manifestPath: null, sandbox: null,
        error: "Isolated plugin checkout is missing or invalid"}]
   | unique_by(.id)
