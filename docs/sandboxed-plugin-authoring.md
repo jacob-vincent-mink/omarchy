@@ -87,6 +87,8 @@ Entry points are repository-relative: `"barWidget": "ui/Widget.qml"`, not `/plug
 
 Access to unrelated user files is separate: request a named `filesystem` slot, let the user choose its host directory, then read it locally at `/grants/<slot>/...`. That mount path has no automatic host-command translation. `/tmp` and `$XDG_RUNTIME_DIR` (`/run/plugin`) are temporary. File access does not authorize connecting to host pathname sockets in saved data or selected folders.
 
+Selected folders cannot expose Ward's actual store, signing keys, private session runtime or credential roots, including enclosing directories and resolved aliases. Writable grants also cannot overlap host configuration, local program/state/data roots or the configured Omarchy/native runtime. Select a separate data folder, not the desktop home or a control tree. These checks run at approval and again at admission, including for older signed approvals. A valid signature is not permission to mount an authority directory.
+
 ### How files get into DATA
 
 There is no separate DATA staging action. The host creates the persistent directory when a storage-granted worker launches and mounts it at `$HOME`. Anything the plugin writes there is immediately in the same directory addressed by `$OMARCHY_PLUGIN_DATA` for host commands.
@@ -256,7 +258,9 @@ The bounded request brokers in this table share a 32-connections-per-second admi
 
 ### Approved grants are signed into the record
 
-The review is what turns a request into durable authority: every `approve` (and every later publish — launch, `stop`, `revoke`, `recover`) re-mints an ed25519 signature over `{ id, revision, enabled, grants }`, and every read re-verifies it before the grants are trusted. Runtime state (`epoch`, `active_unit`) is deliberately excluded so the controller can advance it to start/stop a worker without holding the signing key. The consequence is that a hand-edit of the store's grant record — adding a permission the reviewer never approved — fails closed at dispatch and at launch. The private key lives next to the records (`secrets/signing.key`, mode 0600), so this seals against accidental and editorial edits and against writers working outside the review tool; it is not a hardware-backed boundary, and a determined same-account process that can read the key can also re-sign. Genuine binding to a human reviewer needs the key outside the desktop account.
+The review turns a request into durable authority: approval signs `{ id, revision, enabled, grants }` with ed25519, and every read verifies that signature before trusting grants. Changes to signed approval content require a new signature; runtime state (`epoch`, `active_unit`) is excluded, so stopping can retain the existing signature without opening the private key. Hand-editing a grant record fails closed at dispatch and launch. The private key is `secrets/signing.key` (0600); filesystem grants cannot expose it or its enclosing store. This is not hardware-backed or an independent human boundary: a compromised same-account host process can still read and use the key.
+
+Revocation persists a denial marker and attempts service stop before signing the disabled record. A signing/publication failure returns an error but retains denial; a missing private key cannot leave the previous approval admissible or prevent the stop attempt. After repairing the store, explicit recovery or a repeated disable completes the disabled record. A failure to write denial still attempts stop but cannot claim durable success. Neither mechanism retracts completed effects.
 
 ### Machine-readable operation results
 

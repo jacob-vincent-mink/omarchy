@@ -19,6 +19,8 @@ The dashed service boundary is a shared resource and lifetime boundary, not a fi
 
 Approval records sign `{ id, revision, enabled, grants }` and verify it on reads. The signing key is held under the same desktop account: this detects unapproved record edits, but is not a boundary against a determined same-account process able to read the key. Runtime epoch/unit state is separate. A running controller enforces its admitted grant snapshot while rechecking live authority; grants cannot silently widen mid-session.
 
+Filesystem admission rejects the actual store and protected host authority paths, their enclosing directories and resolved aliases; writable selections additionally exclude host configuration and runtime code. Old signed approvals undergo the same checks at admission. Revocation writes durable denial and attempts service stop before signing the disabled record. Signing failure leaves admission denied and requires explicit recovery; failure to persist denial still attempts stop and is reported as failure, never durable success. A non-revoking stop preserves the existing approval signature and needs no private key.
+
 ## Three execution domains
 
 | Domain | Responsibility and boundary |

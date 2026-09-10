@@ -69,7 +69,7 @@ try {
   fs.writeFileSync(path.join(source, 'manifest.json'), JSON.stringify({
     schemaVersion: 1, id: 'acme.review', name: 'Review fixture', version: '1', kinds: ['panel'],
     entryPoints: { panel: 'worker.qml' },
-    sandbox: { version: 1, entryPoint: 'worker.qml', requests: { network: true, notifications: true, desktopGeometry: true, settings: {read: ['width'], write: ['width']}, filesystem: [{name: 'notes'}] } }
+    sandbox: { version: 1, entryPoint: 'worker.qml', requests: { network: true, notifications: true, desktopGeometry: true, settings: {read: ['width'], write: ['width']}, filesystem: [{name: 'notes', access: 'readwrite'}] } }
   }))
   fs.writeFileSync(path.join(source, 'worker.qml'), 'import Quickshell\nShellRoot {}\n')
   run('git', ['-C', source, 'init', '-q'])
@@ -90,6 +90,12 @@ try {
   assert(run('omarchy-plugin-review', ['acme.review']).includes('No plugin code was run'), 'human review explains the snapshot boundary')
   assert(run('omarchy-plugin-review', ['acme.review']).includes('Desktop geometry: output/workspace layout and window rectangles; no titles or window control'), 'human review discloses the requested desktop observation')
   run('omarchy-plugin-approve', ['acme.review', '--revision', review.revision], false)
+  for (const access of ['--read', '--write']) {
+    for (const folder of [store, path.join(store, 'secrets'), temp, home]) {
+      run('omarchy-plugin-approve', ['acme.review', '--revision', review.revision, access, `notes=${folder}`, '--yes'], false)
+      assert(!fs.existsSync(path.join(store, 'acme.review.json')), `${access} authority selection cannot create an approval: ${folder}`)
+    }
+  }
   run('omarchy-plugin-approve', ['acme.review', '--revision', review.revision, '--read', `notes=${source}`, '--allow-notifications', '--allow-desktop-geometry', '--read-setting', 'width', '--write-setting', 'width', '--yes'])
   let record = JSON.parse(fs.readFileSync(path.join(store, 'acme.review.json')))
   assertEqual(record.grants.network, false, 'approval does not infer requested network access')

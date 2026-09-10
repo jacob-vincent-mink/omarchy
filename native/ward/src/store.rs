@@ -99,8 +99,13 @@ impl Store {
       Err(error) => return Err(error),
     }
     require_private_directory(&self.secrets_dir())?;
-    if self.signing_key_path().exists() && self.signing_pub_path().exists() {
-      return Ok(());
+    let secret_exists = self.signing_key_path().try_exists()?;
+    let public_exists = self.signing_pub_path().try_exists()?;
+    if secret_exists || public_exists {
+      if secret_exists && public_exists {
+        return Ok(());
+      }
+      return Err(invalid("incomplete signing keypair; restore the original keypair before reviewing"));
     }
     let mut random = File::open("/dev/urandom")?;
     let mut seed = [0u8; 32];
@@ -224,7 +229,9 @@ impl Store {
     let manifest = Manifest::read(&self.revisions().join(revision))?;
     self.retain_identity(&manifest.id)?;
     grants.validate(&manifest.sandbox.requests)?;
+    let protected = crate::authority::ProtectedPaths::for_store(&self.root)?;
     for directory in grants.filesystem.values() {
+      protected.check(directory)?;
       directory.open()?;
     }
     let _lock = self.lock(&manifest.id)?;
@@ -320,12 +327,41 @@ impl Store {
       Ok(record) => record,
       // An installed or reviewed plugin need not have been approved yet.
       Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-      Err(error) => return Err(error),
+      Err(error) => {
+        self.mark_denied(id)?;
+        return Err(error);
+      }
     };
+    // Revocation is fail-closed even when signing/publication is unavailable.
+    // Persist denial and stop independently before touching the signing key.
+    self.deny_and_stop(&record)?;
     record.enabled = false;
     record.epoch = record.epoch.saturating_add(1);
-    let previous = record.active_unit.take();
-    self.publish(&mut record, previous.as_deref(), |_| Ok(()))
+    record.active_unit = None;
+    record.signature = self.sign(&record)?;
+    self.finish(&record, &mut |_| Ok(()))
+  }
+
+  fn mark_denied(&self, id: &str) -> io::Result<()> {
+    match OpenOptions::new().write(true).create_new(true).mode(0o600)
+      .open(self.path(id, "pending")) {
+      Ok(marker) => marker.sync_all()?,
+      Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+      Err(error) => return Err(error),
+    }
+    File::open(&self.root)?.sync_all()
+  }
+
+  fn deny_and_stop(&self, record: &Record) -> io::Result<()> {
+    let denied = self.mark_denied(&record.id);
+    // Still attempt emergency stop if the store cannot be written. Return an
+    // error, never a successful durable revocation, if either operation fails.
+    let stopped = match record.active_unit.as_deref() {
+      Some(unit) => Unit::recover(unit).and_then(|mut unit| unit.stop()),
+      None => Ok(()),
+    };
+    denied?;
+    stopped
   }
 
   /// Stop a running plugin **without** disabling its approval. This is the
@@ -341,9 +377,11 @@ impl Store {
       ));
     }
     let mut record = self.record(id)?;
-    let previous = record.active_unit.take();
+    self.deny_and_stop(&record)?;
+    record.active_unit = None;
     record.epoch = record.epoch.saturating_add(1);
-    self.publish(&mut record, previous.as_deref(), |_| Ok(()))?;
+    // The signed approval content is unchanged; stopping needs no private key.
+    self.finish(&record, &mut |_| Ok(()))?;
     Ok(record)
   }
 
@@ -380,6 +418,11 @@ impl Store {
   fn validate_authority(&self, record: &Record) -> io::Result<()> {
     if !record.enabled {
       return Err(invalid("plugin is not approved"));
+    }
+    let protected = crate::authority::ProtectedPaths::for_store(&self.root)?;
+    for directory in record.grants.filesystem.values() {
+      protected.check(directory)?;
+      directory.open()?;
     }
     Revision::verify(&self.revisions(), &record.revision)?;
     let manifest = Manifest::read(&self.revisions().join(&record.revision))?;
@@ -573,7 +616,7 @@ mod tests {
     fs::write(source.join("manifest.json"), serde_json::to_vec(&serde_json::json!({
       "schemaVersion": 1, "id": "test.widget", "name": "Test", "version": "1", "kinds": ["barWidget"],
       "entryPoints": {"barWidget": "worker.qml"}, "sandbox": {"version": 1, "entryPoint": "worker.qml",
-        "requests": {"network": true, "storage": true, "filesystem": [{"name": "files"}]}}
+        "requests": {"network": true, "storage": true, "filesystem": [{"name": "files", "access": "readwrite"}]}}
     })).unwrap()).unwrap();
     let store = Store::initialize(&root.path().join("state")).unwrap();
     let revision = Revision::import(&source, &store.revisions()).unwrap();
@@ -816,6 +859,88 @@ mod tests {
     assert!(store.approve(&revision.digest, Grants::default()).is_err());
     fs::write(revision.path.join("worker.qml"), "modified").unwrap();
     assert!(store.validate_authority(&record).is_err());
+  }
+
+  #[test]
+  fn filesystem_approval_cannot_expose_authority_or_its_aliases() {
+    use crate::grants::{Access, FileSystemGrant, Target};
+    use std::os::unix::fs::symlink;
+    let (root, store, revision) = fixture();
+    let alias = root.path().join("alias");
+    symlink(&store.root, &alias).unwrap();
+    let sibling = root.path().join("state-not-authority");
+    fs::create_dir(&sibling).unwrap();
+    for access in [Access::Read, Access::ReadWrite] {
+      for selected in [&store.root, &store.secrets_dir(), root.path(), &alias] {
+        let grant = FileSystemGrant::select(selected, access, Target::Directory).unwrap();
+        let error = store.approve(&revision.digest, Grants {
+          filesystem: [("files".into(), grant)].into(), ..Grants::default()
+        }).unwrap_err();
+        assert!(error.to_string().contains("host authority"), "{error}");
+        assert!(!store.path("test.widget", "json").exists());
+      }
+      let grant = FileSystemGrant::select(&sibling, access, Target::Directory).unwrap();
+      store.approve(&revision.digest, Grants {
+        filesystem: [("files".into(), grant)].into(), ..Grants::default()
+      }).unwrap();
+      store.revoke("test.widget").unwrap();
+      fs::remove_file(store.path("test.widget", "json")).unwrap();
+    }
+    let key_alias = sibling.join("key-alias");
+    fs::hard_link(store.signing_key_path(), &key_alias).unwrap();
+    let grant = FileSystemGrant::select(&sibling, Access::Read, Target::Directory).unwrap();
+    assert!(store.approve(&revision.digest, Grants {
+      filesystem: [("files".into(), grant)].into(), ..Grants::default()
+    }).unwrap_err().to_string().contains("single-link"));
+  }
+
+  #[test]
+  fn old_signed_authority_grants_are_rejected_at_admission() {
+    use crate::grants::{Access, FileSystemGrant, Target};
+    let (_root, store, revision) = fixture();
+    let mut old = store.approve(&revision.digest, Grants::default()).unwrap();
+    old.grants.filesystem.insert("files".into(),
+      FileSystemGrant::select(&store.root, Access::Read, Target::Directory).unwrap());
+    // Simulate a valid signed approval produced by the pre-fix release.
+    store.publish(&mut old, None, |_| Ok(())).unwrap();
+    assert!(store.validate_authority(&old).unwrap_err().to_string().contains("host authority"));
+  }
+
+  #[test]
+  fn revocation_signing_failure_leaves_durable_denial_until_recovery() {
+    let (_root, store, revision) = fixture();
+    store.approve(&revision.digest, Grants::default()).unwrap();
+    let backup = store.secrets_dir().join("signing.saved");
+    fs::rename(store.signing_key_path(), &backup).unwrap();
+    assert!(Store::initialize(&store.root).is_err(), "review must not replace a missing signing key");
+    assert!(!store.signing_key_path().exists());
+    assert!(store.revoke("test.widget").is_err());
+    assert!(store.pending("test.widget").unwrap());
+    assert!(store.read("test.widget").is_err());
+    assert!(store.approve(&revision.digest, Grants::default()).is_err());
+    fs::rename(backup, store.signing_key_path()).unwrap();
+    store.recover("test.widget").unwrap();
+    assert!(!store.read("test.widget").unwrap().enabled);
+  }
+
+  #[test]
+  fn revocation_stops_live_service_before_failed_signing() {
+    if std::env::var("OMARCHY_TEST_SYSTEMD").as_deref() != Ok("1") {
+      eprintln!("SKIP: set OMARCHY_TEST_SYSTEMD=1 for real revocation service test");
+      return;
+    }
+    let (_root, store, revision) = fixture();
+    let mut record = store.approve(&revision.digest, Grants::default()).unwrap();
+    let unit = Unit::prepare().unwrap();
+    record.active_unit = Some(unit.name().into());
+    store.publish(&mut record, None, |_| Ok(())).unwrap();
+    let unit = unit.launch(Path::new("/usr/bin/sleep"), &[std::ffi::OsStr::new("30")], Limits::default()).unwrap();
+    assert!(unit.running().unwrap());
+    fs::rename(store.signing_key_path(), store.secrets_dir().join("signing.saved")).unwrap();
+    assert!(store.revoke("test.widget").is_err());
+    assert!(!unit.running().unwrap(), "signing failure must not leave the service running");
+    assert!(store.pending("test.widget").unwrap());
+    assert!(store.with_authority("test.widget", record.epoch, unit.name(), |_| Ok(())).is_err());
   }
 
   #[test]

@@ -3,6 +3,7 @@
 //! These modules do not yet constitute an integrated shell plugin system.
 
 pub mod audio;
+mod authority;
 pub mod network_proxy;
 pub mod channel;
 pub mod context;
