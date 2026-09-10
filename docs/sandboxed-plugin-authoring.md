@@ -245,7 +245,7 @@ Limits: 64 query keys, 256 fields per object, validator nesting depth 4, string/
 
 ## Runtime interfaces
 
-Read `/run/plugin/grants.json`, not the manifest, to discover admitted access. This read-only snapshot contains booleans for atomic grants, `null` or a selected service for `media`, selected maps for `filesystem`/`http`/`exec`, and `settings.read`/`settings.write` arrays. `grants.storage` controls persistence; `grants.exec.<name>.selected` lists admitted leaves. Modifying a local copy changes no authority.
+Read `/run/plugin/grants.json`, not the manifest, to discover admitted access. This read-only projection contains booleans for atomic grants, `null` or a selected service for `media`, selected maps for `filesystem`/`http`/`exec`, and `settings.read`/`settings.write` arrays. Filesystem entries expose only `access`/`target`; exec entries expose only `selected`/`lifetime`, not host paths, inode pins, executable digests or argument trees. `grants.storage` controls persistence; `grants.exec.<name>.selected` lists admitted leaves. Modifying a local copy changes no authority.
 
 | Operation | Worker interface | Limits/semantics |
 | --- | --- | --- |

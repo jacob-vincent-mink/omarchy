@@ -10,7 +10,7 @@ QtObject {
   property var component: null
   property var bar: null
   property QtObject geometrySource: PluginDesktopGeometry {
-    active: Object.keys(root.instances).length > 0
+    active: Object.values(root.instances).some(instance => !instance.error && instance.nativeSession.ready && instance.nativeSession.desktopGeometry)
   }
   property Connections workspaceChanges: Connections {
     target: Hyprland

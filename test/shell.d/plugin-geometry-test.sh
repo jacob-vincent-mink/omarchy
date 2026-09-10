@@ -7,6 +7,13 @@ run_node_test <<'JS'
 const fs = require('fs')
 const vm = require('vm')
 const scope = vm.createContext({})
+const manager = fs.readFileSync(path.join(root, 'shell/services/SandboxedPlugins.qml'), 'utf8')
+const observerActive = manager.match(/active: (Object\.values\(root\.instances\)\.some\([^\n]+)\n/)[1]
+function observes(instances) { return vm.runInNewContext(observerActive, {root: {instances}}) }
+assert(!observes({}), 'no worker means no desktop polling')
+assert(!observes({one: {error: '', nativeSession: {ready: true, desktopGeometry: false}}}), 'ungranted worker does not enable polling')
+assert(observes({one: {error: '', nativeSession: {ready: true, desktopGeometry: true}}}), 'admitted running observation enables polling')
+assert(!observes({one: {error: 'revoked', nativeSession: {ready: false, desktopGeometry: true}}}), 'failed or revoked worker cannot keep polling alive')
 vm.runInContext(fs.readFileSync(path.join(root, 'shell/services/PluginGeometry.js'), 'utf8'), scope)
 const ids = new WeakMap()
 let serial = 0

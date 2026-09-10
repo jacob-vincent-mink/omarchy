@@ -300,6 +300,7 @@ void PluginView::receive(omarchy::NativeEvent event) {
   switch (event.kind) {
         case omarchy::EventKind::Empty: return;
         case omarchy::EventKind::Ready: m_ready = true; emit stateChanged(); break;
+        case omarchy::EventKind::Observation: break; // Only the shared host owns observation polling.
         case omarchy::EventKind::PanelState:
           m_panelOpen = event.panel_open;
           m_panelSerial = event.panel_serial;

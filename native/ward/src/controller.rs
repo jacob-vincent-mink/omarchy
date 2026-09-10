@@ -748,7 +748,7 @@ impl RunningGraphics {
         // controller's own record (never plugin metadata) so a plugin can adapt
         // to declined optional access. It is mounted read-only into the sandbox.
         let grants_json_path = runtime.path().join("grants.json");
-        std::fs::write(&grants_json_path, serde_json::to_vec(&record.grants)?)?;
+        std::fs::write(&grants_json_path, serde_json::to_vec(&record.grants.worker_view())?)?;
         let grants_json = File::open(&grants_json_path)?;
         let storage = record
           .grants

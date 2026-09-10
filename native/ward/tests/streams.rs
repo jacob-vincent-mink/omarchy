@@ -136,6 +136,7 @@ impl Probe {
           }
         }
         Update::Ready => (),
+        Update::Observation(selected) => assert!(!selected),
         _ => panic!("unexpected stream metadata"),
       }
     }

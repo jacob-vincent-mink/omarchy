@@ -10,6 +10,7 @@ mod ffi {
   enum EventKind {
     Empty,
     Ready,
+    Observation,
     TopologyReady,
     Configured,
     Buffer,
@@ -46,6 +47,7 @@ mod ffi {
     slot: u32,
     panel_serial: u32,
     panel_open: bool,
+    desktop_geometry: bool,
     switch_forward: bool,
     buffer: Box<NativeBuffer>,
     regions: Vec<NativeRegion>,
@@ -185,6 +187,7 @@ fn next(session: &Session) -> io::Result<ffi::NativeEvent> {
     slot: 0,
     panel_serial: 0,
     panel_open: false,
+    desktop_geometry: false,
     switch_forward: false,
     buffer: Box::new(NativeBuffer(None)),
     regions: Vec::new(),
@@ -201,6 +204,10 @@ fn next(session: &Session) -> io::Result<ffi::NativeEvent> {
   match update {
     None => (),
     Some(Update::Ready) => event.kind = ffi::EventKind::Ready,
+    Some(Update::Observation(selected)) => {
+      event.kind = ffi::EventKind::Observation;
+      event.desktop_geometry = selected;
+    }
     Some(Update::TopologyReady(epoch)) => {
       event.kind = ffi::EventKind::TopologyReady;
       event.epoch = epoch;

@@ -17,6 +17,7 @@ use std::{
 mod streams;
 
 pub enum Update {
+  Observation(bool),
   Ready,
   Presentation(Event),
   Stream(crate::presentation::StreamEvent),
@@ -176,6 +177,17 @@ impl Session {
   }
 }
 
+fn accept_candidate(
+  listener: &Listener,
+  authenticate: impl FnOnce(&Channel) -> io::Result<()>,
+) -> io::Result<Option<Channel>> {
+  match listener.accept() {
+    Ok(channel) => Ok(authenticate(&channel).is_ok().then_some(channel)),
+    Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+    Err(error) => Err(error),
+  }
+}
+
 #[allow(clippy::too_many_arguments)] // Initial presentation/context and the two bounded channels.
 fn launch(
   root: PathBuf,
@@ -201,10 +213,17 @@ fn launch(
   let path = runtime.path().join("host");
   let listener = Listener::bind(&path)?;
   let store = Store::open(&root)?;
-  let (mut unit, _) = store.launch(&id, &controller, &path)?;
+  let (mut unit, record) = store.launch(&id, &controller, &path)?;
   let result = (|| {
+    emit(updates, Update::Observation(record.grants.desktop_geometry))?;
     let deadline = Instant::now() + Duration::from_secs(3);
     let channel = loop {
+      if Instant::now() >= deadline {
+        return Err(io::Error::new(
+          io::ErrorKind::TimedOut,
+          "controller admission timed out",
+        ));
+      }
       match commands.try_recv() {
         Err(TryRecvError::Empty) => (),
         Ok(Control::Configure(next)) => {
@@ -218,16 +237,12 @@ fn launch(
         Ok(Control::Context(next)) => context = next,
         _ => return Err(io::Error::other("session cancelled before admission")),
       }
-      match listener.accept() {
-        Ok(channel) => {
-          unit.authenticate(&channel)?;
-          break channel;
-        }
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
-          std::thread::sleep(Duration::from_millis(5));
-        }
-        Err(error) => return Err(error),
+      if let Some(channel) = accept_candidate(&listener, |channel| unit.authenticate(channel))? {
+        break channel;
       }
+      // A rejected peer is not the selected controller; the original deadline
+      // and pacing bound retries without aborting the legitimate admission.
+      std::thread::sleep(Duration::from_millis(5));
     };
     if let Some(runtime) = worker_runtime {
       runtime.send(&channel)?;
@@ -416,6 +431,34 @@ fn dispatch(
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn rejected_admission_peer_does_not_abort_the_next_candidate() {
+    let root = tempfile::Builder::new()
+      .permissions(std::fs::Permissions::from_mode(0o700))
+      .tempdir()
+      .unwrap();
+    let path = root.path().join("listener");
+    let listener = super::Listener::bind(&path).unwrap();
+    let _rejected = super::Channel::connect(&path).unwrap();
+    assert!(
+      super::accept_candidate(&listener, |_| Err(std::io::Error::from(
+        std::io::ErrorKind::PermissionDenied
+      )))
+      .unwrap()
+      .is_none()
+    );
+    let _accepted = super::Channel::connect(&path).unwrap();
+    assert!(
+      super::accept_candidate(&listener, |_| Ok(()))
+        .unwrap()
+        .is_some()
+    );
+    assert!(
+      super::accept_candidate(&listener, |_| panic!("no peer available"))
+        .unwrap()
+        .is_none()
+    );
+  }
   use super::*;
   use crate::presentation::Buffer;
   use std::{fs::File, thread::JoinHandle};

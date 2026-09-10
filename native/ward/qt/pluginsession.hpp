@@ -18,6 +18,7 @@ class PluginSession : public QObject {
   Q_OBJECT
   QML_ELEMENT
   Q_PROPERTY(bool ready READ ready NOTIFY stateChanged)
+  Q_PROPERTY(bool desktopGeometry READ desktopGeometry NOTIFY stateChanged)
   Q_PROPERTY(QString error READ error NOTIFY stateChanged)
   Q_PROPERTY(bool panelOpen READ panelOpen NOTIFY panelChanged)
   Q_PROPERTY(uint panelSerial READ panelSerial NOTIFY panelChanged)
@@ -26,6 +27,7 @@ public:
   explicit PluginSession(QObject *parent = nullptr);
   ~PluginSession() override;
   bool ready() const { return m_ready; }
+  bool desktopGeometry() const { return m_desktopGeometry; }
   QString error() const { return m_error; }
   bool panelOpen() const { return m_panelOpen; }
   uint panelSerial() const { return m_panelSerial; }
@@ -58,5 +60,6 @@ private:
   uint m_panelSerial = 0;
   bool m_panelOpen = false;
   bool m_ready = false;
+  bool m_desktopGeometry = false;
   bool m_started = false;
 };

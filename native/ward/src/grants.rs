@@ -435,6 +435,39 @@ impl Manifest {
 }
 
 impl Grants {
+  /// Worker adaptation data, not the signed host authority record. Do not leak
+  /// host filesystem paths/inodes or executable identities through this view.
+  pub fn worker_view(&self) -> serde_json::Value {
+    let mut view = serde_json::to_value(self).expect("grant serialization is infallible");
+    view["filesystem"] = self
+      .filesystem
+      .iter()
+      .map(|(name, grant)| {
+        (
+          name.clone(),
+          serde_json::json!({
+            "access": grant.access, "target": grant.target
+          }),
+        )
+      })
+      .collect::<serde_json::Map<_, _>>()
+      .into();
+    view["exec"] = self
+      .exec
+      .iter()
+      .map(|(name, grant)| {
+        (
+          name.clone(),
+          serde_json::json!({
+            "selected": grant.selected, "lifetime": grant.lifetime
+          }),
+        )
+      })
+      .collect::<serde_json::Map<_, _>>()
+      .into();
+    view
+  }
+
   pub fn validate(&self, requests: &Requests) -> io::Result<()> {
     validate_requests(requests)?;
     if self.network && (!self.http.is_empty() || self.network_proxy) {
@@ -801,6 +834,40 @@ pub(crate) fn invalid(message: &str) -> io::Error {
 mod tests {
   use super::*;
   use std::fs;
+  #[test]
+  fn worker_view_exposes_slots_without_host_authority_metadata() {
+    let root = tempfile::tempdir().unwrap();
+    let mut grants = Grants::default();
+    grants.filesystem.insert(
+      "documents".into(),
+      FileSystemGrant::select(root.path(), Access::Read, Target::Directory).unwrap(),
+    );
+    let ask: crate::exec::Ask = serde_json::from_value(serde_json::json!({
+      "executable": "/usr/bin/true", "tree": {"end":"run", "next":[]}
+    }))
+    .unwrap();
+    grants.exec.insert(
+      "tool".into(),
+      crate::exec::Grant::select(&ask, ["run".into()].into()).unwrap(),
+    );
+    let view = grants.worker_view();
+    assert_eq!(
+      view["filesystem"]["documents"],
+      serde_json::json!({"access":"read", "target":"directory"})
+    );
+    assert_eq!(view["exec"]["tool"]["selected"], serde_json::json!(["run"]));
+    for forbidden in ["path", "device", "inode"] {
+      assert!(view["filesystem"]["documents"].get(forbidden).is_none());
+    }
+    for forbidden in ["executable", "tree"] {
+      assert!(view["exec"]["tool"].get(forbidden).is_none());
+    }
+    assert!(
+      !serde_json::to_string(&view)
+        .unwrap()
+        .contains(root.path().to_str().unwrap())
+    );
+  }
   #[test]
   fn shared_worker_requires_supported_matching_entry_points() {
     let root = tempfile::tempdir().unwrap();

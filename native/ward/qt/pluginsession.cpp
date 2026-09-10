@@ -93,6 +93,7 @@ void PluginSession::stop() {
   m_session.reset();
   m_waiting.clear();
   m_ready = false;
+  m_desktopGeometry = false;
   m_panelOpen = false;
   m_panelSerial = 0;
   m_widgetSizes.clear();
@@ -126,6 +127,7 @@ void PluginSession::poll() {
       }
       switch (event.kind) {
         case omarchy::EventKind::Ready: m_ready = true; emit stateChanged(); break;
+        case omarchy::EventKind::Observation: m_desktopGeometry = event.desktop_geometry; emit stateChanged(); break;
         case omarchy::EventKind::TopologyReady: break;
         case omarchy::EventKind::PanelState:
           m_panelOpen = event.panel_open;
