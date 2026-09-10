@@ -1265,19 +1265,36 @@ ShellRoot {
     deliverIfLoaded(pluginId)
   }
 
-  function unregisterPanelLoader(pluginId) {
-    if (!panelLoaders[pluginId]) return
+  function unregisterPanelLoader(pluginId, loader) {
+    if (panelLoaders[pluginId] !== loader) return
     var next = ({})
     for (var k in panelLoaders) if (k !== pluginId) next[k] = panelLoaders[k]
     panelLoaders = next
   }
 
   function unloadPanels() {
-    for (var id in panelLoaders) hide(id)
-    panelEntries = []
-    panelLoaders = ({})
-    pendingPayloads = ({})
-    openPanelIds = ({})
+    // Local plugin discovery must not destroy the installer/reviewer that
+    // initiated it. Bundled code changes require a shell restart; only user
+    // panel code needs unloading before clearing the component cache.
+    for (var i = panelEntries.count - 1; i >= 0; i--) {
+      var id = panelEntries.get(i).pluginId
+      var manifest = shell.pluginRegistry.installedPlugins[id]
+      if (manifest && manifest.__isFirstParty === true) continue
+      retirePanel(id)
+      panelEntries.remove(i)
+    }
+  }
+
+  function retirePanel(id) {
+    // Disabled/removed IDs no longer resolve through hide(). Clear their
+    // queued state directly so a later enable cannot reopen a retired panel.
+    invokeIfLoaded(id, "close", null)
+    var open = ({})
+    for (var k in openPanelIds) if (k !== id) open[k] = openPanelIds[k]
+    openPanelIds = open
+    var pending = ({})
+    for (var p in pendingPayloads) if (p !== id) pending[p] = pendingPayloads[p]
+    pendingPayloads = pending
   }
 
   function deliverIfLoaded(pluginId) {
@@ -1323,7 +1340,10 @@ ShellRoot {
   // One Loader per discoverable panel/overlay/menu plugin. Active when the
   // host marks it open. The Loader holds onto the instance while active so the
   // plugin's FloatingWindow + state survive between summons within a session.
-  property var panelEntries: []
+  // A keyed, incrementally updated model preserves Loader identity when
+  // unrelated plugins/configuration change. Replacing a JS array recreates
+  // every delegate, including open panels and their in-flight commands.
+  property ListModel panelEntries: ListModel { }
 
   function computePanelEntries() {
     var out = []
@@ -1344,9 +1364,25 @@ ShellRoot {
     return out
   }
 
+  function syncPanelEntries() {
+    var desired = computePanelEntries()
+    var ids = desired.map(entry => entry.id)
+    var existing = ({})
+    for (var i = panelEntries.count - 1; i >= 0; i--) {
+      var id = panelEntries.get(i).pluginId
+      if (ids.indexOf(id) === -1) {
+        retirePanel(id)
+        panelEntries.remove(i)
+      } else existing[id] = true
+    }
+    for (var j = 0; j < ids.length; j++) {
+      if (!existing[ids[j]]) panelEntries.append({ pluginId: ids[j] })
+    }
+  }
+
   Connections {
     target: shell.pluginRegistry
-    function onPluginsChanged() { if (!shell.pluginReloading) shell.panelEntries = shell.computePanelEntries() }
+    function onPluginsChanged() { if (!shell.pluginReloading) shell.syncPanelEntries() }
   }
 
   Instantiator {
@@ -1355,11 +1391,11 @@ ShellRoot {
 
     delegate: QtObject {
       id: panelEntry
-      required property var modelData
-      readonly property string pluginId: modelData.id
-      readonly property var manifest: modelData.manifest
-      readonly property string entryKind: modelData.kind
-      readonly property bool keepLoaded: modelData.keepLoaded === true
+      required property string pluginId
+      readonly property var manifest: shell.pluginRegistry.installedPlugins[pluginId] || null
+      readonly property string entryKind: manifest && manifest.kinds.indexOf("panel") !== -1 ? "panel"
+        : manifest && manifest.kinds.indexOf("overlay") !== -1 ? "overlay" : "menu"
+      readonly property bool keepLoaded: manifest && manifest.keepLoaded === true
       readonly property string sourceUrl: shell.pluginRegistry.entryPointUrl(manifest, entryKind)
 
       property Loader panelLoader: Loader {
@@ -1390,7 +1426,7 @@ ShellRoot {
             shell.hide(panelEntry.pluginId)
           }
         }
-        Component.onDestruction: shell.unregisterPanelLoader(panelEntry.pluginId)
+        Component.onDestruction: shell.unregisterPanelLoader(panelEntry.pluginId, this)
       }
     }
   }
@@ -1532,7 +1568,7 @@ ShellRoot {
       }
       shell.pluginReloading = false
       shell._syncServices()
-      shell.panelEntries = shell.computePanelEntries()
+      shell.syncPanelEntries()
       shell.syncPluginWidgets()
     }
   }
@@ -1790,6 +1826,16 @@ ShellRoot {
           error: plugins[id].__installationError || null,
           clonedFrom: clonedFrom
         })
+      }
+      // A missing checkout must not hide a still-live native session. Runtime
+      // state comes from the host instance, never an approval's unit string.
+      for (var id of Object.keys(shell.sandboxedPlugins.instances)) {
+        if (plugins[id]) continue
+        var status = shell.sandboxedPlugins.status(id)
+        out.push({id: id, name: id, kinds: [], firstParty: false,
+          sandboxed: true, executionMode: "ward", canDisable: true,
+          enabled: status.state === "running", active: false,
+          error: "Isolated plugin checkout is missing or invalid"})
       }
       // Consumers should not each invent their own presentation order.
       out.sort(function(left, right) {

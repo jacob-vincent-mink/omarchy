@@ -489,7 +489,7 @@ ShellRoot {
     root.assertTrue(!registry.isEnabled("third.sandbox"), "native bar slot is never an in-process activation")
 
     root.assertTrue(changeCount > 0, "registry emits change notifications")
-    // A Ward identity is permanent even when approval preceded activation.
+    // A Ward identity survives checkout edits until explicit full removal.
     config = {plugins: [], bar: {layout: {left: [], center: [], right: []}}}
     var isolated = manifest("third.isolated", ["panel"], {panel: "Panel.qml"})
     registry.parseScanOutput(block("isolation", "host", ["third.isolated"])
@@ -504,6 +504,11 @@ ShellRoot {
     root.assertTrue(registry.isSandboxed("third.isolated"), "missing checkout retains isolated identity")
     registry.parseScanOutput(block("thirdparty", "/third/panel", manifest("third.panel", ["panel"], {panel: "Panel.qml"})))
     root.assertTrue(registry.isSandboxed("third.panel"), "unavailable identity discovery fails closed")
+    registry.scanning = true
+    registry.rescan()
+    root.assertTrue(registry.rescanPending, "review/approval refresh is not discarded during a concurrent scan")
+    registry.rescanPending = false
+    registry.scanning = false
     writeResult()
   }
 

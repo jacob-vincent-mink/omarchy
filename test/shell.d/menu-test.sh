@@ -343,11 +343,11 @@ assertEqual(
 )
 assertDeepEqual(
   defaultItems.filter(item => item.parent === 'setup.plugin').map(item => item.label),
-  ['Enable Plugin', 'Review Plugin Access', 'Disable Plugin', 'Add Plugin', 'Clone Plugin', 'Remove Plugin'],
+  ['Enable Plugin', 'Disable Plugin', 'Add Plugin', 'Manage Plugins', 'Clone Plugin', 'Remove Plugin'],
   'menu manages plugins from Setup > Plugins'
 )
 assert(
-  ['review', 'enable', 'disable', 'clone', 'remove'].every(
+  ['enable', 'disable', 'clone', 'remove'].every(
     verb => defaultById[`setup.plugin.${verb}`].action === `omarchy-menu-plugin ${verb}`
   ),
   'menu picks a plugin the way it already picks a theme or a timezone'
@@ -361,9 +361,10 @@ assert(
   'menu hides Remove until a plugin the user installed exists to delete'
 )
 assert(
-  defaultById['setup.plugin.add'].action.includes('omarchy-plugin-add'),
-  'menu adds a plugin through the CLI, where the trust warning and clone output are visible'
+  defaultById['setup.plugin.add'].action === 'omarchy-plugin-manage --add',
+  'menu adds a plugin through the graphical manager'
 )
+assert(!defaultById['setup.plugin.review'] && defaultById['setup.plugin.manage'].action === 'omarchy-plugin-manage', 'permission review belongs to Manage Plugins, not a separate menu entry')
 
 const pluginPicker = fs.readFileSync(path.join(root, 'bin/omarchy-menu-plugin'), 'utf8')
 assert(

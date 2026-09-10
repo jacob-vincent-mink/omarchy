@@ -2,7 +2,7 @@
 
 # omarchy:summary=Add a shell plugin from git
 # omarchy:group=plugin
-# omarchy:args=[git-url] [--yolo|--trusted-local] [--inspect] [--commit <sha>] [--json] [--enable] [--yes]
+# omarchy:args=[git-url] [--yolo|--trusted-local] [--inspect|--stage] [--commit <sha>] [--json] [--enable] [--yes]
 # omarchy:examples=omarchy plugin add https://github.com/acme/omarchy-weather.git | omarchy plugin add ./my-plugin --trusted-local
 # omarchy:alias=omarchy plugin install
 
@@ -16,6 +16,7 @@ ASSUME_YES=0
 mode="ward"
 explicit_mode=0
 inspect=0
+review_stage=0
 json=0
 expected_commit=""
 
@@ -83,6 +84,10 @@ while (( $# > 0 )); do
     inspect=1
     shift
     ;;
+  --stage)
+    review_stage=1
+    shift
+    ;;
   --json)
     json=1
     shift
@@ -96,10 +101,11 @@ while (( $# > 0 )); do
     shift
     ;;
   -h | --help)
-    echo "Usage: omarchy plugin add [git-url] [--yolo|--trusted-local] [--inspect] [--commit <sha>] [--json] [--enable] [--yes]"
+    echo "Usage: omarchy plugin add [git-url] [--yolo|--trusted-local] [--inspect|--stage] [--commit <sha>] [--json] [--enable] [--yes]"
     echo "Defaults to Ward isolation. --yolo explicitly trusts unsandboxed in-process code."
     echo "--trusted-local accepts only an existing local Git folder. --yes never selects YOLO."
     echo "--inspect clones and validates without installing or running code."
+    echo "--stage retains a unique Ward checkout for permission review; requires --json."
     exit 0
     ;;
   -*)
@@ -134,19 +140,23 @@ fi
 [[ $mode != "trusted-local" || $source_kind == "local" ]] || fail "--trusted-local requires an existing local Git folder"
 (( ! inspect )) || [[ -z $enable_after ]] || fail "--inspect cannot enable a plugin"
 (( ! json )) || [[ -z $enable_after ]] || fail "--json reports installation only; enable separately"
+if (( review_stage )); then
+  (( ! inspect && json )) && [[ $mode == "ward" && -z $enable_after ]] || fail "--stage requires Ward mode and --json, without --inspect or --enable"
+fi
 
 if [[ $mode != "ward" ]]; then
   echo "WARNING: $mode runs arbitrary code inside your desktop shell, with your files, accounts and network. Ward provides no containment." >&2
 fi
-if (( ! ASSUME_YES && ! inspect )); then
+if (( ! ASSUME_YES && ! inspect && ! review_stage )); then
   echo "Source: $url · Mode: $mode" >&2
   confirm "Clone and add this plugin?" || fail "aborted"
 fi
 
 mkdir -p "$PLUGINS_DIR"
 
-stage=$(mktemp -d "$PLUGINS_DIR/.add.XXXXXXXX")
-trap '[[ -z $stage ]] || rm -rf -- "$stage"' EXIT
+staging=$(mktemp -d "$PLUGINS_DIR/.add.XXXXXXXX")
+stage="$staging/checkout"
+trap '[[ -z $staging ]] || rm -rf -- "$staging"' EXIT
 if ! git clone -- "$url" "$stage" >&2; then
   fail "failed to clone $url"
 fi
@@ -157,6 +167,12 @@ if ! validation=$(omarchy-plugin-validate "$stage" 2>&1); then
 fi
 
 id=$(jq -r '.id' "$stage/manifest.json")
+# Serialize publication with staged-review publication. Cloning itself does
+# not hold the lock, so independent review attempts remain independent.
+if (( ! inspect && ! review_stage )); then
+  exec {install_lock}>"$PLUGINS_DIR/.install.lock"
+  flock "$install_lock"
+fi
 existing_manifest=$(plugin_id_manifest "$id") || {
   fail "could not inspect installed plugin ids"
 }
@@ -193,12 +209,20 @@ if (( inspect )); then
   exit 0
 fi
 
+if (( review_stage )); then
+  report=$(jq -c --arg stage "${staging##*/}" '. + {stage: $stage}' <<<"$report")
+  printf '%s\n' "$report" > "$staging/record.json"
+  printf '%s\n' "$report"
+  staging=""
+  exit 0
+fi
+
 if [[ $mode == "ward" ]]; then
   omarchy-plugin-isolation mark "$id"
 fi
 # Publish host provenance before the checkout can be observed by the shell.
 omarchy-plugin-installation record "$id" "$mode" "$source_kind" "$url" "$commit"
-mv "$stage" "$target"
+mv -T "$stage" "$target"
 stage=""
 if (( json )); then
   jq '.installed = true' <<<"$report"

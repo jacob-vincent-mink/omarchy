@@ -285,7 +285,7 @@ fn admitted_http_is_scoped_bounded_and_revocable_in_a_real_worker() {
       .chain([("post".into(), serde_json::json!({"scope":{"origin":origin, "method":"POST", "path":"/graphql", "body":{"query":{"kind":"exact","value":query}}}}))]).collect();
     fs::write(source.join("manifest.json"), serde_json::to_vec(&serde_json::json!({
       "schemaVersion":1, "id":"test.http", "name":"HTTP test", "version":"1", "kinds":["panel"], "entryPoints":{"panel":"worker.qml"},
-      "sandbox":{"version":1, "entryPoint":"worker.qml", "requests":{"http":scopes,"notifications":true,"filesystem":[{"name":"cli","access":"read"}]}}
+      "sandbox":{"version":1, "entryPoint":"worker.qml", "requests":{"http":scopes,"notifications":true,"filesystem":[{"name":"cli","path":env!("CARGO_BIN_EXE_omarchy-ward"),"target":"file","access":"read"}]}}
     })).unwrap()).unwrap();
     fs::write(
       source.join("worker.qml"),

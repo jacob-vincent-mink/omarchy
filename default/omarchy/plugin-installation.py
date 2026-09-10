@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -97,7 +98,7 @@ def save(record):
     if record["id"] in retained:
       raise ValueError("retained Ward identity cannot become trusted in-process code")
   directory.mkdir(mode=0o700, exist_ok=True)
-  # The directory survives interruption/removal: absent JSON is blocked, not
+  # The directory survives interruption: absent JSON is blocked, not
   # a newly discovered legacy/trusted plugin. Publish the complete record last.
   fd, temporary = tempfile.mkstemp(prefix=".record-", dir=directory)
   try:
@@ -121,6 +122,17 @@ try:
   operation, *args = sys.argv[1:]
   if operation == "list" and not args:
     print(json.dumps(rows()))
+  elif operation == "forget" and len(args) == 1:
+    identity = args[0]
+    if not valid_id(identity):
+      raise ValueError("invalid plugin identity")
+    if root.is_symlink():
+      raise ValueError("invalid installation state directory")
+    directory = root / identity
+    if directory.is_symlink():
+      directory.unlink()
+    elif directory.exists():
+      shutil.rmtree(directory)
   elif operation == "record" and len(args) == 5:
     identity, mode, kind, source, commit = args
     if mode not in ("ward", "yolo", "trusted-local") or kind not in ("git", "local"):
@@ -131,7 +143,7 @@ try:
       raise ValueError("invalid installed commit")
     save({"version": 1, "id": identity, "mode": mode, "sourceKind": kind, "source": source, "commit": commit})
   else:
-    raise ValueError("expected list or record <id> <mode> <source-kind> <source> <commit>")
+    raise ValueError("expected list, forget <id>, or record <id> <mode> <source-kind> <source> <commit>")
 except (ValueError, OSError, subprocess.SubprocessError) as error:
   print(f"omarchy-plugin-installation: {error}", file=sys.stderr)
   sys.exit(1)

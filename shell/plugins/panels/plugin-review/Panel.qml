@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
 import Quickshell
+import Quickshell.Hyprland
 import qs.Commons
 import qs.Ui
 
@@ -10,34 +11,43 @@ Item {
   property var shell: null
   property var manifest: null
   property bool opened: false
+  property bool detailsExpanded: false
   readonly property alias review: review
 
   function open(payloadJson) {
     var payload = {}
     try { payload = JSON.parse(payloadJson || "{}") || {} } catch (e) {}
     opened = true
-    if (!review.load(String(payload.id || "")) && review.busy)
-      review.error = "Wait for the current command before reviewing another plugin."
+    detailsExpanded = false
+    if (!review.load(String(payload.id || ""), String(payload.stage || "")) && review.busy)
+      review.error = "Wait for the current action to finish before reviewing another plugin."
   }
-  function close() { opened = false }
+  function close() {
+    if (review.stage && !review.busy) {
+      Quickshell.execDetached(["omarchy-plugin-stage", "discard", review.stage])
+      review.stage = ""
+    }
+    opened = false
+  }
   function dismiss() {
     if (shell && typeof shell.hide === "function") shell.hide("omarchy.plugin-review")
     else close()
   }
 
-  Review { id: review }
+  Review { id: review; onCompleted: root.dismiss() }
 
   KeyboardPanel {
     id: panel
     objectName: "plugin-review-window"
     anchorItem: null
     bar: null
+    centerOnScreen: true
     owner: QtObject { function close() { root.dismiss() } }
-    screen: Quickshell.screens[0] || null
+    screen: Quickshell.screens.find(screen => screen.name === Hyprland.focusedMonitor?.name) || Quickshell.screens[0] || null
     open: root.opened
     focusTarget: content
     contentWidth: fittedContentWidth(Style.space(540))
-    contentHeight: cappedContentHeight(Style.space(620))
+    contentHeight: cappedContentHeight(Math.min(Style.space(620), contentLayout.implicitHeight + padding * 2 + Border.top(borderSpec) + Border.bottom(borderSpec)))
 
     FocusScope {
       id: content
@@ -45,12 +55,13 @@ Item {
       Keys.onEscapePressed: root.dismiss()
 
       ColumnLayout {
+        id: contentLayout
         anchors.fill: parent
         spacing: Style.spacing.panelGap
 
         RowLayout {
           Layout.fillWidth: true
-          Label { text: "Ward · Plugin access"; font.pixelSize: Style.font.heading; font.bold: true; Layout.fillWidth: true }
+          Label { text: "Plugin permissions"; font.pixelSize: Style.font.heading; font.bold: true; Layout.fillWidth: true }
           Button {
             objectName: "review-close"
             text: "Close"; focusable: true
@@ -62,14 +73,22 @@ Item {
         ColumnLayout {
           Layout.fillWidth: true
           spacing: Style.spacing.labelGap
-          Label { text: review.revision ? review.revision.name : review.pluginId; font.pixelSize: Style.font.title; font.bold: true; Layout.fillWidth: true }
-          Label {
-            text: review.revision ? review.pluginId + "  ·  " + review.revision.version : "Reading the installed plugin…"
-            color: Color.muted; Layout.fillWidth: true
+          RowLayout {
+            Layout.fillWidth: true
+            Label { text: review.revision ? review.revision.name : review.pluginId; font.pixelSize: Style.font.title; font.bold: true; Layout.fillWidth: true }
+            Disclosure {
+              label: "Details"
+              expanded: root.detailsExpanded
+              onToggled: root.detailsExpanded = !root.detailsExpanded
+            }
           }
           Label {
-            text: review.current ? (review.current.enabled ? "Currently enabled" : review.current.approved ? "Currently approved, not enabled" : "Not approved") : "Checking current state…"
-            color: Color.muted; Layout.fillWidth: true
+            visible: root.detailsExpanded
+            Layout.fillWidth: true
+            wrapMode: Text.WrapAnywhere
+            text: review.revision ? review.pluginId + " · " + review.revision.version + "\n" + review.revision.revision : ""
+            font.pixelSize: Style.font.bodySmall
+            color: Color.muted
           }
         }
 
@@ -80,269 +99,419 @@ Item {
           objectName: "review-scroll"
           Layout.fillWidth: true
           Layout.fillHeight: true
+          Layout.preferredHeight: permissions.implicitHeight
           clip: true
           contentWidth: availableWidth
           Controls.ScrollBar.horizontal.policy: Controls.ScrollBar.AlwaysOff
           Controls.ScrollBar.vertical.policy: contentHeight > availableHeight ? Controls.ScrollBar.AlwaysOn : Controls.ScrollBar.AlwaysOff
 
           Column {
+            id: permissions
             width: scroll.availableWidth
             spacing: Style.spacing.rowGap
             enabled: !!review.revision && !review.busy
 
-            Label { text: "Exact revision"; font.bold: true; width: parent.width }
-            Label {
-              text: review.revision ? review.revision.revision : ""
-              font.pixelSize: Style.font.bodySmall; color: Color.muted
-              wrapMode: Text.WrapAnywhere; width: parent.width
-            }
-            Label {
-              text: "Select only the access you want to allow. Required requests must be granted before starting; all others are optional. Unselected access stays denied."
-              width: parent.width
-            }
-            Toggle {
+            Permission {
               width: parent.width
               visible: !!review.revision && review.revision.requests.network
-              label: review.requestLabel("network", "Network")
-              description: "Unrestricted Internet and local services. Selecting this clears scoped HTTP and public proxy selections."
+              label: review.requestLabel("network", "Internet and local network")
+              description: "Any destination, port and protocol, including local services. Send, receive and listen. No URL or request restrictions."
+              fixed: review.isRequired("network")
+              enabled: fixed || review.atomicEditable("network")
               checked: review.network
-              onClicked: review.network = !review.network
+              onClicked: review.toggleAtomic("network")
             }
-            Toggle {
+            Permission {
               width: parent.width
               visible: !!review.revision && review.revision.requests.networkProxy
               objectName: "review-network-proxy"
-              label: review.requestLabel("networkProxy", "Public streaming proxy")
-              description: "Connect to public Internet destinations, including opaque TCP tunnels. Can transmit data. No local services or per-URL restrictions."
+              label: review.requestLabel("networkProxy", "Public Internet connections")
+              description: "Any public destination and TCP port, including bidirectional tunnels. Local/private destinations blocked. No site, URL or body restrictions."
+              fixed: review.isRequired("networkProxy")
+              enabled: fixed || review.atomicEditable("networkProxy")
               checked: review.networkProxy
-              onClicked: review.networkProxy = !review.networkProxy
+              onClicked: review.toggleAtomic("networkProxy")
             }
-            Toggle {
+            Permission {
               width: parent.width
               visible: !!review.revision && review.revision.requests.notifications
-              label: review.requestLabel("notifications", "Notifications")
+              label: review.requestLabel("notifications", "Send notifications")
               objectName: "review-notifications"
-              description: "Send bounded text notifications. No actions or images."
+              description: "Show text notifications. No images or action buttons."
+              fixed: review.isRequired("notifications")
+              enabled: fixed || review.atomicEditable("notifications")
               checked: review.notifications
-              onClicked: review.notifications = !review.notifications
+              onClicked: review.toggleAtomic("notifications")
             }
-            Toggle {
+            Permission {
               width: parent.width
               visible: !!review.revision && review.revision.requests.audioPlayback
               objectName: "review-audio-playback"
               label: review.requestLabel("audioPlayback", "Play audio")
-              description: "Play on the default output. No microphone, recording or control of other players."
+              description: "Default output only. No recording or player control."
+              fixed: review.isRequired("audioPlayback")
+              enabled: fixed || review.atomicEditable("audioPlayback")
               checked: review.audioPlayback
-              onClicked: review.audioPlayback = !review.audioPlayback
+              onClicked: review.toggleAtomic("audioPlayback")
             }
-            Toggle {
+            Permission {
               width: parent.width
               visible: !!review.revision && review.revision.requests.microphone
               objectName: "review-microphone"
-              label: review.requestLabel("microphone", "Record microphone input")
-              description: "Record the default input, including a virtual source if you selected one. Captured audio cannot be retracted."
+              label: review.requestLabel("microphone", "Record microphone")
+              description: "Default input, including a virtual input if selected."
+              fixed: review.isRequired("microphone")
+              enabled: fixed || review.atomicEditable("microphone")
               checked: review.microphone
-              onClicked: review.microphone = !review.microphone
+              onClicked: review.toggleAtomic("microphone")
             }
-            Toggle {
+            Permission {
               width: parent.width
               visible: !!review.revision && review.revision.requests.audioCapture
               objectName: "review-audio-capture"
-              label: review.requestLabel("audioCapture", "Record system output")
-              description: "Record the default output monitor, including other applications' audio. Captured audio cannot be retracted."
+              label: review.requestLabel("audioCapture", "Record system audio")
+              description: "Default output, including other apps' audio."
+              fixed: review.isRequired("audioCapture")
+              enabled: fixed || review.atomicEditable("audioCapture")
               checked: review.audioCapture
-              onClicked: review.audioCapture = !review.audioCapture
+              onClicked: review.toggleAtomic("audioCapture")
             }
             Repeater {
               model: review.settingRequests
-              delegate: Toggle {
+              delegate: Permission {
                 required property var modelData
                 width: parent.width
-                label: review.requestLabel("settings", (modelData.access === "read" ? "Read" : "Write") + " own setting: " + modelData.key)
+                label: review.requestLabel("settings", (modelData.access === "read" ? "Read" : "Change") + " setting")
                 objectName: "review-setting-" + modelData.access + "-" + modelData.key
-                description: modelData.access === "read" ? "Read this key and receive its updates. Other keys remain hidden."
-                  : "Change this key only. Reading its value requires separate access."
+                description: modelData.key + "\n" + (modelData.access === "read" ? "This plugin's whole value and live updates."
+                  : "This plugin's whole value; unrestricted values. No read access.")
+                fixed: review.isRequired("settings")
                 checked: review.settings[modelData.access].indexOf(modelData.key) !== -1
                 onClicked: review.toggleSetting(modelData.access, modelData.key)
               }
             }
             Repeater {
               model: review.httpRequests
-              delegate: Column {
+              delegate: PermissionBlock {
+                id: httpPermission
                 required property string modelData
                 readonly property var ask: review.revision.requests.http[modelData]
+                property bool expanded: false
                 width: parent.width
                 spacing: Style.spacing.labelGap
-                Toggle {
+                Permission {
                   width: parent.width
                   objectName: "review-http-" + modelData
-                  label: "HTTP: " + modelData + (ask.required ? " · required" : "")
-                  description: "Only the request scope below. Selecting this turns off unrestricted networking."
+                  label: "HTTP request" + review.requirementLabel(ask.required)
+                  description: ask.scope.method + " " + ask.scope.origin + ask.scope.path
+                  borderSpec: Border.none()
+                  fixed: ask.required
+                  enabled: fixed || !review.isRequired("network")
                   checked: review.http.indexOf(modelData) !== -1
                   onClicked: review.toggleHttp(modelData)
+                }
+                Disclosure {
+                  objectName: "review-http-details-" + modelData
+                  width: parent.width
+                  label: "Scope"
+                  expanded: httpPermission.expanded
+                  onToggled: httpPermission.expanded = !httpPermission.expanded
                 }
                 Label {
                   objectName: "review-http-scope-" + modelData
                   width: parent.width
+                  visible: httpPermission.expanded
                   wrapMode: Text.WrapAnywhere
-                  text: ask.scope.method + " " + ask.scope.origin + ask.scope.path
-                    + (ask.scope.subtree ? " (subtree)" : ask.scope.path.indexOf("*") !== -1 ? " (* matches one path segment)" : " (exact path)")
-                    + "\nQuery: " + JSON.stringify(ask.scope.query)
-                    + "\nJSON body: " + JSON.stringify(ask.scope.body)
+                  text: review.httpDescription(ask.scope) + "\nNo host credentials or automatic redirects."
                   font.pixelSize: Style.font.bodySmall
                   color: Color.muted
                 }
+                Label {
+                  width: parent.width
+                  visible: review.networkProxy
+                  text: "The selected public proxy is not limited by this HTTP scope."
+                  color: Color.urgent
+                }
               }
             }
-            Toggle {
+            Permission {
               width: parent.width
               visible: !!review.revision && review.revision.requests.openUrls
-              label: review.requestLabel("openUrls", "Open web links")
+              label: review.requestLabel("openUrls", "Open links in your browser")
               objectName: "review-open-urls"
-              description: "Use your browser sessions, even without a click. Links can send data or reach local sites. HTTP(S) only."
+              description: "Any HTTP(S) URL, including local sites, using your browser sessions. Can send data without a click. No domain or path restriction."
+              fixed: review.isRequired("openUrls")
+              enabled: fixed || review.atomicEditable("openUrls")
               checked: review.openUrls
-              onClicked: review.openUrls = !review.openUrls
+              onClicked: review.toggleAtomic("openUrls")
             }
             Label {
               visible: review.execRequests.length > 0
               width: parent.width
-              text: "Host commands use your existing accounts, files and network. Select each complete invocation below; additional arguments remain denied. Commands can have lasting effects, and revocation cannot undo them."
+              text: "Host commands can use your files, accounts and network."
               color: Color.urgent
             }
             Repeater {
               model: review.execRequests
-              delegate: Column {
+              delegate: PermissionBlock {
+                id: execPermission
                 required property var modelData
+                property bool expanded: false
                 width: parent.width
                 spacing: Style.spacing.labelGap
-                Toggle {
+                Permission {
                   width: parent.width
                   objectName: "review-exec-" + modelData.name + "-" + modelData.leaf
-                  label: modelData.name + ": " + modelData.leaf + (modelData.required ? " · required" : "")
-                  description: modelData.executable + (modelData.lifetime === "plugin"
-                    ? " · Long-running; stops with its caller or plugin. No ten-second deadline."
-                    : " · Ten-second deadline.")
+                  label: "Host command" + review.requirementLabel(modelData.required)
+                  description: modelData.executable
+                  borderSpec: Border.none()
+                  fixed: modelData.required
                   checked: Object.prototype.hasOwnProperty.call(review.exec, modelData.name)
                     && review.exec[modelData.name].indexOf(modelData.leaf) !== -1
                   onClicked: review.toggleExec(modelData.name, modelData.leaf)
                 }
+                Disclosure {
+                  objectName: "review-exec-details-" + modelData.name + "-" + modelData.leaf
+                  width: parent.width
+                  label: "Command"
+                  expanded: execPermission.expanded
+                  onToggled: execPermission.expanded = !execPermission.expanded
+                }
                 Label {
                   width: parent.width
+                  visible: execPermission.expanded
                   wrapMode: Text.WrapAnywhere
-                  text: "Arguments (one per line):\n" + modelData.command
+                  text: modelData.command
                   font.pixelSize: Style.font.bodySmall
                   color: Color.muted
                 }
               }
             }
-            Column {
+            Permission {
               width: parent.width
               visible: !!review.revision && review.revision.requests.media
-              spacing: Style.spacing.labelGap
-              Label { text: review.requestLabel("media", "One media player"); font.bold: true; width: parent.width }
-              Label { text: "Read playback state and control this exact MPRIS service. Leave blank to deny."; color: Color.muted; width: parent.width }
-              TextField {
-                width: parent.width; implicitHeight: Math.max(40, Style.spacing.controlHeight)
-                placeholderText: "org.mpris.MediaPlayer2.PlayerName"
-                text: review.media
-                onTextEdited: review.media = text
-              }
+              objectName: "review-media"
+              label: review.requestLabel("media", "Control media player")
+              description: (review.revision?.requests.media?.service || "")
+                + "\nRead properties; play, pause, stop, next, previous and seek only."
+              fixed: review.isRequired("media")
+              enabled: fixed || review.atomicEditable("media")
+              checked: review.media
+              onClicked: review.toggleAtomic("media")
             }
             Repeater {
               model: review.folderRequests
-              Column {
+              PermissionBlock {
                 required property var modelData
                 width: parent.width
                 spacing: Style.spacing.labelGap
-                Label {
-                  text: "Folder: " + modelData.name + (modelData.required ? " · required" : "")
-                  font.bold: true; width: parent.width
-                }
-                Label {
-                  text: "Choose an absolute folder path, or leave blank to deny."
-                    + (modelData.access === "readwrite" ? " This plugin requests read-write access." : " Files inside are readable, not writable.")
-                  color: Color.muted; width: parent.width
-                }
-                TextField {
+                Permission {
                   objectName: "review-folder-" + modelData.name
-                  width: parent.width; implicitHeight: Math.max(40, Style.spacing.controlHeight)
-                  placeholderText: "/absolute/folder"
-                  text: typeof review.folders[modelData.name] === "string" ? review.folders[modelData.name] : ""
-                  onTextEdited: review.setFolder(modelData.name, text)
-                }
-                Toggle {
-                  objectName: "review-write-" + modelData.name
+                  borderSpec: Border.none()
                   width: parent.width
-                  visible: modelData.access === "readwrite"
-                  label: "Allow changes to this folder"
-                  description: "Read and change real host files. Disabling the plugin cannot undo completed writes."
-                  checked: review.writableFolders[modelData.name] === true
-                  onClicked: review.setWritable(modelData.name, !checked)
+                  label: (modelData.access === "readwrite" ? "Read and change " : "Read ")
+                    + (modelData.target === "file" ? "file" : "folder") + review.requirementLabel(modelData.required)
+                  description: modelData.access === "readwrite"
+                    ? (modelData.target === "file" ? "This file only; replacement requires reapproval."
+                      : "All files and subfolders, including creation and deletion.") + " Changes cannot be undone by revoking."
+                    : modelData.target === "file" ? "This file only; replacement requires reapproval." : "All files and subfolders."
+                  fixed: modelData.required
+                  checked: review.folders[modelData.name] === true
+                  onClicked: review.setFolder(modelData.name, !checked)
+                }
+                Label {
+                  width: parent.width
+                  text: review.revision.paths[modelData.name]
+                    + (modelData.path !== review.revision.paths[modelData.name] ? "\nDeclared: " + modelData.path : "")
+                  wrapMode: Text.WrapAnywhere
+                  color: Color.muted
                 }
               }
             }
-            Toggle {
+            Permission {
               visible: !!review.revision && review.revision.requests.storage
               objectName: "review-storage"
               width: parent.width
-              label: review.requestLabel("storage", "Private persistent storage")
-              description: "Keep this plugin's own data across restarts. Revocation removes access but retains saved data."
+              label: review.requestLabel("storage", "Save plugin data")
+              description: "Persistent private home (/home/plugin). No disk quota. Data is kept after revoking."
+              fixed: review.isRequired("storage")
+              enabled: fixed || review.atomicEditable("storage")
               checked: review.storage
-              onClicked: review.storage = !review.storage
+              onClicked: review.toggleAtomic("storage")
             }
             Label {
               visible: !!review.revision && !review.revision.requests.network && !review.revision.requests.notifications && review.settingRequests.length === 0 && !review.revision.requests.openUrls
                 && !review.revision.requests.networkProxy
                 && !review.revision.requests.audioPlayback && !review.revision.requests.microphone && !review.revision.requests.audioCapture
-                && !review.revision.requests.media && !review.revision.requests.storage && !review.revision.requests.desktopGeometry && review.folderRequests.length === 0 && review.httpRequests.length === 0
-              text: "This revision requests no additional access."
+                && !review.revision.requests.media && !review.revision.requests.storage && !review.revision.requests.desktopGeometry && review.folderRequests.length === 0 && review.httpRequests.length === 0 && review.execRequests.length === 0
+              text: "This plugin requests no permissions."
               color: Color.muted; width: parent.width
             }
-            Toggle {
+            Permission {
               visible: !!review.revision && review.revision.requests.desktopGeometry
               objectName: "review-desktop-geometry"
               width: parent.width
-              label: review.requestLabel("desktopGeometry", "Read desktop geometry")
-              description: "Observe all window rectangles, workspaces and output layout. No titles, content or window control."
+              label: review.requestLabel("desktopGeometry", "Read window and screen layout")
+              description: "All window, workspace and screen geometry. No titles, contents or control."
+              fixed: review.isRequired("desktopGeometry")
+              enabled: fixed || review.atomicEditable("desktopGeometry")
               checked: review.desktopGeometry
-              onClicked: review.desktopGeometry = !review.desktopGeometry
+              onClicked: review.toggleAtomic("desktopGeometry")
             }
           }
         }
 
         Label {
           Layout.fillWidth: true
-          text: review.error || (review.busy ? "Working: " + review.operation + "…"
-            : review.current && review.current.enabled && !review.selectionApproved ? "Disable and revoke before changing a running plugin's access." : review.notice)
+          text: review.error || (review.busy ? review.progressText : review.notice)
           color: review.error ? Color.urgent : Color.muted
           font.pixelSize: Style.font.bodySmall
           maximumLineCount: 4
           elide: Text.ElideRight
           visible: text !== ""
         }
+        Label {
+          visible: !!review.pluginId && !review.stage
+          Layout.fillWidth: true
+          text: "Deny & Remove permanently deletes this plugin, its saved plugin data and permission history."
+          color: Color.muted
+          font.pixelSize: Style.font.bodySmall
+        }
         Flow {
           Layout.fillWidth: true
           spacing: Style.spacing.controlGap
           Button {
-            text: "Refresh"; focusable: true; enabled: !review.busy
+            text: "Deny & Remove"; focusable: true; enabled: !review.busy && !!review.pluginId
+            opacity: enabled ? 1 : 0.4
+            objectName: "review-remove"
             implicitHeight: Math.max(40, Style.spacing.controlHeight)
-            onClicked: review.load(review.pluginId)
+            onClicked: review.remove()
           }
           Button {
-            text: "Disable & revoke"; focusable: true; enabled: !review.busy && !!review.revision
-            objectName: "review-revoke"
-            implicitHeight: Math.max(40, Style.spacing.controlHeight)
-            onClicked: review.revoke()
-          }
-          Button {
-            text: review.current && review.current.enabled ? "Enabled" : review.selectionApproved ? "Enable plugin" : "Approve selection"
+            text: review.current && review.current.enabled ? "Enabled" : "Enable"
             objectName: "review-approve"
-            selected: true; focusable: true; enabled: !review.busy && !!review.revision && !(review.current && review.current.enabled)
+            selected: true; focusable: true; enabled: !review.busy && review.requiredAccepted && !(review.current && review.current.enabled)
+            opacity: enabled ? 1 : 0.4
             implicitHeight: Math.max(40, Style.spacing.controlHeight)
-            onClicked: review.selectionApproved ? review.enable() : review.approve()
+            onClicked: review.enable()
           }
         }
       }
+    }
+  }
+
+  component Permission: Item {
+    id: permission
+    property string label: ""
+    property string description: ""
+    property bool checked: false
+    property bool fixed: false
+    property var borderSpec: null
+    signal clicked()
+    implicitHeight: content.item ? content.item.implicitHeight : 0
+    implicitWidth: Style.space(240)
+
+    Loader {
+      id: content
+      width: parent.width
+      sourceComponent: permission.fixed ? fixedRow : optionalRow
+    }
+    Component {
+      id: optionalRow
+      Toggle {
+        objectName: "permission-toggle"
+        label: permission.label
+        description: permission.description
+        checked: permission.checked
+        borderSpec: permission.borderSpec || _borderSpec
+        onClicked: permission.clicked()
+      }
+    }
+    Component {
+      id: fixedRow
+      BorderSurface {
+        id: fixedSurface
+        objectName: "permission-required"
+        color: "transparent"
+        borderSpec: permission.borderSpec || Border.controlSpec("normal", Color.foreground, Color.accent)
+        implicitHeight: Math.max(54, textColumn.implicitHeight + Style.spacing.huge)
+        Accessible.role: Accessible.StaticText
+        Accessible.name: permission.label
+        Accessible.description: permission.description
+
+        Column {
+          id: textColumn
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.leftMargin: fixedSurface.borderLeft + Style.spacing.rowPaddingX
+          anchors.rightMargin: fixedSurface.borderRight + Style.spacing.rowPaddingX
+          spacing: Style.spacing.xs
+          Label {
+            width: parent.width
+            text: permission.label
+            color: Color.foreground
+            font.pixelSize: Style.font.subtitle
+            font.bold: true
+          }
+          Label {
+            width: parent.width
+            visible: permission.description !== ""
+            text: permission.description
+            color: Qt.darker(Color.foreground, 1.5)
+            font.pixelSize: Style.font.caption
+          }
+        }
+      }
+    }
+  }
+
+  component PermissionBlock: BorderSurface {
+    id: block
+    default property alias content: body.data
+    property alias spacing: body.spacing
+    padding: Style.spacing.rowGap
+    borderSpec: Border.controlSpec("normal", Color.popups.text, Color.accent)
+    color: "transparent"
+    implicitHeight: body.implicitHeight + contentTopInset + contentBottomInset
+    property Column layout: Column {
+      id: body
+      parent: block
+      x: block.contentLeftInset
+      y: block.contentTopInset
+      width: block.width - block.contentLeftInset - block.contentRightInset
+    }
+  }
+
+  component Disclosure: Item {
+    id: disclosure
+    property string label: ""
+    property bool expanded: false
+    signal toggled()
+    implicitWidth: disclosureText.implicitWidth + Style.spacing.rowPaddingX * 2
+    implicitHeight: Math.max(40, Style.spacing.controlHeight)
+    activeFocusOnTab: true
+    Accessible.role: Accessible.Button
+    Accessible.name: label
+    Accessible.onPressAction: toggled()
+    Keys.onReturnPressed: toggled()
+    Keys.onEnterPressed: toggled()
+    Keys.onSpacePressed: toggled()
+    Label {
+      id: disclosureText
+      anchors.left: parent.left
+      anchors.leftMargin: Style.spacing.rowPaddingX
+      anchors.verticalCenter: parent.verticalCenter
+      text: (disclosure.expanded ? "⌄ " : "› ") + disclosure.label
+      color: disclosure.activeFocus || disclosureMouse.containsMouse ? Color.accent : Color.muted
+      font.pixelSize: Style.font.bodySmall
+    }
+    MouseArea {
+      id: disclosureMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: disclosure.toggled()
     }
   }
 

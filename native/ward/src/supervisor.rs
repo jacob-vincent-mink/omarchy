@@ -146,6 +146,94 @@ impl Unit {
     Ok(unit)
   }
 
+  /// Emergency teardown when the signed grant record cannot be read. Discover
+  /// only generated services whose live main process names this exact store
+  /// and plugin. No paths or unit names from the damaged record are trusted.
+  pub(crate) fn stop_matching(store: &Path, id: &str) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let output = successful(
+      timed("systemctl")
+        .args([
+          "--user",
+          "list-units",
+          "--all",
+          "--plain",
+          "--no-legend",
+          "--no-pager",
+          "--full",
+          "omarchy-ward-*.service",
+        ])
+        .output()?,
+    )?;
+    let listing = std::str::from_utf8(&output.stdout)
+      .map_err(|_| io::Error::other("invalid controller service listing"))?;
+    if listing.len() > 256 * 1024 || listing.lines().count() > 256 {
+      return Err(io::Error::other("too many controller services to recover"));
+    }
+    let mut failure = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    for name in listing
+      .lines()
+      .filter_map(|line| line.split_whitespace().next())
+    {
+      if validate_name(name).is_err() {
+        continue;
+      }
+      if std::time::Instant::now() >= deadline {
+        failure = Some(io::Error::other("controller recovery discovery timed out"));
+        break;
+      }
+      let stopped = (|| -> io::Result<()> {
+        let output = successful(
+          timed("systemctl")
+            .args(["--user", "show", "--property=MainPID", "--value", name])
+            .output()?,
+        )?;
+        let pid: u32 = std::str::from_utf8(&output.stdout)
+          .ok()
+          .and_then(|value| value.trim().parse().ok())
+          .ok_or_else(|| io::Error::other("invalid controller main PID"))?;
+        if pid == 0 {
+          return Ok(());
+        }
+        let process = PathBuf::from(format!("/proc/{pid}"));
+        if fs::metadata(&process)?.uid() != unsafe { libc::geteuid() } {
+          return Ok(());
+        }
+        let mut command = Vec::new();
+        File::open(process.join("cmdline"))?
+          .take(65537)
+          .read_to_end(&mut command)?;
+        if !controller_matches(&command, store, id) {
+          return Ok(());
+        }
+        let membership = fs::read_to_string(process.join("cgroup"))?;
+        if !membership
+          .lines()
+          .any(|line| line.starts_with("0::/") && line.ends_with(&format!("/{name}")))
+        {
+          return Err(io::Error::other(
+            "controller main process has unexpected cgroup",
+          ));
+        }
+        // Stop the unguessable service identity, not the reusable numeric PID.
+        // Recover is deliberately after matching: Unit's Drop also stops it.
+        Self::recover(name)?.stop()
+      })();
+      if let Err(error) = stopped {
+        // A disappearing process needs no signal. Still inspect other services
+        // when one observation fails, but never claim a complete teardown.
+        if error.kind() != io::ErrorKind::NotFound {
+          failure = Some(error);
+        }
+      }
+    }
+    match failure {
+      Some(error) => Err(error),
+      None => Ok(()),
+    }
+  }
+
   fn observe(&mut self) -> io::Result<()> {
     let output = successful(
       timed("systemctl")
@@ -280,6 +368,21 @@ impl Unit {
     self.stopped = true;
     Ok(())
   }
+}
+
+fn controller_matches(command: &[u8], store: &Path, id: &str) -> bool {
+  use std::os::unix::ffi::OsStrExt;
+  let args = command.split(|byte| *byte == 0).collect::<Vec<_>>();
+  command.len() <= 65536
+    && args.len() == 7
+    && args[6].is_empty()
+    && !args[0].is_empty()
+    && args[1] == b"--controller"
+    && !args[2].is_empty()
+    && args[3] == store.as_os_str().as_bytes()
+    && args[4] == id.as_bytes()
+    && !args[5].is_empty()
+    && args[5].iter().all(u8::is_ascii_digit)
 }
 
 fn population(mut read: impl FnMut() -> io::Result<String>) -> io::Result<bool> {
@@ -436,6 +539,37 @@ pub fn watchdog() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn emergency_discovery_matches_exact_controller_identity() {
+    let command = b"/usr/bin/omarchy-ward\0--controller\0/tmp/socket\0/tmp/store\0test.widget\01\0";
+    assert!(super::controller_matches(
+      command,
+      std::path::Path::new("/tmp/store"),
+      "test.widget"
+    ));
+    assert!(!super::controller_matches(
+      command,
+      std::path::Path::new("/tmp/other"),
+      "test.widget"
+    ));
+    assert!(!super::controller_matches(
+      command,
+      std::path::Path::new("/tmp/store"),
+      "test.other"
+    ));
+    assert!(!super::controller_matches(
+      &command[..command.len() - 1],
+      std::path::Path::new("/tmp/store"),
+      "test.widget"
+    ));
+    let mut extra = command.to_vec();
+    extra.extend_from_slice(b"extra\0");
+    assert!(!super::controller_matches(
+      &extra,
+      std::path::Path::new("/tmp/store"),
+      "test.widget"
+    ));
+  }
   use super::*;
 
   #[test]

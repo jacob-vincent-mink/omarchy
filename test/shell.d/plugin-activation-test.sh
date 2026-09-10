@@ -150,6 +150,30 @@ const shell = fs.readFileSync(path.join(root, 'shell/shell.qml'), 'utf8')
 assert(shell.includes('return shell.sandboxActivation.enable(id, placement)'), 'production IPC uses the tested activation owner')
 assert(shell.includes('config: shell.shellConfig') && shell.includes('writeConfig: next => shell.persistShellConfig(next)'), 'canonical config writes remain owned by the shell')
 const session = fs.readFileSync(path.join(root, 'shell/services/native/SandboxedPluginSession.qml'), 'utf8')
+{
+  const {context: c, manager, writes} = fixture()
+  c.enable('test.one', {section: 'right'})
+  const first = copy(c.pending['test.one'])
+  assert(c.enable('test.one', {section: 'left'}).includes('already starting'), 'competing placement is rejected while startup is pending')
+  assert(c.enable('test.one', {section: 'right'}).includes('already starting'), 'duplicate pending enable has an explicit busy result')
+  assertDeepEqual(c.pending['test.one'], first, 'rejected enable cannot replace pending placement or ownership')
+  assertEqual(manager.starts, 1, 'duplicate startup does not start another controller')
+  manager.instances['test.one'].state = 'running'
+  c.settle()
+  assertEqual(writes.length, 1, 'original startup commits once')
+  assertEqual(c.config.bar.layout.right[0].id, 'test.one', 'first accepted placement wins')
+}
+{
+  const expression = session.match(/readonly property string state: (.*)/)[1]
+  const state = (ready, startupComplete, presented, error = '') => vm.runInNewContext(expression,
+    {error, session: {ready}, startupComplete, screenRows: presented.map(value => ({surface: {presented: value}}))})
+  assertEqual(state(true, false, []), 'starting', 'zero-output readiness cannot complete first startup')
+  assertEqual(state(true, false, [false]), 'starting', 'an attached but unpresented output cannot complete startup')
+  assertEqual(state(true, false, [true]), 'running', 'first presented content completes startup')
+  assertEqual(state(true, true, []), 'running', 'output loss preserves an already-started logical service')
+  assertEqual(state(false, true, []), 'starting', 'past presentation does not invent native readiness')
+  assertEqual(state(true, true, [true], 'failed'), 'error', 'errors always override presentation state')
+}
 assert(session.includes('running: !root.startupComplete && root.state === "starting"'), 'startup deadline cannot kill an already-started session on output changes')
 assert(session.includes('Ward plugin startup timed out before presenting content'), 'never-presenting startup has a bounded error state')
 JS

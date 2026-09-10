@@ -25,7 +25,7 @@ fs.writeFileSync(path.join(plugin, 'manifest.json'), JSON.stringify({
   schemaVersion: 1, id: 'test.selection', name: 'Selection', version: '1', kinds: ['panel'],
   entryPoints: { panel: 'worker.qml' },
   sandbox: { version: 1, entryPoint: 'worker.qml', requests: {
-    filesystem: [{ name: 'data', access: 'readwrite', required: true }],
+    filesystem: [{ name: 'data', path: selected, target: 'directory', access: 'readwrite', required: true }],
     settings: { read: ['theme'], write: ['volume'], required: true }, openUrls: true, network: true, storage: true,
     networkProxy: true, audioPlayback: true, microphone: true, audioCapture: true,
     exec: { printf: { executable: '/usr/bin/printf', lifetime: 'plugin', required: [], tree: {next: [
@@ -78,13 +78,13 @@ try {
   const priorProxy = JSON.stringify(record())
   run('omarchy-plugin-approve', args.concat(['--allow-network', '--allow-network-proxy']), false)
   assertEqual(JSON.stringify(record()), priorProxy, 'raw network cannot bypass the proxy boundary')
-  assert(text.includes('Private persistent storage; saved data remains after revocation'), 'review explains storage persistence')
+  assert(text.includes('Save plugin data; revoking permission keeps saved data'), 'review explains storage persistence')
   run('omarchy-plugin-approve', args.concat(['--allow-storage']))
   assertEqual(record().grants.storage, true, 'explicit storage selection reaches the native record')
   run('omarchy-plugin-approve', args)
   assertEqual(record().grants.storage, false, 'reapproval does not implicitly retain storage')
   assert(text.includes('Host executable printf: /usr/bin/printf') && text.includes('greet'), 'CLI shows requested executable and tree')
-  assert(text.includes('long-running; stops with its caller or plugin, no ten-second deadline'), 'CLI discloses plugin-lifetime execution')
+  assert(!text.includes('ten-second deadline'), 'CLI does not claim an execution-time cutoff')
   run('omarchy-plugin-approve', args.concat(['--exec', 'printf:greet']))
   assertDeepEqual(record().grants.exec.printf.selected, ['greet'], 'only the explicitly selected terminal is granted')
   assertEqual(record().grants.exec.printf.lifetime, 'plugin', 'approval binds the reviewed execution lifetime')
@@ -95,9 +95,9 @@ try {
   run('omarchy-plugin-approve', args)
   assertDeepEqual(record().grants.exec, {}, 'reapproval without exec selections drops previous command access')
   assertDeepEqual(record().grants.filesystem, {}, 'required requests do not silently become selected grants')
-  run('omarchy-plugin-approve', args.concat(['--read', `data=${selected}`]))
-  assertEqual(record().grants.filesystem.data.access, 'read', 'read-only selection never grants writes')
-  run('omarchy-plugin-approve', args.concat(['--write', `data=${selected}`]))
+  run('omarchy-plugin-approve', args.concat(['--read', 'data']), false)
+  assertDeepEqual(record().grants.filesystem, {}, 'a named permission cannot be given different access')
+  run('omarchy-plugin-approve', args.concat(['--write', 'data']))
   assertEqual(record().grants.filesystem.data.access, 'readwrite', 'explicit write selection preserves read-write scope')
   assertEqual(record().grants.filesystem.data.path, selected, 'a path containing spaces stays one literal selected resource')
   assertEqual(record().activeUnit, null, 'approving writable access never starts the plugin')
@@ -127,21 +127,22 @@ try {
   const source = fs.readFileSync(path.join(root, 'shell/plugins/panels/plugin-review/Review.qml'), 'utf8')
   const scope = { revision: review, busy: false, pluginId: 'test.selection', network: false, http: [], exec: {},
     networkProxy: false, audioPlayback: false, microphone: false, audioCapture: false,
-    notifications: false, settings: {read: [], write: []}, openUrls: false, storage: false, desktopGeometry: false, media: '', folders: {data: selected}, writableFolders: {},
+    notifications: false, settings: {read: [], write: []}, openUrls: false, storage: false, desktopGeometry: false, media: false, folders: {}, folderRequests: review.requests.filesystem,
     run: (operation, args) => { scope.args = args } }
   vm.createContext(scope)
   const rowsStart = source.indexOf('  readonly property var execRequests: {')
   const rowsEnd = source.indexOf('\n  readonly property var httpRequests:', rowsStart)
   const rowsBody = source.slice(source.indexOf('{', rowsStart) + 1, rowsEnd).replace(/\}\s*$/, '')
   vm.runInContext(`function execRows() { ${rowsBody} }`, scope)
-  assert(scope.execRows().every(row => row.lifetime === 'plugin'), 'each reviewer leaf carries its long-running disclosure')
-  for (const name of ['requestLabel', 'setWritable', 'toggleHttp', 'toggleExec', 'approve']) {
+
+  for (const name of ['requestLabel', 'requirementLabel', 'isRequired', 'commandLiteral', 'argumentPreview', 'setFolder', 'toggleHttp', 'toggleExec', 'approve']) {
     const start = source.indexOf(`  function ${name}(`)
     const end = source.indexOf('\n  }', start) + 4
     vm.runInContext(source.slice(start, end), scope)
   }
+  assert(scope.execRows().every(row => row.lifetime === 'plugin'), 'legacy lifetime metadata survives branch expansion without a time-limit label')
   scope.approve()
-  assert(scope.args.includes('--read') && !scope.args.includes('--write'), 'reviewer draft defaults to read-only, even for a writable request')
+  assert(!scope.args.includes('--read') && !scope.args.includes('--write'), 'reviewer filesystem permissions default to denied')
   assert(!scope.args.includes('--allow-storage'), 'reviewer storage defaults to denied')
   for (const [key, flag] of streamGrants) {
     assert(!scope.args.includes(flag), `${key} reviewer draft defaults to denied`)
@@ -154,14 +155,13 @@ try {
   scope.storage = true
   scope.approve()
   assert(scope.args.includes('--allow-storage'), 'reviewer storage selection reaches the canonical CLI')
-  scope.setWritable('data', true)
+  scope.setFolder('data', true)
   scope.approve()
   assert(scope.args.includes('--write') && !scope.args.includes('--read'), 'reviewer explicitly selected writes reach the canonical command')
-  scope.folders = {constructor: selected}
-  scope.writableFolders = {}
+  scope.folders = {constructor: true}
   scope.approve()
   assert(!scope.args.includes('--write'), 'inherited object properties cannot implicitly select writable access')
-  assertEqual(scope.requestLabel('settings', 'Settings'), 'Settings · required', 'reviewer preserves required request labels')
+  assertEqual(scope.requestLabel('settings', 'Settings'), 'Settings · Required', 'reviewer preserves required request labels')
   scope.settings = {read: ['theme'], write: ['volume']}
   scope.approve()
   assert(scope.args.includes('--read-setting') && scope.args.includes('--write-setting'), 'reviewer carries selected read and write keys to the CLI')

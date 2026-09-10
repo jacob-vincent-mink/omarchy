@@ -28,6 +28,123 @@ fn receive(channel: &Channel) -> Control {
 }
 
 #[test]
+fn damaged_approval_emergency_stop_is_scoped_to_store_and_plugin() {
+  if std::env::var("OMARCHY_TEST_SYSTEMD").as_deref() != Ok("1") {
+    return;
+  }
+  for damage in [
+    "record",
+    "public-key-missing",
+    "public-key-unreadable",
+    "record-unreadable",
+  ] {
+    let root = tempfile::Builder::new()
+      .permissions(std::fs::Permissions::from_mode(0o700))
+      .tempdir()
+      .unwrap();
+    let store_path = root.path().join("state");
+    let store = Store::initialize(&store_path).unwrap();
+    let other_store = Store::initialize(&root.path().join("other-state")).unwrap();
+    let mut units = Vec::new();
+    let mut channels = Vec::new();
+    for (index, (owner, id)) in [
+      (&store, "test.widget"),
+      (&store, "test.other"),
+      (&other_store, "test.widget"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+      let source = root.path().join(format!("source-{index}"));
+      std::fs::create_dir(&source).unwrap();
+      std::fs::write(
+        source.join("worker.qml"),
+        "import Quickshell\nShellRoot {}\n",
+      )
+      .unwrap();
+      std::fs::write(source.join("manifest.json"), serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 1, "id": id, "name": "Test", "version": "1", "kinds": ["barWidget"],
+        "entryPoints": {"barWidget": "worker.qml"}, "sandbox": {"version": 1, "entryPoint": "worker.qml", "requests": {}}
+      })).unwrap()).unwrap();
+      let revision = owner.import(&source).unwrap();
+      owner.approve(&revision.digest, Grants::default()).unwrap();
+      let socket = root.path().join(format!("host-{index}"));
+      let listener = Listener::bind(&socket).unwrap();
+      let (unit, _) = owner
+        .launch(id, Path::new(env!("CARGO_BIN_EXE_omarchy-ward")), &socket)
+        .unwrap();
+      let deadline = Instant::now() + Duration::from_secs(2);
+      let channel = loop {
+        match listener.accept() {
+          Ok(channel) => break channel,
+          Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+            std::thread::sleep(Duration::from_millis(10))
+          }
+          Err(error) => panic!("test controller did not connect: {error}"),
+        }
+      };
+      unit.authenticate(&channel).unwrap();
+      assert_eq!(receive(&channel), Control::Hello);
+      // Freeze the authenticated controller so its normal authority poll cannot
+      // stop it for us. Only the explicit systemd fallback can pass this check.
+      let peer = rustix::net::sockopt::socket_peercred(&channel).unwrap();
+      assert_eq!(
+        unsafe { libc::kill(peer.pid.as_raw_nonzero().get(), libc::SIGSTOP) },
+        0
+      );
+      units.push(unit);
+      channels.push(channel);
+    }
+    let record = store_path.join("test.widget.json");
+    let public_key = store_path.join("secrets/signing.pub");
+    match damage {
+      "record" => std::fs::write(&record, "corrupt grant record").unwrap(),
+      "public-key-missing" => std::fs::remove_file(&public_key).unwrap(),
+      "public-key-unreadable" => {
+        std::fs::set_permissions(&public_key, std::fs::Permissions::from_mode(0)).unwrap()
+      }
+      "record-unreadable" => {
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0)).unwrap()
+      }
+      _ => unreachable!(),
+    }
+    assert!(
+      store.revoke("test.widget").is_err(),
+      "damaged approval still needs repair: {damage}"
+    );
+    assert!(
+      !units[0].running().unwrap(),
+      "emergency fallback did not stop frozen target: {damage}"
+    );
+    assert!(
+      units[1].running().unwrap(),
+      "fallback stopped another plugin: {damage}"
+    );
+    assert!(
+      units[2].running().unwrap(),
+      "fallback stopped the same id in another store: {damage}"
+    );
+    assert!(
+      store_path.join("test.widget.pending").exists(),
+      "denial must remain durable"
+    );
+    assert!(
+      store.revoke("test.widget").is_err(),
+      "repeated disable cannot clear denial on corrupt metadata"
+    );
+    assert!(
+      store.remove("test.widget").is_err(),
+      "uninstall cannot forget unverifiable ownership"
+    );
+    assert!(record.exists() && store_path.join("test.widget.pending").exists());
+    for unit in &mut units {
+      unit.stop().unwrap();
+    }
+    println!("verified scoped emergency stop with {damage}");
+  }
+}
+
+#[test]
 fn recorded_controller_is_stopped_by_revocation_or_interrupted_publication() {
   if std::env::var("OMARCHY_TEST_SYSTEMD").as_deref() != Ok("1") {
     return;

@@ -16,11 +16,11 @@ QtObject {
 
   function description(action) {
     const actions = {
-      1: "sending an unapproved notification",
-      2: "changing settings outside its approved access",
-      3: "opening an unapproved web link",
-      4: "making a request outside its approved HTTP access",
-      5: "executing an unapproved host command"
+      1: "tried to send a notification without permission",
+      2: "tried to change a setting outside its approved permissions",
+      3: "tried to open a link without permission",
+      4: "made an HTTP request outside its approved permissions",
+      5: "tried to run a command outside its approved permissions"
     }
     return actions[action] || ""
   }
@@ -36,7 +36,7 @@ QtObject {
     if (delivery.running || delivered >= 2) return false
     delivered++
     delivery.command = ["timeout", "2s", "omarchy-notification-send", "--app-name", "Omarchy Ward",
-      "-u", "normal", "-t", "6000", "Blocked " + id, "Ward blocked this plugin from " + detail + "."]
+      "-u", "normal", "-t", "6000", "Ward blocked a request", id + " " + detail + "."]
     delivery.running = true
     return true
   }

@@ -40,12 +40,14 @@ QtObject {
   readonly property bool opened: panelAuthorized && reportedOpen
   onReportedOpenChanged: { if (!reportedOpen) panelAuthorized = false }
   readonly property string error: localError || session.error
-  readonly property string state: error ? "error" : session.ready && (!screenRows.length || screenRows.some(row => row.surface.presented)) ? "running" : "starting"
+  readonly property string state: error ? "error" : session.ready && (startupComplete || screenRows.some(row => row.surface.presented)) ? "running" : "starting"
   signal statusChanged()
   signal panelSwitchRequested(int direction)
   signal operationBlocked(int action)
   onStateChanged: {
-    if (state === "running") startupComplete = true
+    // Latch outside the state binding's evaluation; the latch itself is one
+    // of that binding's inputs and must not synchronously re-enter it.
+    if (state === "running" && !startupComplete) Qt.callLater(() => { root.startupComplete = true })
     statusChanged()
   }
   onOpenedChanged: {

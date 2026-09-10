@@ -6,6 +6,7 @@ import Quickshell.Io
 QtObject {
   id: root
   property string pluginId: ""
+  property string stage: ""
   property var revision: null
   property var current: null
   property bool network: false
@@ -15,17 +16,11 @@ QtObject {
   readonly property var execRequests: {
     if (!revision) return []
     var rows = []
-    function argument(arg) {
-      if (arg.kind === "exact") return JSON.stringify(arg.value)
-      if (arg.kind === "oneOf") return "one of " + JSON.stringify(arg.values)
-      if (arg.kind === "integer") return "integer " + arg.min + "…" + arg.max
-      if (arg.kind === "pattern") return "whole-argument pattern (≤" + arg.max + " bytes): " + arg.value
-      return "text " + arg.min + "…" + arg.max + " bytes, prefix " + JSON.stringify(arg.prefix)
-    }
     function walk(name, ask, tree, args) {
       if (tree.end) rows.push({name: name, leaf: tree.end, executable: ask.executable, lifetime: ask.lifetime || "request",
-        required: ask.required.indexOf(tree.end) !== -1, command: args.join("\n") || "(no arguments)"})
-      for (var step of tree.next) walk(name, ask, step.then, args.concat([argument(step.arg)]))
+        required: ask.required.indexOf(tree.end) !== -1,
+        command: [commandLiteral(ask.executable)].concat(args.map(argumentPreview)).join(" ")})
+      for (var step of tree.next) walk(name, ask, step.then, args.concat([step.arg]))
     }
     for (var name of Object.keys(revision.requests.exec)) {
       var ask = revision.requests.exec[name]
@@ -42,9 +37,8 @@ QtObject {
   property bool openUrls: false
   property bool storage: false
   property bool desktopGeometry: false
-  property string media: ""
+  property bool media: false
   property var folders: ({})
-  property var writableFolders: ({})
   readonly property var folderRequests: revision ? revision.requests.filesystem : []
   readonly property var settingRequests: {
     if (!revision) return []
@@ -57,36 +51,131 @@ QtObject {
   property string operation: ""
   property string error: ""
   property string notice: ""
-  property bool selectionApproved: false
+  signal completed()
+  readonly property bool requiredAccepted: hasRequiredPermissions()
 
-  onNetworkChanged: { selectionApproved = false; if (network) { http = []; networkProxy = false } }
-  onNetworkProxyChanged: { selectionApproved = false; if (networkProxy) network = false }
-  onHttpChanged: selectionApproved = false
-  onExecChanged: selectionApproved = false
-  onNotificationsChanged: selectionApproved = false
-  onAudioPlaybackChanged: selectionApproved = false
-  onMicrophoneChanged: selectionApproved = false
-  onAudioCaptureChanged: selectionApproved = false
-  onSettingsChanged: selectionApproved = false
-  onOpenUrlsChanged: selectionApproved = false
-  onStorageChanged: selectionApproved = false
-  onDesktopGeometryChanged: selectionApproved = false
-  onMediaChanged: selectionApproved = false
-  onFoldersChanged: selectionApproved = false
-  onWritableFoldersChanged: selectionApproved = false
+  function hasRequiredPermissions() {
+    if (!revision) return false
+    var requests = revision.requests
+    for (var name of ["network", "networkProxy", "notifications", "audioPlayback", "microphone", "audioCapture", "openUrls", "storage", "desktopGeometry", "media"])
+      if (requests[name] && requests[name].required === true && !root[name]) return false
+    for (var name of Object.keys(requests.http))
+      if (requests.http[name].required && http.indexOf(name) === -1) return false
+    for (var ask of folderRequests)
+      if (ask.required && folders[ask.name] !== true) return false
+    if (requests.settings.required)
+      for (var access of ["read", "write"])
+        for (var key of requests.settings[access])
+          if (settings[access].indexOf(key) === -1) return false
+    for (var ask of execRequests)
+      if (ask.required && (!Object.prototype.hasOwnProperty.call(exec, ask.name) || exec[ask.name].indexOf(ask.leaf) === -1)) return false
+    return true
+  }
+
+  function isRequired(name) {
+    return !!(revision && revision.requests[name] && revision.requests[name].required === true)
+  }
+
+  function atomicEditable(name) {
+    if (isRequired(name)) return false
+    if (name === "network") return !isRequired("networkProxy") && !httpRequests.some(key => revision.requests.http[key].required)
+    if (name === "networkProxy") return !isRequired("network")
+    return true
+  }
+
+  function toggleAtomic(name) {
+    if (!atomicEditable(name)) return
+    root[name] = !root[name]
+    if (name === "network" && network) { http = []; networkProxy = false }
+    if (name === "networkProxy" && networkProxy) network = false
+  }
+
+  function selectRequiredPermissions() {
+    for (var name of ["network", "networkProxy", "notifications", "audioPlayback", "microphone", "audioCapture", "openUrls", "storage", "desktopGeometry", "media"])
+      root[name] = isRequired(name)
+    http = httpRequests.filter(name => revision.requests.http[name].required)
+    var commands = {}
+    for (var ask of execRequests) {
+      if (!ask.required) continue
+      if (!Object.prototype.hasOwnProperty.call(commands, ask.name)) commands[ask.name] = []
+      commands[ask.name].push(ask.leaf)
+    }
+    exec = commands
+    settings = isRequired("settings")
+      ? {read: revision.requests.settings.read.slice(), write: revision.requests.settings.write.slice()}
+      : {read: [], write: []}
+    var selectedFolders = {}
+    for (var ask of folderRequests) if (ask.required) selectedFolders[ask.name] = true
+    folders = selectedFolders
+  }
 
   function requestLabel(name, label) {
     var request = revision ? revision.requests[name] : null
-    return label + (request && request.required === true ? " · required" : "")
+    return label + requirementLabel(request && request.required === true)
   }
 
-  function load(id) {
+  function requirementLabel(required) { return required ? " · Required" : " · Optional" }
+
+  // Quotes preserve literal boundaries, including a complete bash -c program.
+  // Placeholder text describes matchers; it is never an executable command.
+  function commandLiteral(value) {
+    return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : JSON.stringify(value)
+  }
+
+  function argumentPreview(arg) {
+    if (arg.kind === "exact") return commandLiteral(arg.value)
+    if (arg.kind === "oneOf") return "[" + arg.values.map(commandLiteral).join("|") + "]"
+    if (arg.kind === "integer") return "<uint " + arg.min + "–" + arg.max + "; no leading zeros>"
+    if (arg.kind === "pattern") return "<regex " + JSON.stringify(arg.value) + "; whole arg; ≤" + arg.max + " bytes>"
+    return "<" + JSON.stringify(arg.prefix) + "…; " + arg.min + "–" + arg.max + " bytes>"
+  }
+
+  function httpField(field) {
+    if (field.kind === "exact") return "exactly " + JSON.stringify(field.value)
+    if (field.kind === "string") return "text, 0–" + field.max + " bytes"
+    if (field.kind === "nullableString") return "null or text, 0–" + field.max + " bytes"
+    return "object with exactly these fields: { " + Object.keys(field.fields).map(function(key) {
+      return JSON.stringify(key) + ": " + httpField(field.fields[key])
+    }).join("; ") + " }"
+  }
+
+  function httpDescription(scope) {
+    var lines = [scope.method + " " + scope.origin + scope.path]
+    lines.push(scope.subtree ? "Path: this root and all paths below it."
+      : scope.path.indexOf("*") !== -1 ? "Path: each * matches exactly one nonempty segment." : "Path: exact match only.")
+    var keys = Object.keys(scope.query)
+    lines.push(keys.length ? "Query parameters (no others allowed):" : "Query parameters: none allowed.")
+    for (var key of keys) {
+      var field = scope.query[key]
+      lines.push("  " + JSON.stringify(key) + (field.required ? " (required): " : " (optional): ") + httpField(field.value))
+    }
+    if (scope.body === null) lines.push("Request body: none allowed.")
+    else {
+      lines.push("JSON body: exactly these fields, all required.")
+      if (Object.keys(scope.body).length === 0) lines.push("  Empty object {} only.")
+      for (var name of Object.keys(scope.body)) lines.push("  " + JSON.stringify(name) + ": " + httpField(scope.body[name]))
+    }
+    return lines.join("\n")
+  }
+
+  readonly property string progressText: ({
+    review: "Reading permissions…", status: "Checking plugin status…",
+    publish: "Enabling…", approve: "Enabling…", enable: "Enabling…", remove: "Removing…", discard: "Removing…"
+  })[operation] || "Working…"
+
+  function load(id, stagedCheckout) {
     if (busy) return false
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) || id.indexOf("..") !== -1) {
-      error = "Choose an installed plugin to review."
+      error = "Choose an installed plugin."
       return false
     }
     pluginId = id
+    stage = stagedCheckout || ""
+    if (stage && !/^\.add\.[A-Za-z0-9]{8}$/.test(stage)) {
+      stage = ""
+      error = "Invalid review checkout. Clone the plugin again."
+      return false
+    }
     revision = null
     current = null
     network = false
@@ -101,26 +190,20 @@ QtObject {
     openUrls = false
     storage = false
     desktopGeometry = false
-    media = ""
+    media = false
     folders = ({})
-    writableFolders = ({})
-    selectionApproved = false
-    return run("review", ["omarchy-plugin-review", id, "--json"])
+    return run("review", stage ? ["omarchy-plugin-stage", "review", stage] : ["omarchy-plugin-review", id, "--json"])
   }
 
-  function setFolder(slot, path) {
+  function setFolder(slot, allowed) {
+    if (!allowed && folderRequests.some(ask => ask.name === slot && ask.required)) return
     var next = Object.assign({}, folders)
-    next[slot] = path
+    next[slot] = allowed === true
     folders = next
   }
 
-  function setWritable(slot, allowed) {
-    var next = Object.assign({}, writableFolders)
-    next[slot] = allowed === true
-    writableFolders = next
-  }
-
   function toggleSetting(access, key) {
+    if (isRequired("settings")) return
     var next = {read: settings.read.slice(), write: settings.write.slice()}
     var index = next[access].indexOf(key)
     if (index < 0) next[access].push(key)
@@ -129,6 +212,7 @@ QtObject {
   }
 
   function toggleHttp(name) {
+    if (revision.requests.http[name].required || isRequired("network")) return
     var next = http.slice()
     var index = next.indexOf(name)
     if (index < 0) { next.push(name); network = false }
@@ -137,6 +221,7 @@ QtObject {
   }
 
   function toggleExec(name, leaf) {
+    if (revision.requests.exec[name].required.indexOf(leaf) !== -1) return
     var next = Object.assign({}, exec)
     var selected = (Object.prototype.hasOwnProperty.call(exec, name) ? exec[name] : []).slice()
     var index = selected.indexOf(leaf)
@@ -163,18 +248,23 @@ QtObject {
     if (openUrls) args.push("--allow-open-urls")
     if (storage) args.push("--allow-storage")
     if (desktopGeometry) args.push("--allow-desktop-geometry")
-    if (media.trim()) args.push("--media", media.trim())
-    for (var slot in folders) if (folders[slot].trim())
-      args.push(writableFolders[slot] === true ? "--write" : "--read", slot + "=" + folders[slot].trim())
+    if (media) args.push("--allow-media")
+    for (var ask of folderRequests) if (folders[ask.name] === true)
+      args.push(ask.access === "readwrite" ? "--write" : "--read", ask.name)
     run("approve", args)
   }
 
   function enable() {
-    if (selectionApproved && !busy) run("enable", ["omarchy-plugin-enable", pluginId])
+    if (!requiredAccepted || busy || (current && current.enabled)) return
+    if (stage) run("publish", ["omarchy-plugin-stage", "publish", stage, revision.revision])
+    else approve()
   }
 
-  function revoke() {
-    if (revision && !busy) run("disable", ["omarchy-plugin-disable", pluginId])
+  function remove() {
+    if (pluginId && !busy) {
+      if (stage) run("discard", ["omarchy-plugin-stage", "discard", stage])
+      else run("remove", ["omarchy-plugin-remove", pluginId, "--yes"])
+    }
   }
 
   function run(kind, args) {
@@ -198,7 +288,7 @@ QtObject {
     var kind = operation
     busy = false
     if (process.exitCode !== 0) {
-      error = process.err.trim() || (process.exitCode === 124 ? "Command timed out. Refresh to check its result." : "Command failed. Refresh to check its result.")
+      error = process.err.trim() || (process.exitCode === 124 ? "The action timed out." : "The action failed.")
       return
     }
     try {
@@ -207,20 +297,30 @@ QtObject {
         if (info.id !== pluginId || !/^[0-9a-f]{64}$/.test(info.revision) || !info.requests)
           throw new Error("Invalid review response")
         revision = info
-        notice = "No code ran. Existing approvals remain unchanged until you approve or revoke."
+        selectRequiredPermissions()
+        notice = ""
       } else if (kind === "status") {
         var rows = JSON.parse(process.out)
         current = rows.find(function(row) { return row.id === root.pluginId }) || null
         return
-      } else {
-        selectionApproved = kind === "approve" || (kind === "enable" && selectionApproved)
-        notice = kind === "approve" ? "Approval saved. No plugin was started."
-          : kind === "enable" ? "Plugin enabled. You can close this review."
-          : "Plugin disabled and access revoked."
+      } else if (kind === "publish") {
+        var published = JSON.parse(process.out)
+        if (published.id !== pluginId || published.stage !== stage || published.installed !== true || published.mode !== "ward")
+          throw new Error("Invalid installation response")
+        stage = ""
+        approve()
+        return
+      } else if (kind === "approve") {
+        run("enable", ["omarchy-plugin-enable", pluginId])
+        return
+      } else if (kind === "enable" || kind === "remove" || kind === "discard") {
+        stage = ""
+        completed()
+        return
       }
       run("status", ["omarchy-plugin-list", "--json"])
     } catch (e) {
-      error = "Could not read the command result: " + e
+      error = "Could not read the result: " + e
     }
   }
 

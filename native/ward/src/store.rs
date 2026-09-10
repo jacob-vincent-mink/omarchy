@@ -194,9 +194,23 @@ impl Store {
     self.root.join("revisions")
   }
 
-  /// Host-readable, monotonic isolation identity, not an approval. Keep it
-  /// after revocation and checkout removal, including before first activation.
-  pub fn retain_identity(&self, id: &str) -> io::Result<()> {
+  /// Import and index a reviewed revision under the same identity lock as
+  /// approval/removal. A concurrent removal cannot leave a late snapshot.
+  pub fn import(&self, source: &Path) -> io::Result<Revision> {
+    let id = Manifest::read(source)?.id;
+    let _lock = self.lock(&id)?;
+    self.require_ready(&id)?;
+    let revision = Revision::import(source, &self.revisions())?;
+    if Manifest::read(&revision.path)?.id != id {
+      return Err(invalid("plugin identity changed during review"));
+    }
+    self.retain_revision(&id, &revision.digest)?;
+    Ok(revision)
+  }
+
+  /// Host-readable isolation and snapshot ownership, never approval. Retained
+  /// by disable/revoke; explicit removal deletes it after stopping the worker.
+  fn retain_revision(&self, id: &str, revision: &str) -> io::Result<()> {
     validate_id(id)?;
     let directory = self.root.join("identities");
     match DirBuilder::new().mode(0o700).create(&directory) {
@@ -212,6 +226,11 @@ impl Store {
       Err(error) => return Err(error),
     }
     require_private_directory(&marker)?;
+    let revision_marker = OpenOptions::new().write(true).create(true).truncate(false)
+      .mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+      .open(marker.join(revision))?;
+    revision_marker.sync_all()?;
+    File::open(&marker)?.sync_all()?;
     File::open(&directory)?.sync_all()?;
     File::open(&self.root)?.sync_all()
   }
@@ -225,20 +244,21 @@ impl Store {
   /// Approval is an administrative operation on an exact reviewed snapshot.
   /// Neither manifest requests nor worker messages may call this API.
   pub fn approve(&self, revision: &str, grants: Grants) -> io::Result<Record> {
-    Revision::verify(&self.revisions(), revision)?;
+    validate_revision(revision)?;
     let manifest = Manifest::read(&self.revisions().join(revision))?;
-    self.retain_identity(&manifest.id)?;
+    let _lock = self.lock(&manifest.id)?;
+    self.require_ready(&manifest.id)?;
+    Revision::verify(&self.revisions(), revision)?;
+    self.retain_revision(&manifest.id, revision)?;
     grants.validate(&manifest.sandbox.requests)?;
     let protected = crate::authority::ProtectedPaths::for_store(&self.root)?;
     for directory in grants.filesystem.values() {
       protected.check(directory)?;
       directory.open()?;
     }
-    let _lock = self.lock(&manifest.id)?;
-    self.require_ready(&manifest.id)?;
     let previous = match self.record(&manifest.id) {
       Ok(record) => Some(record),
-      Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+      Err(error) if error.kind() == io::ErrorKind::NotFound && self.record_absent(&manifest.id) => None,
       Err(error) => return Err(error),
     };
     if previous
@@ -336,9 +356,9 @@ impl Store {
     let mut record = match self.record(id) {
       Ok(record) => record,
       // An installed or reviewed plugin need not have been approved yet.
-      Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+      Err(error) if error.kind() == io::ErrorKind::NotFound && self.record_absent(id) => return Ok(()),
       Err(error) => {
-        self.mark_denied(id)?;
+        self.deny_and_stop_unverified(id)?;
         return Err(error);
       }
     };
@@ -352,6 +372,65 @@ impl Store {
     self.finish(&record, &mut |_| Ok(()))
   }
 
+  /// Uninstall the identity, not merely its current approval. Never forget a
+  /// controller until its stop is confirmed; failures retain durable denial
+  /// and enough ownership metadata to retry. No signing key is needed.
+  pub fn remove(&self, id: &str) -> io::Result<()> {
+    let _lock = self.lock(id)?;
+    let record = match self.record(id) {
+      Ok(record) => Some(record),
+      Err(error) if error.kind() == io::ErrorKind::NotFound && self.record_absent(id) => None,
+      Err(error) => { self.deny_and_stop_unverified(id)?; return Err(error); }
+    };
+    if let Some(record) = &record {
+      self.deny_and_stop(record)?;
+    } else {
+      self.mark_denied(id)?;
+    }
+
+    let mut revisions = std::collections::BTreeSet::new();
+    if let Some(record) = &record { revisions.insert(record.revision.clone()); }
+    let identities = self.root.join("identities");
+    let identity = identities.join(id);
+    if identities.try_exists()? {
+      require_private_directory(&identities)?;
+      if identity.try_exists()? {
+        require_private_directory(&identity)?;
+        for entry in fs::read_dir(&identity)? {
+          let name = entry?.file_name().into_string().map_err(|_| invalid("invalid revision ownership record"))?;
+          validate_revision(&name)?;
+          revisions.insert(name);
+        }
+      }
+    }
+    // Earlier imports used an empty identity marker. Identify their snapshots
+    // from bounded, non-following manifest reads, without trusting grant paths.
+    for entry in fs::read_dir(self.revisions())? {
+      let entry = entry?;
+      let name = entry.file_name();
+      let Some(name) = name.to_str() else { continue; };
+      if validate_revision(name).is_err() || !entry.file_type()?.is_dir() { continue; }
+      let manifest = read_json::<serde_json::Value>(&entry.path().join("manifest.json"));
+      if manifest.ok().and_then(|value| value.get("id").and_then(|id| id.as_str()).map(str::to_owned)).as_deref() == Some(id) {
+        revisions.insert(name.to_owned());
+      }
+    }
+    for revision in revisions {
+      remove_owned_path(&self.revisions().join(revision))?;
+    }
+    File::open(self.revisions())?.sync_all()?;
+    remove_owned_path(&self.path(id, "json"))?;
+    File::open(&self.root)?.sync_all()?;
+    remove_owned_path(&identity)?;
+    if identities.try_exists()? { File::open(&identities)?.sync_all()?; }
+    remove_owned_path(&self.path(id, "pending"))?;
+    File::open(&self.root)?.sync_all()?;
+    // This must be last. lock() checks the inode after acquiring it, so a
+    // waiter on the unlinked inode retries rather than splitting ownership.
+    remove_owned_path(&self.path(id, "lock"))?;
+    File::open(&self.root)?.sync_all()
+  }
+
   fn mark_denied(&self, id: &str) -> io::Result<()> {
     match OpenOptions::new().write(true).create_new(true).mode(0o600)
       .open(self.path(id, "pending")) {
@@ -360,6 +439,17 @@ impl Store {
       Err(error) => return Err(error),
     }
     File::open(&self.root)?.sync_all()
+  }
+
+  fn record_absent(&self, id: &str) -> bool {
+    matches!(fs::symlink_metadata(self.path(id, "json")), Err(error) if error.kind() == io::ErrorKind::NotFound)
+  }
+
+  fn deny_and_stop_unverified(&self, id: &str) -> io::Result<()> {
+    let denied = self.mark_denied(id);
+    let stopped = Unit::stop_matching(&self.root, id);
+    denied?;
+    stopped
   }
 
   fn deny_and_stop(&self, record: &Record) -> io::Result<()> {
@@ -434,12 +524,12 @@ impl Store {
         record.signature = self.sign(&record)?;
         self.finish(&record, &mut |_| Ok(()))
       }
-      Err(error) if error.kind() == io::ErrorKind::NotFound => {
+      Err(error) if error.kind() == io::ErrorKind::NotFound && self.record_absent(id) => {
         // No unit may be launched until its record has been durably published.
         fs::remove_file(self.path(id, "pending"))?;
         File::open(&self.root)?.sync_all()
       }
-      Err(error) => Err(error),
+      Err(error) => { self.deny_and_stop_unverified(id)?; Err(error) },
     }
   }
 
@@ -569,29 +659,38 @@ impl Store {
 
   fn lock(&self, id: &str) -> io::Result<File> {
     validate_id(id)?;
-    let lock = OpenOptions::new()
-      .read(true)
-      .write(true)
-      .create(true)
-      .truncate(false)
-      .mode(0o600)
-      .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-      .open(self.path(id, "lock"))?;
-    let metadata = lock.metadata()?;
-    if !metadata.is_file() || metadata.nlink() != 1 || metadata.uid() != unsafe { libc::geteuid() }
-    {
-      return Err(invalid("invalid plugin writer lock"));
-    }
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
-      if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-        return Ok(lock);
+      let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(self.path(id, "lock"))?;
+      let metadata = lock.metadata()?;
+      if !metadata.is_file() || metadata.nlink() != 1 || metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(invalid("invalid plugin writer lock"));
       }
-      let error = io::Error::last_os_error();
-      if error.kind() != io::ErrorKind::WouldBlock || Instant::now() >= deadline {
-        return Err(error);
+      loop {
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+          match self.path(id, "lock").symlink_metadata() {
+            Ok(current) if current.dev() == metadata.dev() && current.ino() == metadata.ino() => return Ok(lock),
+            Ok(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error),
+          }
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::WouldBlock || Instant::now() >= deadline {
+          return Err(error);
+        }
+        std::thread::sleep(Duration::from_millis(10));
       }
-      std::thread::sleep(Duration::from_millis(10));
+      if Instant::now() >= deadline {
+        return Err(io::Error::new(io::ErrorKind::WouldBlock, "plugin writer lock changed during removal"));
+      }
     }
   }
   fn path(&self, id: &str, extension: &str) -> PathBuf {
@@ -612,6 +711,21 @@ impl Store {
     } else {
       Ok(())
     }
+  }
+}
+
+fn validate_revision(revision: &str) -> io::Result<()> {
+  if revision.len() == 64 && revision.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+    Ok(())
+  } else { Err(invalid("invalid plugin revision")) }
+}
+
+fn remove_owned_path(path: &Path) -> io::Result<()> {
+  match path.symlink_metadata() {
+    Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path),
+    Ok(_) => fs::remove_file(path),
+    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+    Err(error) => Err(error),
   }
 }
 
@@ -644,11 +758,104 @@ mod tests {
     fs::write(source.join("manifest.json"), serde_json::to_vec(&serde_json::json!({
       "schemaVersion": 1, "id": "test.widget", "name": "Test", "version": "1", "kinds": ["barWidget"],
       "entryPoints": {"barWidget": "worker.qml"}, "sandbox": {"version": 1, "entryPoint": "worker.qml",
-        "requests": {"network": true, "storage": true, "filesystem": [{"name": "files", "access": "readwrite"}]}}
+        "requests": {"network": true, "storage": true, "filesystem": [{"name": "files", "path": root.path().join("state-not-authority"), "access": "readwrite"}]}}
     })).unwrap()).unwrap();
     let store = Store::initialize(&root.path().join("state")).unwrap();
     let revision = Revision::import(&source, &store.revisions()).unwrap();
     (root, store, revision)
+  }
+
+  #[test]
+  fn removal_purges_owned_revisions_and_identity_but_not_other_plugins_or_sources() {
+    let (root, store, first) = fixture();
+    let source = root.path().join("source");
+    store.approve(&first.digest, Grants::default()).unwrap();
+    fs::write(source.join("worker.qml"), "second revision").unwrap();
+    let second = store.import(&source).unwrap();
+    // Ownership records also cover revisions whose manifest later gets damaged.
+    fs::write(second.path.join("manifest.json"), "damaged").unwrap();
+    fs::write(source.join("worker.qml"), "legacy unapproved snapshot").unwrap();
+    let legacy = Revision::import(&source, &store.revisions()).unwrap();
+    let mut manifest: serde_json::Value = read_json(&source.join("manifest.json")).unwrap();
+    manifest["id"] = "test.other".into();
+    fs::write(source.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let other = store.import(&source).unwrap();
+    store.approve(&other.digest, Grants::default()).unwrap();
+    store.revoke("test.widget").unwrap();
+    assert!(first.path.exists() && second.path.exists() && legacy.path.exists());
+    assert!(store.root.join("identities/test.widget").exists());
+    fs::remove_file(store.signing_key_path()).unwrap();
+    store.remove("test.widget").unwrap();
+    for revision in [first, second, legacy] { assert!(!revision.path.exists()); }
+    for suffix in ["json", "pending", "lock"] { assert!(!store.path("test.widget", suffix).exists()); }
+    assert!(!store.root.join("identities/test.widget").exists());
+    assert!(other.path.exists() && store.read("test.other").unwrap().enabled);
+    assert!(source.join("manifest.json").exists() && store.signing_pub_path().exists());
+    store.remove("test.widget").unwrap();
+    assert!(!store.path("test.widget", "lock").exists());
+    assert!(store.remove("../source").is_err());
+  }
+
+  #[test]
+  fn removal_failure_keeps_denial_and_ownership_for_retry() {
+    let (_root, store, revision) = fixture();
+    store.approve(&revision.digest, Grants::default()).unwrap();
+    fs::set_permissions(&revision.path, fs::Permissions::from_mode(0o500)).unwrap();
+    assert!(store.remove("test.widget").is_err());
+    assert!(store.pending("test.widget").unwrap());
+    assert!(store.path("test.widget", "json").exists());
+    assert!(store.root.join("identities/test.widget").exists());
+    assert!(store.read("test.widget").is_err());
+    fs::set_permissions(&revision.path, fs::Permissions::from_mode(0o700)).unwrap();
+    store.remove("test.widget").unwrap();
+    assert!(!revision.path.exists() && !store.path("test.widget", "json").exists());
+  }
+
+  #[test]
+  fn removal_refuses_to_forget_an_unverifiable_controller_record() {
+    let (_root, store, revision) = fixture();
+    store.approve(&revision.digest, Grants::default()).unwrap();
+    fs::write(store.path("test.widget", "json"), "damaged record").unwrap();
+    assert!(store.remove("test.widget").is_err());
+    assert!(store.pending("test.widget").unwrap());
+    assert!(revision.path.exists() && store.root.join("identities/test.widget").exists());
+  }
+
+  #[test]
+  fn lock_waiters_retry_an_inode_retired_by_removal() {
+    let (_root, store, _revision) = fixture();
+    let held = store.lock("test.widget").unwrap();
+    let original = held.metadata().unwrap().ino();
+    let root = store.root.clone();
+    let (started, waiting) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+      let store = Store::open(&root).unwrap();
+      started.send(()).unwrap();
+      let lock = store.lock("test.widget").unwrap();
+      assert_ne!(lock.metadata().unwrap().ino(), original);
+      assert_eq!(lock.metadata().unwrap().ino(), store.path("test.widget", "lock").metadata().unwrap().ino());
+    });
+    waiting.recv().unwrap();
+    std::thread::sleep(Duration::from_millis(30));
+    fs::remove_file(store.path("test.widget", "lock")).unwrap();
+    drop(held);
+    waiter.join().unwrap();
+  }
+
+  #[test]
+  fn removal_stops_the_recorded_service_before_forgetting_authority() {
+    if std::env::var("OMARCHY_TEST_SYSTEMD").as_deref() != Ok("1") { return; }
+    let (_root, store, revision) = fixture();
+    let mut record = store.approve(&revision.digest, Grants::default()).unwrap();
+    let unit = Unit::prepare().unwrap();
+    record.active_unit = Some(unit.name().into());
+    store.publish(&mut record, None, |_| Ok(())).unwrap();
+    let unit = unit.launch(Path::new("/usr/bin/sleep"), &[std::ffi::OsStr::new("30")], Limits::default()).unwrap();
+    assert!(unit.running().unwrap());
+    fs::remove_file(store.signing_key_path()).unwrap();
+    store.remove("test.widget").unwrap();
+    assert!(!unit.running().unwrap());
+    assert!(!store.path("test.widget", "json").exists() && !revision.path.exists());
   }
 
   #[test]
@@ -724,12 +931,14 @@ mod tests {
     for i in 0..count {
       fs::create_dir(data.join(format!("d{i}"))).unwrap();
     }
+    let requested = root.path().join("requested");
+    std::os::unix::fs::symlink(&data, &requested).unwrap();
     fs::write(
       source.join("manifest.json"),
       serde_json::to_vec(&serde_json::json!({
         "schemaVersion": 1, "id": "size.widget", "name": "S", "version": "1", "kinds": ["barWidget"],
         "entryPoints": {"barWidget": "worker.qml"}, "sandbox": {"version": 1, "entryPoint": "worker.qml",
-          "requests": {"filesystem": names.iter().map(crate::grants::FileSystemRequest::optional).collect::<Vec<_>>()}}
+          "requests": {"filesystem": names.iter().enumerate().map(|(i, name)| crate::grants::FileSystemRequest::optional(name, requested.join(format!("d{i}")).to_str().unwrap())).collect::<Vec<_>>()}}
       }))
       .unwrap(),
     )
@@ -794,8 +1003,17 @@ mod tests {
     for i in 0..all_names.len() {
       fs::create_dir(deep.join(format!("d{i}"))).unwrap();
     }
+    let requested = _root.path().join("requested-deep");
+    std::os::unix::fs::symlink(&deep, &requested).unwrap();
+    let source = _root.path().join("source");
+    let mut manifest: serde_json::Value = read_json(&source.join("manifest.json")).unwrap();
+    for (i, request) in manifest["sandbox"]["requests"]["filesystem"].as_array_mut().unwrap().iter_mut().enumerate() {
+      request["path"] = serde_json::json!(requested.join(format!("d{i}")));
+    }
+    fs::write(source.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let deep_revision = Revision::import(&source, &store.revisions()).unwrap();
     let oversize = select_all(&deep, &all_names);
-    let error = store.approve(&revision.digest, oversize).unwrap_err();
+    let error = store.approve(&deep_revision.digest, oversize).unwrap_err();
     let message = error.to_string();
     assert!(message.contains("too large"), "unexpected error: {message}");
     // No pending marker was created, and the prior usable approval is intact.
@@ -803,6 +1021,8 @@ mod tests {
     let current = store.read("size.widget").unwrap();
     assert_eq!(current.grants.filesystem.len(), 1);
     assert_eq!(current.epoch, tiny.epoch);
+    assert_eq!(current.revision, revision.digest);
+    store.validate_authority(&current).unwrap();
   }
 
   #[test]
@@ -929,13 +1149,22 @@ mod tests {
   fn filesystem_approval_cannot_expose_authority_or_its_aliases() {
     use crate::grants::{Access, FileSystemGrant, Target};
     use std::os::unix::fs::symlink;
-    let (root, store, revision) = fixture();
+    let (root, store, _revision) = fixture();
     let alias = root.path().join("alias");
     symlink(&store.root, &alias).unwrap();
     let sibling = root.path().join("state-not-authority");
     fs::create_dir(&sibling).unwrap();
+    let revision_for = |path: &Path, access: Access| {
+      let source = root.path().join("source");
+      let mut manifest: serde_json::Value = read_json(&source.join("manifest.json")).unwrap();
+      manifest["sandbox"]["requests"]["filesystem"][0]["path"] = serde_json::json!(path);
+      manifest["sandbox"]["requests"]["filesystem"][0]["access"] = serde_json::json!(access);
+      fs::write(source.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+      Revision::import(&source, &store.revisions()).unwrap()
+    };
     for access in [Access::Read, Access::ReadWrite] {
       for selected in [&store.root, &store.secrets_dir(), root.path(), &alias] {
+        let revision = revision_for(selected, access);
         let grant = FileSystemGrant::select(selected, access, Target::Directory).unwrap();
         let error = store.approve(&revision.digest, Grants {
           filesystem: [("files".into(), grant)].into(), ..Grants::default()
@@ -943,6 +1172,7 @@ mod tests {
         assert!(error.to_string().contains("host authority"), "{error}");
         assert!(!store.path("test.widget", "json").exists());
       }
+      let revision = revision_for(&sibling, access);
       let grant = FileSystemGrant::select(&sibling, access, Target::Directory).unwrap();
       store.approve(&revision.digest, Grants {
         filesystem: [("files".into(), grant)].into(), ..Grants::default()
@@ -953,6 +1183,7 @@ mod tests {
     let key_alias = sibling.join("key-alias");
     fs::hard_link(store.signing_key_path(), &key_alias).unwrap();
     let grant = FileSystemGrant::select(&sibling, Access::Read, Target::Directory).unwrap();
+    let revision = revision_for(&sibling, Access::Read);
     assert!(store.approve(&revision.digest, Grants {
       filesystem: [("files".into(), grant)].into(), ..Grants::default()
     }).unwrap_err().to_string().contains("single-link"));
@@ -968,6 +1199,16 @@ mod tests {
     // Simulate a valid signed approval produced by the pre-fix release.
     store.publish(&mut old, None, |_| Ok(())).unwrap();
     assert!(store.validate_authority(&old).unwrap_err().to_string().contains("host authority"));
+  }
+
+  #[test]
+  fn missing_verification_key_cannot_replace_an_existing_approval() {
+    let (_root, store, revision) = fixture();
+    store.approve(&revision.digest, Grants::default()).unwrap();
+    let before = fs::read(store.path("test.widget", "json")).unwrap();
+    fs::remove_file(store.signing_pub_path()).unwrap();
+    assert!(store.approve(&revision.digest, Grants::default()).is_err());
+    assert_eq!(fs::read(store.path("test.widget", "json")).unwrap(), before);
   }
 
   #[test]
@@ -1206,7 +1447,7 @@ mod tests {
         "schemaVersion": 1, "id": "test.widget", "name": "Test", "version": "2",
         "kinds": ["barWidget"], "entryPoints": {"barWidget": "worker.qml"},
         "sandbox": {"version": 1, "entryPoint": "worker.qml",
-          "requests": {"storage": true, "filesystem": [{"name": "files"}]}}
+          "requests": {"storage": true, "filesystem": [{"name": "files", "path": root.path().join("state-not-authority")}]}}
       }))
       .unwrap(),
     )

@@ -18,7 +18,7 @@ enum Stage {
 }
 
 #[test]
-fn graphical_installer_requires_validated_revision_and_explicit_yolo_trust() {
+fn graphical_installer_survives_real_shell_rescans_and_hands_off_to_review() {
   if std::env::var("OMARCHY_TEST_GRAPHICS").as_deref() != Ok("1")
     || std::env::var("OMARCHY_TEST_SYSTEMD").as_deref() != Ok("1")
   {
@@ -30,53 +30,102 @@ fn graphical_installer_requires_validated_revision_and_explicit_yolo_trust() {
     .join("../../../..")
     .canonicalize()
     .unwrap();
-  for name in ["Commons", "Ui"] {
-    std::os::unix::fs::symlink(repo.join("shell").join(name), root.path().join(name)).unwrap();
+  let source = root.path().join("omarchy");
+  fs::create_dir_all(source.join("shell/plugins/panels")).unwrap();
+  fs::create_dir_all(source.join("config/omarchy")).unwrap();
+  for name in ["Commons", "Ui", "services", "plugins/bar"] {
+    std::os::unix::fs::symlink(
+      repo.join("shell").join(name),
+      source.join("shell").join(name),
+    )
+    .unwrap();
   }
-  let host_qml = root.path().join("host.qml");
-  fs::write(&host_qml, format!(r##"
-import QtQuick
-import Quickshell
-import Quickshell.Io
-import Quickshell.Wayland
-import "file://{}/shell/plugins/panels/plugins" as Plugins
-ShellRoot {{
-  Plugins.Panel {{ id: manager }}
-  PanelWindow {{ anchors {{ top: true; bottom: true; left: true; right: true }} color: "#171c25"; WlrLayershell.layer: WlrLayer.Bottom }}
-  IpcHandler {{
-    target: "shell"
-    function ping(): string {{ return "ok" }}
-    function rescanPlugins(): string {{ return "ok" }}
-    function listPlugins(): string {{ return "[]" }}
-    function summon(id: string, payload: string): string {{ manager.open(payload); return "ok" }}
-    function setSource(source: string): string {{ manager.model.source = source; return "ok" }}
-    function managerState(): string {{
-      function find(items, name) {{
-        for (const item of items) {{
+  for name in ["bin", "default"] {
+    std::os::unix::fs::symlink(repo.join(name), source.join(name)).unwrap();
+  }
+  // Real built-in panels, discovery, file watcher and reload lifecycle. Do not
+  // stub rescanPlugins: that hid the destruction of an in-flight installer.
+  for name in ["plugins", "plugin-review"] {
+    assert!(
+      Command::new("cp")
+        .arg("-a")
+        .arg(repo.join("shell/plugins/panels").join(name))
+        .arg(source.join("shell/plugins/panels").join(name))
+        .status()
+        .unwrap()
+        .success()
+    );
+  }
+  let config = root.path().join("home/.config/omarchy/shell.json");
+  fs::create_dir_all(config.parent().unwrap()).unwrap();
+  let initial = r#"{"version":1,"bar":{"layout":{"left":[],"center":[],"right":[]}},"plugins":[]}"#;
+  fs::write(&config, initial).unwrap();
+  fs::write(source.join("config/omarchy/shell.json"), initial).unwrap();
+  let host_qml = source.join("shell/shell.qml");
+  let mut host = fs::read_to_string(repo.join("shell/shell.qml")).unwrap();
+  let end = host.rfind('}').unwrap();
+  host.insert_str(end, r##"
+  IpcHandler {
+    target: "manager-test"
+    function setSource(source: string): string {
+      shell.panelLoaders["omarchy.plugins"].item.model.source = source; return "ok"
+    }
+    function reviewState(): string {
+      const reviewer = shell.panelLoaders["omarchy.plugin-review"]?.item
+      if (!reviewer || !reviewer.opened) return JSON.stringify({visible:false, error:""})
+      function find(items, name) {
+        for (const item of items) {
           if (item.objectName === name) return item
           const found = find(item.children || [], name)
           if (found) return found
-        }}
+        }
         return null
-      }}
+      }
+      const window = find(reviewer.data, "plugin-review-window")
+      function point(name) {
+        const item = find(window.contentItem, name)
+        const p = item.mapToItem(null, item.width / 2, item.height / 2)
+        return [Math.round(p.x), Math.round(p.y)]
+      }
+      return JSON.stringify({visible:true, stage:reviewer.review.stage, busy:reviewer.review.busy,
+        error:reviewer.review.error, revision:reviewer.review.revision,
+        close:point("review-close"), enable:point("review-approve")})
+    }
+    function managerState(): string {
+      const reviewer = shell.panelLoaders["omarchy.plugin-review"]?.item
+      const review = reviewer && reviewer.opened ? reviewer.review : null
+      const manager = shell.panelLoaders["omarchy.plugins"]?.item
+      if (!manager) return JSON.stringify({error:"", gone:true, reviewId:review ? review.pluginId : ""})
+      function find(items, name) {
+        for (const item of items) {
+          if (item.objectName === name) return item
+          const found = find(item.children || [], name)
+          if (found) return found
+        }
+        return null
+      }
       const window = find(manager.data, "plugin-manager-window")
-      function point(name) {{
+      function point(name) {
         const item = find(window.contentItem, name)
         if (!item) return null
         const p = item.mapToItem(null, item.width / 2, item.height / 2)
         return [Math.round(p.x), Math.round(p.y)]
-      }}
+      }
       const model = manager.model
       const add = find(window.contentItem, "plugin-add")
-      return JSON.stringify({{busy:model.busy, error:model.error, inspected:model.inspected, adding:model.adding,
-        yolo:model.yolo, confirmed:model.trustConfirmed, selected:model.selectedId,
-        addEnabled:add.enabled, validate:point("plugin-validate"), add:point("plugin-add"),
-        mode:point("plugin-yolo"), trust:point("plugin-trust-confirm")}})
-    }}
-  }}
-}}
-"##, repo.display())).unwrap();
-  let env = operator::environment(root.path(), &repo, &host_qml, &module);
+      return JSON.stringify({gone:false, visible:manager.opened, reviewId:review ? review.pluginId : "",
+        busy:model.busy, error:model.error, inspected:model.inspected, adding:model.adding,
+        yolo:model.yolo, confirmed:model.trustConfirmed, confirmation:manager.confirmYolo, selected:model.selectedId,
+        plugins:model.plugins, confirmRemove:model.confirmRemove,
+        wardRow:point("plugin-row-test.manager-ward"), yoloRow:point("plugin-row-test.manager-yolo"),
+        disable:point("plugin-disable"), remove:point("plugin-remove"),
+        addEnabled:add.enabled, hasValidate:!!find(window.contentItem, "plugin-validate"), add:point("plugin-add"),
+        mode:point("plugin-yolo"), trust:point("plugin-trust-confirm"), cancelTrust:point("plugin-trust-cancel")})
+    }
+  }
+"##);
+  fs::write(&host_qml, host).unwrap();
+  let env = operator::environment(root.path(), &source, &host_qml, &module);
   let mut sources = vec![];
   for (id, ward) in [("test.manager-ward", true), ("test.manager-yolo", false)] {
     let source = root.path().join(id);
@@ -141,18 +190,19 @@ ShellRoot {{
   );
   let (send, receive) = mpsc::channel();
   let (ack, wait_ack) = mpsc::channel();
+  let installed_ward = config.parent().unwrap().join("plugins/test.manager-ward");
   let operator = std::thread::spawn(move || {
     let run = |args: &[&str]| operator::run(&env, "omarchy-shell", args);
     let start = Instant::now();
     loop {
-      if Command::new("timeout")
+      let ready = Command::new("timeout")
         .args(["1s", "omarchy-shell", "shell", "ping"])
         .envs(env.iter().cloned())
         .output()
         .unwrap()
         .status
-        .success()
-      {
+        .success();
+      if ready && run(&["shell", "listPlugins"]).contains("omarchy.plugins") {
         break;
       }
       assert!(
@@ -161,8 +211,9 @@ ShellRoot {{
       );
       std::thread::sleep(Duration::from_millis(25));
     }
-    let state =
-      || serde_json::from_str::<serde_json::Value>(&run(&["shell", "managerState"])).unwrap();
+    let state = || {
+      serde_json::from_str::<serde_json::Value>(&run(&["manager-test", "managerState"])).unwrap()
+    };
     let wait = |predicate: &dyn Fn(&serde_json::Value) -> bool| {
       let start = Instant::now();
       loop {
@@ -191,43 +242,107 @@ ShellRoot {{
       send.send(Stage::Capture(name)).unwrap();
       wait_ack.recv_timeout(Duration::from_secs(5)).unwrap();
     };
+    let review_state = || serde_json::from_str::<serde_json::Value>(&run(&["manager-test", "reviewState"])).unwrap();
+    let wait_review = |visible: bool| {
+      let started = Instant::now();
+      loop {
+        let state = review_state();
+        assert_eq!(state["error"], "", "review failed: {state}");
+        if state["visible"] == visible && (!visible || state["busy"] == false) { return state; }
+        assert!(started.elapsed() < Duration::from_secs(15), "review stalled: {state}");
+        std::thread::sleep(Duration::from_millis(30));
+      }
+    };
     for (index, source) in sources.iter().enumerate() {
-      run(&["shell", "summon", "omarchy.plugins", "{\"add\":true}"]);
+      assert_eq!(
+        run(&["shell", "summon", "omarchy.plugins", "{\"add\":true}"]).trim(),
+        "ok"
+      );
       wait(&|state| state["busy"] == false);
-      run(&["shell", "setSource", source.to_str().unwrap()]);
+      run(&["manager-test", "setSource", source.to_str().unwrap()]);
       if index == 1 {
         click(&state(), "mode");
         wait(&|state| state["yolo"] == true);
       }
+      let ready = wait(&|state| state["addEnabled"] == true);
+      assert_eq!(ready["hasValidate"], false, "separate validation control remains");
+      assert_eq!(ready["inspected"], serde_json::Value::Null);
       capture(if index == 0 {
         "manager-ward-add"
       } else {
         "manager-yolo-warning"
       });
-      click(&state(), "validate");
-      let checked = wait(&|state| state["busy"] == false && state["inspected"].is_object());
       if index == 1 {
-        assert_eq!(checked["confirmed"], false);
-        assert_eq!(
-          checked["addEnabled"], false,
-          "YOLO omitted trust acknowledgement"
-        );
+        assert_eq!(ready["confirmed"], false);
+        click(&ready, "add");
+        let confirmation = wait(&|state| state["confirmation"] == true);
+        assert_eq!(confirmation["busy"], false, "YOLO must not clone before final confirmation");
+        assert_eq!(confirmation["inspected"], serde_json::Value::Null);
         capture("manager-yolo-unconfirmed");
-        click(&checked, "trust");
-        wait(&|state| state["confirmed"] == true && state["addEnabled"] == true);
+        click(&confirmation, "cancelTrust");
+        let canceled = wait(&|state| state["confirmation"] == false);
+        assert_eq!(canceled["confirmed"], false);
+        assert_eq!(canceled["busy"], false);
+        click(&canceled, "add");
+        let confirmation = wait(&|state| state["confirmation"] == true);
+        capture("manager-yolo-confirmation");
+        click(&confirmation, "trust");
+      } else {
+        capture("manager-ward-ready");
+        click(&state(), "add");
+      }
+      if index == 0 {
+        wait(&|state| state["reviewId"] == "test.manager-ward");
+      } else {
+        wait(&|state| {
+          state["visible"] == true
+            && state["adding"] == false
+            && state["busy"] == false
+            && state["selected"] == "test.manager-yolo"
+        });
       }
       capture(if index == 0 {
-        "manager-ward-validated"
-      } else {
-        "manager-yolo-confirmed"
-      });
-      click(&state(), "add");
-      wait(&|state| state["adding"] == false && state["busy"] == false);
-      capture(if index == 0 {
-        "manager-ward-installed"
+        "manager-ward-staged"
       } else {
         "manager-yolo-installed"
       });
+      // Exercise a second explicit scan after the watcher/CLI races settle.
+      // Built-in review and manager state must remain visible throughout.
+      run(&["shell", "rescanPlugins"]);
+      std::thread::sleep(Duration::from_millis(500));
+      if index == 0 {
+        assert_eq!(
+          state()["reviewId"],
+          "test.manager-ward",
+          "rescan lost review handoff"
+        );
+        let staged = wait_review(true);
+        assert!(!installed_ward.exists(), "review prematurely installed the plugin");
+        let first_stage = staged["stage"].as_str().unwrap().to_owned();
+        let first_path = installed_ward.parent().unwrap().join(&first_stage);
+        assert!(first_path.is_dir());
+        click(&staged, "close");
+        wait_review(false);
+        run(&["shell", "summon", "omarchy.plugins", "{\"add\":true}"]);
+        wait(&|state| state["busy"] == false);
+        run(&["manager-test", "setSource", source.to_str().unwrap()]);
+        click(&wait(&|state| state["addEnabled"] == true), "add");
+        wait(&|state| state["reviewId"] == "test.manager-ward");
+        let retried = wait_review(true);
+        assert_ne!(retried["stage"].as_str().unwrap(), first_stage);
+        assert!(!first_path.exists(), "closing review did not discard its own temporary checkout");
+        assert!(!installed_ward.exists(), "retry prematurely installed the plugin");
+        capture("manager-ward-retried");
+        click(&retried, "enable");
+        wait_review(false);
+        assert!(installed_ward.join("manifest.json").is_file(), "Enable did not publish the reviewed checkout");
+      } else {
+        assert_eq!(
+          state()["selected"],
+          "test.manager-yolo",
+          "rescan lost installed selection"
+        );
+      }
     }
     let records: serde_json::Value = serde_json::from_str(&operator::run(
       &env,
@@ -249,6 +364,44 @@ ShellRoot {{
         .iter()
         .any(|row| row["id"] == "test.manager-ward" && row["mode"] == "ward")
     );
+    // Exercise the actual manager buttons, including the user's two-action
+    // Ward workflow. CLI-only removal missed retained identities in this list.
+    for (id, row) in [("test.manager-ward", "wardRow"), ("test.manager-yolo", "yoloRow")] {
+      let data_root = PathBuf::from(&env.iter().find(|(name, _)| *name == "XDG_STATE_HOME").unwrap().1).join("omarchy");
+      let store = PathBuf::from(&env.iter().find(|(name, _)| *name == "OMARCHY_WARD_STORE").unwrap().1);
+      let data = data_root.join("plugins").join(id);
+      fs::create_dir_all(&data).unwrap();
+      fs::write(data.join("saved.json"), "saved state").unwrap();
+      click(&wait(&|state| state["busy"] == false), row);
+      let selected = wait(&|state| state["selected"] == id && state["busy"] == false);
+      if id == "test.manager-ward" {
+        assert!(selected["plugins"].as_array().unwrap().iter().any(|plugin| plugin["id"] == id && plugin["enabled"] == true && plugin["approved"] == true));
+        click(&selected, "disable");
+        wait(&|state| state["busy"] == false && state["plugins"].as_array().unwrap().iter().any(|plugin| plugin["id"] == id && plugin["enabled"] == false && plugin["approved"] == false));
+        assert!(data.join("saved.json").exists() && store.join(format!("{id}.json")).exists(), "disable must retain saved data and permission history");
+        capture("manager-ward-disabled");
+      }
+      click(&state(), "remove");
+      let confirmation = wait(&|state| state["confirmRemove"] == true && state["busy"] == false);
+      capture(if id == "test.manager-ward" { "manager-ward-remove-confirmation" } else { "manager-yolo-remove-confirmation" });
+      assert!(confirmation["plugins"].as_array().unwrap().iter().any(|plugin| plugin["id"] == id));
+      click(&confirmation, "remove");
+      let removed = wait(&|state| state["busy"] == false && state["selected"] == "" && state["plugins"].as_array().unwrap().iter().all(|plugin| plugin["id"] != id));
+      assert_eq!(removed["visible"], true, "removal destroyed the manager");
+      assert!(!installed_ward.parent().unwrap().join(id).exists());
+      let catalog: serde_json::Value = serde_json::from_str(&operator::run(&env, "omarchy-plugin-list", &["--json"])).unwrap();
+      assert!(catalog.as_array().unwrap().iter().all(|plugin| plugin["id"] != id), "removal retained a security or installation record");
+      assert!(!data.exists());
+      assert!(!data_root.join("plugin-installations").join(id).exists());
+      assert!(!data_root.join("plugin-isolation").join(id).exists());
+      assert!(!store.join("identities").join(id).exists());
+      assert!(!store.join(format!("{id}.json")).exists());
+      capture(if id == "test.manager-ward" { "manager-ward-removed" } else { "manager-empty" });
+    }
+    run(&["shell", "rescanPlugins"]);
+    run(&["shell", "hide", "omarchy.plugins"]);
+    run(&["shell", "summon", "omarchy.plugins", "{}"]);
+    wait(&|state| state["busy"] == false && state["plugins"].as_array().unwrap().is_empty());
   });
   let start = Instant::now();
   let mut capture = None;
@@ -278,7 +431,7 @@ ShellRoot {{
       }
     }
     assert!(
-      start.elapsed() < Duration::from_secs(45),
+      start.elapsed() < Duration::from_secs(60),
       "manager fixture timed out: {}",
       fs::read_to_string(&log).unwrap()
     );

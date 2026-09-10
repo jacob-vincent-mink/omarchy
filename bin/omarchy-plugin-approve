@@ -1,16 +1,18 @@
 #!/bin/bash
 
-# omarchy:summary=Approve an exact Ward plugin revision and explicitly selected access
-# omarchy:args=<id> --revision <sha256> [--read <slot=folder>] [--write <slot=folder>] [--read-setting <key>] [--write-setting <key>] [--http <scope>] [--exec <name:leaf>] [--media <service>] [--allow-network] [--allow-network-proxy] [--allow-notifications] [--allow-open-urls] [--allow-storage] [--allow-desktop-geometry] [--allow-audio-playback] [--allow-microphone] [--allow-audio-capture] [--yes]
+# omarchy:summary=Approve a Ward plugin revision and its selected permissions
+# omarchy:args=<id> --revision <sha256> [--read <name>] [--write <name>] [--read-setting <key>] [--write-setting <key>] [--http <scope>] [--exec <name:leaf>] [--allow-media] [--allow-network] [--allow-network-proxy] [--allow-notifications] [--allow-open-urls] [--allow-storage] [--allow-desktop-geometry] [--allow-audio-playback] [--allow-microphone] [--allow-audio-capture] [--yes]
 # omarchy:examples=omarchy plugin approve acme.weather --revision <sha256> --allow-network
 
 set -euo pipefail
 
 fail() { echo "omarchy-plugin-approve: $*" >&2; exit 1; }
 if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
-  echo "Usage: omarchy plugin approve <id> --revision <sha256> [--read <slot=folder>] [--write <slot=folder>] [--read-setting <key>] [--write-setting <key>] [--http <scope>] [--exec <name:leaf>] [--media <service>] [--allow-network] [--allow-network-proxy] [--allow-notifications] [--allow-open-urls] [--allow-storage] [--allow-desktop-geometry] [--allow-audio-playback] [--allow-microphone] [--allow-audio-capture] [--yes]"
-  echo "All access defaults to denied. Approval does not start the plugin."
-  echo "--write allows reading and changing real host files. Revocation cannot undo completed writes."
+  echo "Usage: omarchy plugin approve <id> --revision <sha256> [--read <name>] [--write <name>] [--read-setting <key>] [--write-setting <key>] [--http <scope>] [--exec <name:leaf>] [--allow-media] [--allow-network] [--allow-network-proxy] [--allow-notifications] [--allow-open-urls] [--allow-storage] [--allow-desktop-geometry] [--allow-audio-playback] [--allow-microphone] [--allow-audio-capture] [--yes]"
+  echo "All permissions default to denied. Approval does not start the plugin."
+  echo "--read and --write select a named file or folder declared by the plugin, not a replacement path."
+  echo "--write allows reading and changing the declared files. Revoking permission cannot undo completed changes."
+  echo "--allow-media selects the exact media player declared by the plugin."
   echo "--http selects one reviewed HTTP scope. It cannot be combined with unrestricted --allow-network."
   echo "--allow-network-proxy selects public-destination HTTP/CONNECT streaming, including opaque TCP tunnels and data transmission; no local services. Cannot be combined with --allow-network."
   echo "--exec selects one command-tree leaf for a host executable, including its existing account and file access."
@@ -26,7 +28,7 @@ id="${1:-}"
 [[ -n $id ]] || fail "plugin id is required"
 shift
 revision=""
-selections='{"read":{},"write":{},"network":false,"http":[],"media":null,"notifications":false,"settings":{"read":[],"write":[]},"openUrls":false,"storage":false,"desktopGeometry":false}'
+selections='{"read":[],"write":[],"network":false,"http":[],"media":false,"notifications":false,"settings":{"read":[],"write":[]},"openUrls":false,"storage":false,"desktopGeometry":false}'
 assume_yes=0
 while (( $# > 0 )); do
   case "$1" in
@@ -36,15 +38,13 @@ while (( $# > 0 )); do
       shift 2
       ;;
     --read | --write)
-      [[ ${2:-} == *=/* ]] || fail "$1 requires slot=/absolute/folder"
+      [[ ${2:-} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && ${2:-} != *".."* ]] || fail "$1 requires a filesystem permission name declared by the plugin, not a path"
       if [[ $1 == "--write" ]]; then
         access="write"
       else
         access="read"
       fi
-      slot="${2%%=*}"
-      folder="${2#*=}"
-      selections=$(jq -c --arg access "$access" --arg slot "$slot" --arg folder "$folder" '.[$access][$slot] = $folder' <<<"$selections")
+      selections=$(jq -c --arg access "$access" --arg name "$2" '.[$access] += [$name] | .[$access] |= unique' <<<"$selections")
       shift 2
       ;;
     --http)
@@ -57,10 +57,9 @@ while (( $# > 0 )); do
       selections=$(jq -c --arg name "${2%%:*}" --arg leaf "${2#*:}" '.exec[$name] = ((.exec[$name] // []) + [$leaf] | unique)' <<<"$selections")
       shift 2
       ;;
-    --media)
-      [[ -n ${2:-} ]] || fail "--media requires one exact org.mpris.MediaPlayer2 service"
-      selections=$(jq -c --arg name "$2" '.media = $name' <<<"$selections")
-      shift 2
+    --allow-media)
+      selections=$(jq -c '.media = true' <<<"$selections")
+      shift
       ;;
     --allow-network)
       selections=$(jq -c '.network = true' <<<"$selections")
@@ -118,7 +117,7 @@ done
 [[ $revision =~ ^[0-9a-f]{64}$ ]] || fail "--revision must be the exact SHA-256 from omarchy plugin review"
 if (( ! assume_yes )); then
   [[ -t 0 && -t 1 ]] || fail "refusing approval without confirmation; pass --yes with explicit grants"
-  printf 'Plugin: %s\nRevision: %s\nSelected access:\n' "$id" "$revision"
+  printf 'Plugin: %s\nRevision: %s\nSelected permissions:\n' "$id" "$revision"
   jq . <<<"$selections"
   if jq -e '.write | length > 0' <<<"$selections" >/dev/null; then
     echo "Writable folders expose real host data for reading and changes. Revocation cannot undo completed writes."
@@ -126,8 +125,9 @@ if (( ! assume_yes )); then
   if jq -e '.exec // {} | length > 0' <<<"$selections" >/dev/null; then
     echo "Selected commands run with host files, network and existing account access. Revocation cannot undo completed actions."
   fi
-  gum confirm "Approve this revision and only this access?" || fail "aborted"
+  gum confirm "Approve this revision and only these permissions?" || fail "aborted"
 fi
 jq -cn --arg id "$id" --arg revision "$revision" --argjson selections "$selections" \
   '{operation: "approve", id: $id, revision: $revision, selections: $selections}' | omarchy-ward-runtime >/dev/null
+omarchy-shell -q shell rescanPlugins >/dev/null 2>&1 || true
 echo "Approved $id at $revision. No plugin was started."

@@ -376,7 +376,7 @@ fn selected_exec_crosses_only_the_broker_and_revocation_stops_owned_jobs() {
     ]}})).unwrap();
     fs::write(root.join("source/manifest.json"), serde_json::to_vec(&serde_json::json!({
       "schemaVersion":1,"id":"test.exec","name":"Exec fixture","version":"1","kinds":["panel"],"entryPoints":{"panel":"worker.qml"},
-      "sandbox":{"version":1,"entryPoint":"worker.qml","requests":{"exec":{"fixture":ask},"notifications":true,"filesystem":[{"name":"cli"}]}}
+      "sandbox":{"version":1,"entryPoint":"worker.qml","requests":{"exec":{"fixture":ask},"notifications":true,"filesystem":[{"name":"cli","path":env!("CARGO_BIN_EXE_omarchy-ward"),"target":"file"}]}}
     })).unwrap()).unwrap();
     fs::write(
       root.join("source/worker.qml"),

@@ -77,6 +77,8 @@ QtObject {
 
   function enable(id, placement) {
     if (!Util.isPlainObject(placement)) return "invalid placement"
+    if (pending[id] && manager.status(id).state === "starting")
+      return "plugin is already starting; wait before changing placement"
     const result = proposal(config, id, placement)
     if (result.error) return result.error
     const state = manager.enable(id, entry(config, id), result.placed)

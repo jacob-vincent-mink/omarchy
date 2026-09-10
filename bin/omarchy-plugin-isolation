@@ -3,7 +3,7 @@
 # omarchy:summary=Read or retain host-owned isolated plugin identities
 # omarchy:hidden=true
 
-# This is classification, never approval. Markers are monotonic and live
+# This is classification, never approval. Markers persist until removal and live
 # outside editable checkouts. Native records also identify older approvals,
 # including damaged/revoked records, without needing an installed runtime.
 set -euo pipefail
@@ -18,6 +18,15 @@ if [[ ${1:-} == "mark" ]]; then
   [[ $id =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$ && $id != *..* ]] || exit 1
   umask 077
   mkdir -p -- "$identities/$id"
+elif [[ ${1:-} == "forget" && $# == 2 ]]; then
+  id="$2"
+  [[ $id =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$ && $id != *..* ]] || exit 1
+  [[ ! -L $identities ]] || exit 1
+  if [[ -L $identities/$id ]]; then
+    rm -- "$identities/$id"
+  elif [[ -e $identities/$id ]]; then
+    rmdir -- "$identities/$id"
+  fi
 elif (( $# == 0 )) || [[ ${1:-} == "retained" && $# == 1 ]]; then
   {
     if (( $# == 0 )); then

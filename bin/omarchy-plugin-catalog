@@ -12,9 +12,12 @@
 
 set -euo pipefail
 
-identities=$(omarchy-plugin-isolation)
-retained=$(omarchy-plugin-isolation retained)
-installations=$(omarchy-plugin-installation list)
+if ! identities=$(omarchy-plugin-isolation 2>/dev/null) \
+  || ! retained=$(omarchy-plugin-isolation retained 2>/dev/null) \
+  || ! installations=$(omarchy-plugin-installation list 2>/dev/null); then
+  echo "omarchy-plugin-catalog: plugin isolation/provenance state is unavailable; refusing third-party loading. Check installed plugin helpers and state-directory permissions." >&2
+  exit 1
+fi
 
 paths=()
 
@@ -23,7 +26,11 @@ while IFS= read -r manifest; do
 done < <(find "$OMARCHY_PATH/shell/plugins" -mindepth 2 -maxdepth 4 -type f \( -name manifest.json -o -name '*.manifest.json' \) | sort)
 
 user_dir="$HOME/.config/omarchy/plugins"
+checkouts='[]'
 if [[ -d $user_dir ]]; then
+  # Keep broken checkouts manageable, but distinguish them from retained
+  # security identities whose installed files have already been removed.
+  checkouts=$(find "$user_dir" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\0' | jq -Rs 'split("\u0000") | map(select(length > 0))')
   while IFS= read -r manifest; do
     paths+=("$manifest")
   done < <(find -L "$user_dir" -mindepth 2 -maxdepth 2 -type f -name manifest.json \
@@ -36,7 +43,7 @@ fi
     jq -c --arg path "$manifest" '{manifest: ., path: $path}' "$manifest" ||
       echo "omarchy-plugin-catalog: invalid manifest: $manifest" >&2
   done
-} | jq -n --argjson identities "$identities" --argjson retained "$retained" --argjson installations "$installations" --arg bundled "$OMARCHY_PATH/shell/plugins/" --arg user "$user_dir/" '
+} | jq -n --argjson identities "$identities" --argjson retained "$retained" --argjson installations "$installations" --argjson checkouts "$checkouts" --arg bundled "$OMARCHY_PATH/shell/plugins/" --arg user "$user_dir/" '
   [ inputs
     | .manifest as $manifest
     | .path as $manifestPath
@@ -51,6 +58,7 @@ fi
         description: ($manifest.description // ""),
         kinds: ($manifest.kinds // []),
         firstParty: $firstParty,
+        installed: true,
         manifestPath: $manifestPath,
         sourceDir: $sourceDir,
         entryPoints: ($manifest.entryPoints // {}),
@@ -76,7 +84,7 @@ fi
   | . as $catalog
   | . + [$identities[] as $id | select(all($catalog[]; .id != $id)) |
       {id: $id, name: $id, sandboxed: true, wardIdentity: ($retained | index($id) != null), firstParty: false, kinds: [], entryPoints: {}, executionMode: "blocked",
-       sourceDir: ($user + $id), manifestPath: null, sandbox: null,
+       sourceDir: ($user + $id), manifestPath: null, sandbox: null, installed: ($checkouts | index($id) != null),
        error: "Isolated plugin checkout is missing or invalid"}]
   | unique_by(.id)
 '

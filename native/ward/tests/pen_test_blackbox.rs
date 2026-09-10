@@ -29,7 +29,7 @@ fn blackbox_a_plugin_cannot_self_approve_a_host_file_grant() {
   // *request*; the grant is a separate, reviewer-approved record that must
   // cover the request exactly. A manifest alone approves nothing.
   let manifest: Requests =
-    serde_json::from_value(json!({ "filesystem": [{ "name": "passwd", "access": "read" }] })).unwrap();
+    serde_json::from_value(json!({ "filesystem": [{ "name": "passwd", "path": "/etc/passwd", "target": "file", "access": "read" }] })).unwrap();
   // A manifest only *requests*; an empty grant is a gap, not a validate() error
   // (the request is optional). A required request that is not granted is a gap
   // reported to the reviewer.
@@ -39,17 +39,16 @@ fn blackbox_a_plugin_cannot_self_approve_a_host_file_grant() {
   let mut too_much = Grants::default();
   too_much.network = true;
   assert!(too_much.validate(&manifest).is_err());
-  // The reviewer must select the real directory; a name in the manifest is not
-  // a path the host accepts on its own.
-  let dir = std::env::temp_dir().join("ward-blackbox");
-  std::fs::create_dir_all(&dir).unwrap();
+  // Approval cannot substitute an unrelated directory for the declared file.
+  let root = tempfile::tempdir().unwrap();
+  let dir = root.path();
   let mut approved = Grants::default();
   approved
     .filesystem
     .insert("passwd".into(), FileSystemGrant::select(&dir, Access::Read, Target::Directory).unwrap());
+  assert!(approved.validate(&manifest).is_err());
+  approved.filesystem.insert("passwd".into(), FileSystemGrant::select(std::path::Path::new("/etc/passwd"), Access::Read, Target::File).unwrap());
   approved.validate(&manifest).unwrap();
-  // The grant points at the reviewer's chosen directory, never at /etc/passwd.
-  assert_eq!(approved.filesystem["passwd"].path, dir.canonicalize().unwrap());
 }
 
 // ---------------------------------------------------------------------------

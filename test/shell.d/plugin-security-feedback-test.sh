@@ -11,7 +11,7 @@ const functions = [...source.matchAll(/^  function \w+\([^\n]*\) \{[\s\S]*?^  \}
 const feedback = vm.createContext({windowStarted:0, delivered:0, lastEvent:null, delivery:{running:false}, Date:{now:()=>1000}})
 vm.runInContext(functions, feedback)
 assertEqual(feedback.report('test.hostile', 5), true, 'known broker denial creates host feedback')
-assertDeepEqual(feedback.delivery.command.slice(-2), ['Blocked test.hostile', 'Ward blocked this plugin from executing an unapproved host command.'], 'notice uses host-owned text and bound identity, not plugin prose')
+assertDeepEqual(feedback.delivery.command.slice(-2), ['Ward blocked a request', 'test.hostile tried to run a command outside its approved permissions.'], 'notice uses host-owned text and bound identity, not plugin prose')
 assertEqual(feedback.report('test.hostile', 999), false, 'unknown action codes do not create notifications')
 assertEqual(feedback.report('spoof\nSystem', 5), false, 'invalid identity cannot spoof notification text')
 feedback.delivery.running = false

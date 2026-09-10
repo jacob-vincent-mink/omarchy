@@ -111,7 +111,7 @@ fi
   (stubs / "omarchy-ward-runtime").chmod(0o755)
   run("omarchy-plugin-disable", "test.yolo")
   run("omarchy-plugin-remove", "test.yolo", "--yes")
-  assert not checkout.exists() and record_path.exists()
+  assert not checkout.exists() and not record_path.parent.exists()
   run("omarchy-plugin-add", "https://demo.invalid/yolo", "--yolo", "--yes")
   assert catalog()["test.yolo"]["executionMode"] == "yolo"
   print("ok - damaged YOLO can be disabled, removed and explicitly reinstalled without native Ward")
@@ -128,7 +128,7 @@ fi
   run(git, "-C", str(source), "add", ".")
   run(git, "-C", str(source), "-c", "commit.gpgsign=false", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "remove declaration")
   assert "retained Ward identity" in run("omarchy-plugin-add", str(source), "--yolo", "--yes", ok=False)
-  print("ok - removal or a later manifest cannot convert retained Ward identity to YOLO")
+  print("ok - deleting checkout files or changing a manifest is not explicit full removal")
 
   source = fixture("test.local")
   assert "requires an existing local" in run("omarchy-plugin-add", "https://demo.invalid/local", "--trusted-local", "--yes", ok=False)

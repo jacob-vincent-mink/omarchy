@@ -141,6 +141,6 @@ mod tests {
     assert!(serde_json::from_value::<Requests>(json!({"read": ["notes"]})).is_err());
     assert!(serde_json::from_value::<Requests>(json!({"filesystem": ["notes"]})).is_err());
     assert!(serde_json::from_value::<Grants>(json!({"read": {}})).is_err());
-    assert!(serde_json::from_value::<Requests>(json!({"filesystem": [{"name": "notes"}]})).is_ok());
+    assert!(serde_json::from_value::<Requests>(json!({"filesystem": [{"name": "notes", "path": "/data/notes"}]})).is_ok());
   }
 }

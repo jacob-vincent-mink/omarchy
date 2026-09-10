@@ -25,7 +25,6 @@ fn graphical_review_approves_only_selected_access_before_enabling() {
 enum Stage {
   Click(i32, i32),
   Scroll(i32),
-  Key(u32),
   Capture(&'static str),
   Enabled,
   Disabled,
@@ -48,6 +47,10 @@ fn activation(review_ui: bool) {
   let home = root.path().join("home");
   let plugin = home.join(".config/omarchy/plugins/test.activation");
   fs::create_dir_all(&plugin).unwrap();
+  // Host runtime and credentials live under root; grants must be outside it.
+  let data_root = tempfile::tempdir().unwrap();
+  let requested = data_root.path().join("requested folder");
+  fs::create_dir(&requested).unwrap();
   for module in ["Commons", "Ui"] {
     std::os::unix::fs::symlink(repo.join("shell").join(module), root.path().join(module)).unwrap();
   }
@@ -55,7 +58,7 @@ fn activation(review_ui: bool) {
     "schemaVersion": 1, "id": "test.activation", "name": "Activation", "version": "1", "kinds": ["panel"],
     "entryPoints": {"panel": "worker.qml"}, "sandbox": {
       "version": 1, "entryPoint": "worker.qml", "requests": {
-        "network": true, "notifications": true, "storage": true, "desktopGeometry": true, "settings": {"write": ["width"]}, "filesystem": [{"name": "notes"}],
+        "network": true, "notifications": {"required": true}, "storage": true, "desktopGeometry": true, "settings": {"write": ["width"]}, "filesystem": [{"name": "notes", "path": requested, "target": "directory", "required": true}],
         "networkProxy": true, "audioPlayback": true, "microphone": true, "audioCapture": true,
         "exec": {"helper": {"executable": "/usr/bin/printf", "lifetime": "plugin", "tree": {
           "next": [{"arg": {"kind": "exact", "value": "fixture"}, "then": {"end": "session"}}]
@@ -137,15 +140,14 @@ ShellRoot {{
       }}
       var review = reviewer.review
       var scroll = find(window.contentItem, "review-scroll")
-      var folder = find(window.contentItem, "review-folder-notes")
       var execChoice = find(window.contentItem, "review-exec-helper-session")
+      var notificationChoice = find(window.contentItem, "review-notifications")
       var scrollTop = scroll.mapToItem(null, 0, 0).y
       return JSON.stringify({{visible: window.visible, busy: review.busy, error: review.error, revision: review.revision,
         scrollY: scroll.contentItem.contentY, scrollMoving: scroll.contentItem.moving,
         scrollTop: scrollTop, scrollBottom: scrollTop + scroll.height,
         folders: review.folders, folderField: point("review-folder-notes"),
-        folderFocus: folder && folder.activeFocus,
-        approved: review.selectionApproved, current: review.current, network: review.network, notifications: review.notifications, settings: review.settings,
+        enableAvailable: find(window.contentItem, "review-approve").enabled, current: review.current, network: review.network, notifications: review.notifications, settings: review.settings,
         networkProxy: review.networkProxy, proxyButton: point("review-network-proxy"),
         audioPlayback: review.audioPlayback, playbackButton: point("review-audio-playback"),
         microphone: review.microphone, microphoneButton: point("review-microphone"),
@@ -153,11 +155,14 @@ ShellRoot {{
         settingsButton: point("review-setting-write-width"),
         storage: review.storage, storageButton: point("review-storage"),
         desktopGeometry: review.desktopGeometry, geometryButton: point("review-desktop-geometry"),
-        http: review.http, httpButton: point("review-http-catalog"),
-        exec: review.exec, execButton: point("review-exec-helper-session"),
+        http: review.http, httpButton: point("review-http-catalog"), httpDisclosure: point("review-http-details-catalog"),
+        exec: review.exec, execButton: point("review-exec-helper-session"), execDisclosure: point("review-exec-details-helper-session"),
         execDescription: execChoice ? execChoice.description : "",
+        notificationsStatic: !!find(notificationChoice ? notificationChoice.children : [], "permission-required"),
+        notificationsToggle: !!find(notificationChoice ? notificationChoice.children : [], "permission-toggle"),
+        execToggle: !!find(execChoice ? execChoice.children : [], "permission-toggle"),
         httpDetails: point("review-http-scope-catalog"),
-        notificationButton: point("review-notifications"), approvalButton: point("review-approve"), revokeButton: point("review-revoke"), closeButton: point("review-close")}})
+        notificationButton: point("review-notifications"), approvalButton: point("review-approve"), removeButton: point("review-remove"), closeButton: point("review-close")}})
     }}
   }}
 }}
@@ -197,6 +202,8 @@ ShellRoot {{
           "test.activation",
           "--revision",
           review["revision"].as_str().unwrap(),
+          "--allow-notifications",
+          "--read", "notes",
           "--yes",
         ],
       );
@@ -265,10 +272,11 @@ ShellRoot {{
       let state = wait(&|state| state["busy"] == false && state["revision"].is_object());
       assert_eq!(state["error"], "");
       assert_eq!(state["network"], false);
-      assert_eq!(state["notifications"], false);
+      assert_eq!(state["notifications"], true);
       assert_eq!(state["settings"]["write"], serde_json::json!([]));
       assert_eq!(state["http"], serde_json::json!([]));
       assert_eq!(state["current"]["approved"], false);
+      assert_eq!(state["enableAvailable"], true, "required permissions start on in the draft");
       click(&reveal("notificationButton"), "notificationButton");
       wait(&|state| state["notifications"] == true);
       let capture = |label| {
@@ -315,42 +323,42 @@ ShellRoot {{
       capture("storage-denied");
       click(&reveal("storageButton"), "storageButton");
       wait(&|state| state["storage"] == true);
-      assert!(state["execDescription"].as_str().unwrap().contains("Long-running"));
+      assert_eq!(state["execDescription"], "/usr/bin/printf");
+      assert_eq!(state["notificationsStatic"], true);
+      assert_eq!(state["notificationsToggle"], false);
+      assert_eq!(state["execToggle"], true);
       click(&reveal("execButton"), "execButton");
       wait(&|state| state["exec"]["helper"] == serde_json::json!(["session"]));
+      click(&reveal("execDisclosure"), "execDisclosure");
       capture("exec-lifetime");
       click(&reveal("settingsButton"), "settingsButton");
       wait(&|state| state["settings"]["write"] == serde_json::json!(["width"]));
       click(&reveal("httpButton"), "httpButton");
       wait(&|state| state["http"] == serde_json::json!(["catalog"]));
+      click(&reveal("httpDisclosure"), "httpDisclosure");
       capture("http");
       reveal("httpDetails");
       capture("http-scope");
       click(&reveal("folderField"), "folderField");
-      wait(&|state| state["folderFocus"] == true);
-      progress.send(Stage::Key(53)).unwrap(); // x: an invalid relative folder
-      capture("typing");
-      let state = wait(&|state| state["folders"]["notes"] == "x");
-      click(&state, "approvalButton");
-      let state = wait(&|state| {
-        state["busy"] == false
-          && state["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("--read requires")
-      });
+      let state = wait(&|state| state["folders"]["notes"] == true);
       assert_eq!(state["current"]["approved"], false);
-      capture("error");
+      assert_eq!(state["revision"]["paths"]["notes"], state["revision"]["requests"]["filesystem"][0]["path"]);
+      capture("folder-allowed");
       click(&reveal("folderField"), "folderField");
-      wait(&|state| state["folderFocus"] == true);
-      progress.send(Stage::Key(22)).unwrap(); // Backspace: leave the folder denied
-      let state = wait(&|state| state["folders"]["notes"] == "");
+      let state = wait(&|state| state["folders"]["notes"] == true);
+      assert_eq!(state["enableAvailable"], true, "required folders cannot be deselected");
+      capture("folder-required");
+      click(&reveal("folderField"), "folderField");
+      let state = wait(&|state| state["folders"]["notes"] == true);
+      assert_eq!(state["enableAvailable"], true);
       click(&state, "approvalButton");
-      let state = wait(&|state| state["approved"] == true && state["busy"] == false);
+      wait(&|state| state["visible"] == false && state["busy"] == false);
+      run("omarchy-plugin-review", &["test.activation", "--ui"]);
+      let state = wait(&|state| state["current"]["enabled"] == true && state["busy"] == false);
       assert_eq!(state["error"], "");
       assert_eq!(
-        state["current"]["enabled"], false,
-        "approval started a plugin"
+        state["current"]["enabled"], true,
+        "one Enable action must approve and enable the plugin"
       );
       assert_eq!(state["current"]["grants"]["network"], false);
       assert_eq!(state["current"]["grants"]["networkProxy"], true);
@@ -369,13 +377,8 @@ ShellRoot {{
         state["current"]["grants"]["settings"],
         serde_json::json!({"read": [], "write": ["width"]})
       );
-      assert_eq!(
-        state["current"]["grants"]["filesystem"],
-        serde_json::json!({})
-      );
-      capture("approved");
-      click(&state, "approvalButton");
-      let state = wait(&|state| state["current"]["enabled"] == true && state["busy"] == false);
+      assert_eq!(state["current"]["grants"]["filesystem"]["notes"]["path"], state["revision"]["paths"]["notes"]);
+      assert_eq!(state["current"]["grants"]["filesystem"]["notes"]["access"], "read");
       capture("enabled");
       click(&state, "closeButton");
       wait(&|state| state["visible"] == false);
@@ -403,8 +406,8 @@ ShellRoot {{
       assert_eq!(state["current"]["grants"]["desktopGeometry"], true);
       assert_eq!(state["current"]["grants"]["storage"], true);
       assert_eq!(
-        state["notifications"], false,
-        "reopen silently selected an existing grant"
+        state["notifications"], true,
+        "reopen must select the required notification permission"
       );
       assert_eq!(
         state["http"],
@@ -429,14 +432,11 @@ ShellRoot {{
         state["current"]["grants"]["notifications"], true,
         "reopen changed the saved grant"
       );
-      click(&state, "revokeButton");
-      let state = wait(&|state| {
-        state["current"]["enabled"] == false
-          && state["current"]["approved"] == false
-          && state["busy"] == false
-      });
-      click(&state, "closeButton");
-      wait(&|state| state["visible"] == false);
+      click(&state, "removeButton");
+      wait(&|state| state["visible"] == false && state["busy"] == false);
+      assert!(!plugin.exists(), "Deny & Remove must remove the installed checkout");
+      let catalog: serde_json::Value = serde_json::from_str(&run("omarchy-plugin-list", &["--json"])).unwrap();
+      assert!(!catalog.as_array().unwrap().iter().any(|row| row["id"] == "test.activation"), "Deny & Remove must purge the security identity, not only revoke approval");
     } else {
       run("omarchy-plugin-disable", &["test.activation"]);
     }
@@ -464,11 +464,6 @@ ShellRoot {{
         Stage::Click(x, y) => {
           for kind in [0, 1] {
             outer.graphics.input(kind, 0x110, x, y, time).unwrap();
-          }
-        }
-        Stage::Key(code) => {
-          for kind in [3, 4] {
-            outer.graphics.input(kind, code, 0, 0, time).unwrap();
           }
         }
         Stage::Scroll(vertical) => outer

@@ -41,7 +41,7 @@ plugins=$(jq -cn --argjson catalog "$catalog" --argjson live "$shell_plugins" --
     $catalog | map(. as $entry |
       (first($live[] | select(.id == $entry.id)) // {}) as $running |
       (first($native[] | select(.id == $entry.id)) // {}) as $approval |
-      ($entry + {enabled: null} + $running) |
+      ($entry + {enabled: null} + $running + {installed: $entry.installed}) |
       if $entry.sandboxed then . + {
         enabled: ($running.enabled // false),
         approved: (if $nativeError != "" then null else ($approval.approved // false) end),
@@ -59,7 +59,8 @@ fi
 jq -r '
   .[] |
   [ .id,
-    (if .error then "error"
+    (if .error and .enabled then "running/error"
+      elif .error then "error"
       elif .enabled then "enabled"
       elif .approved then "approved"
       elif .enabled == null then "unknown"

@@ -127,6 +127,9 @@ impl Serialize for Request {
 #[serde(deny_unknown_fields)]
 pub struct FileSystemRequest {
   pub name: String,
+  pub path: String,
+  #[serde(default = "directory_target")]
+  pub target: Target,
   #[serde(default)]
   pub access: Access,
   #[serde(default)]
@@ -134,27 +137,67 @@ pub struct FileSystemRequest {
 }
 
 impl FileSystemRequest {
-  pub fn optional(name: impl Into<String>) -> Self {
+  pub fn optional(name: impl Into<String>, path: impl Into<String>) -> Self {
     Self {
       name: name.into(),
+      path: path.into(),
+      target: Target::Directory,
       access: Access::Read,
       required: false,
     }
   }
-  pub fn required(name: impl Into<String>) -> Self {
+  pub fn required(name: impl Into<String>, path: impl Into<String>) -> Self {
     Self {
       name: name.into(),
+      path: path.into(),
+      target: Target::Directory,
       access: Access::Read,
       required: true,
     }
   }
-  pub fn write(name: impl Into<String>, required: bool) -> Self {
+  pub fn write(name: impl Into<String>, path: impl Into<String>, required: bool) -> Self {
     Self {
       name: name.into(),
+      path: path.into(),
+      target: Target::Directory,
       access: Access::ReadWrite,
       required,
     }
   }
+
+  pub fn resolved_path(&self) -> io::Result<PathBuf> {
+    requested_path(&self.path, |key| std::env::var_os(key).map(PathBuf::from))
+  }
+}
+
+fn directory_target() -> Target { Target::Directory }
+
+fn requested_path(value: &str, environment: impl Fn(&str) -> Option<PathBuf>) -> io::Result<PathBuf> {
+  if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
+    return Err(invalid("filesystem request must declare a bounded path"));
+  }
+  let (root, relative) = if let Some(token) = value.strip_prefix('$') {
+    let (name, relative) = token.split_once('/').ok_or_else(|| invalid("filesystem path token requires a relative path"))?;
+    let suffix = match name {
+      "HOME" => "",
+      "XDG_CONFIG_HOME" => ".config",
+      "XDG_DATA_HOME" => ".local/share",
+      "XDG_STATE_HOME" => ".local/state",
+      "XDG_CACHE_HOME" => ".cache",
+      _ => return Err(invalid("unsupported filesystem path token")),
+    };
+    let root = environment(name).filter(|path| !path.as_os_str().is_empty())
+      .or_else(|| environment("HOME").map(|home| home.join(suffix)))
+      .ok_or_else(|| invalid("host home directory is unavailable"))?;
+    if !safe_absolute(&root) { return Err(invalid("host filesystem path root must be absolute")); }
+    (root, relative)
+  } else {
+    (PathBuf::from("/"), value.strip_prefix('/').ok_or_else(|| invalid("filesystem request must declare an absolute path or supported home token"))?)
+  };
+  if relative.split('/').any(|part| part.is_empty() || part == "." || part == ".." || part.contains('$')) {
+    return Err(invalid("filesystem request path must be normalized"));
+  }
+  Ok(root.join(relative))
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -166,7 +209,7 @@ pub struct Requests {
   pub network_proxy: Request,
   pub http: BTreeMap<String, crate::http::Ask>,
   pub exec: BTreeMap<String, crate::exec::Ask>,
-  pub media: Request,
+  pub media: Option<MediaRequest>,
   pub notifications: Request,
   #[serde(rename = "audioPlayback")]
   pub audio_playback: Request,
@@ -179,6 +222,14 @@ pub struct Requests {
   pub storage: Request,
   #[serde(rename = "desktopGeometry")]
   pub desktop_geometry: Request,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MediaRequest {
+  pub service: String,
+  #[serde(default)]
+  pub required: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -247,9 +298,7 @@ pub enum Target {
   Directory,
 }
 
-/// One user-selected host entry: pinned identity plus the typed access and
-/// target kind. This selection comes from the approving user, never from the
-/// plugin manifest.
+/// User approval pins the declared host entry's identity, access and target.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileSystemGrant {
@@ -271,15 +320,7 @@ impl FileSystemGrant {
     let path = path.canonicalize()?;
     reject_unsafe_roots(&path)?;
     let file = match target {
-      // A single file is bound exactly; confirm the canonicalized path is a
-      // regular file so the bind is a file bind, not a directory bind.
-      Target::File => {
-        let metadata = std::fs::metadata(&path)?;
-        if !metadata.is_file() {
-          return Err(invalid("file target is not a regular file"));
-        }
-        File::open(&path)?
-      }
+      Target::File => open_regular_file(&path)?,
       Target::Directory => open_directory(&path)?,
     };
     let metadata = file.metadata()?;
@@ -305,13 +346,7 @@ impl FileSystemGrant {
     }
     reject_unsafe_roots(&self.path)?;
     let file = match self.target {
-      Target::File => {
-        let metadata = std::fs::metadata(&self.path)?;
-        if !metadata.is_file() {
-          return Err(invalid("file target is not a regular file"));
-        }
-        File::open(&self.path)?
-      }
+      Target::File => open_regular_file(&self.path)?,
       Target::Directory => open_directory(&self.path)?,
     };
     let metadata = file.metadata()?;
@@ -504,7 +539,7 @@ impl Grants {
       || self.open_urls && !requests.open_urls.asked()
       || self.storage && !requests.storage.asked()
       || self.desktop_geometry && !requests.desktop_geometry.asked()
-      || self.media.is_some() && !requests.media.asked()
+      || self.media.as_ref().is_some_and(|service| requests.media.as_ref().is_none_or(|ask| &ask.service != service))
     {
       return Err(invalid("grants exceed the reviewed request"));
     }
@@ -523,25 +558,19 @@ impl Grants {
       let asked = requests
         .filesystem
         .iter()
-        .any(|ask| ask.name == *name && ask.access != Access::Write);
-      if !asked || !safe_absolute(&directory.path) {
-        return Err(invalid(
-          "directory grant exceeds or diverges from the reviewed request",
-        ));
-      }
-      // The grant must never exceed the requested access: a recursive bind
-      // exposes reads, so a writable grant is read-write and is only allowed
-      // when the request asked for writable access; a read-only grant for a
-      // read-only request is the plain case.
-      if directory.access == Access::ReadWrite
-        && !requests
-          .filesystem
-          .iter()
-          .any(|ask| ask.name == *name && ask.access == Access::ReadWrite)
+        .find(|ask| ask.name == *name && ask.access != Access::Write)
+        .ok_or_else(|| invalid("filesystem permission was not requested"))?;
+      if !safe_absolute(&directory.path)
+        || directory.target != asked.target
+        || directory.path != asked.resolved_path()?.canonicalize()?
       {
         return Err(invalid(
-          "writable grant exceeds the reviewed request; approve a read-only grant instead",
+          "filesystem grant differs from the declared path or target",
         ));
+      }
+      // Each named permission is one allow/deny choice, including its access.
+      if directory.access != asked.access {
+        return Err(invalid("filesystem grant differs from the declared access"));
       }
     }
     if let Some(name) = &self.media {
@@ -583,7 +612,7 @@ impl Grants {
         self.network_proxy,
         requests.network_proxy.asked(),
       ),
-      ("media", self.media.is_some(), requests.media.asked()),
+      ("media", self.media.is_some(), requests.media.is_some()),
       (
         "notifications",
         self.notifications,
@@ -660,7 +689,7 @@ impl Grants {
         requests.audio_capture.required,
         self.audio_capture,
       ),
-      ("media", requests.media.required, self.media.is_some()),
+      ("media", requests.media.as_ref().is_some_and(|ask| ask.required), self.media.is_some()),
       (
         "notifications",
         requests.notifications.required,
@@ -702,6 +731,7 @@ impl Grants {
 }
 
 fn validate_requests(requests: &Requests) -> io::Result<()> {
+  if let Some(ask) = &requests.media { validate_media(&ask.service)?; }
   if requests.exec.len() > 16 {
     return Err(invalid("too many host executable requests"));
   }
@@ -727,6 +757,7 @@ fn validate_requests(requests: &Requests) -> io::Result<()> {
   }
   for ask in &requests.filesystem {
     validate_id(&ask.name)?;
+    ask.resolved_path()?;
     // A write-only request is not enforceable (a bind exposes reads) and is
     // rejected rather than silently widened to read-write.
     if ask.access == Access::Write {
@@ -811,6 +842,18 @@ fn safe_absolute(path: &Path) -> bool {
       .components()
       .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
 }
+fn open_regular_file(path: &Path) -> io::Result<File> {
+  // Validate the opened descriptor, not a prior path lookup that can race a
+  // replacement. Nonblocking prevents a substituted FIFO hanging approval.
+  let file = OpenOptions::new().read(true)
+    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+    .open(path)?;
+  if !file.metadata()?.is_file() {
+    return Err(invalid("file target is not a regular file"));
+  }
+  Ok(file)
+}
+
 fn open_directory(path: &Path) -> io::Result<File> {
   if !safe_absolute(path) {
     return Err(invalid(
@@ -834,6 +877,87 @@ pub(crate) fn invalid(message: &str) -> io::Error {
 mod tests {
   use super::*;
   use std::fs;
+
+  #[test]
+  fn filesystem_paths_expand_only_declared_host_roots() {
+    let environment = |name: &str| match name {
+      "HOME" => Some(PathBuf::from("/home/example")),
+      "XDG_STATE_HOME" => Some(PathBuf::from("/data/state")),
+      _ => None,
+    };
+    assert_eq!(requested_path("$XDG_STATE_HOME/example", environment).unwrap(), PathBuf::from("/data/state/example"));
+    assert_eq!(requested_path("$XDG_DATA_HOME/example", environment).unwrap(), PathBuf::from("/home/example/.local/share/example"));
+    assert_eq!(requested_path("$HOME/My files", environment).unwrap(), PathBuf::from("/home/example/My files"));
+    assert_eq!(requested_path("/data/example.txt", environment).unwrap(), PathBuf::from("/data/example.txt"));
+    for value in ["", "/", "relative", "~/notes", "$HOME", "$HOME/../secret", "$HOME/./notes", "$HOME//notes", "$HOME/notes/", "$UNKNOWN/notes", "${HOME}/notes", "$(id)/notes", "/data/$HOME", "/data/notes\n"] {
+      assert!(requested_path(value, environment).is_err(), "accepted {value:?}");
+    }
+    assert!(requested_path("$XDG_STATE_HOME/example", |_| Some(PathBuf::from("relative"))).is_err());
+    assert!(requested_path("$HOME/example", |_| None).is_err());
+    assert!(serde_json::from_str::<Requests>(r#"{"filesystem":[{"name":"notes"}]}"#).is_err());
+  }
+
+  #[test]
+  fn exact_file_grants_validate_opened_type_and_refuse_replacement_links() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("file");
+    fs::write(&path, "original").unwrap();
+    let grant = FileSystemGrant::select(&path, Access::Read, Target::File).unwrap();
+    grant.open().unwrap();
+    let moved = root.path().join("moved");
+    fs::rename(&path, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &path).unwrap();
+    assert!(grant.open().is_err(), "even a link to the pinned inode must not replace a file");
+    assert!(open_regular_file(root.path()).is_err());
+    let fifo = root.path().join("pipe");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    assert!(open_regular_file(&fifo).is_err(), "a FIFO must be rejected without blocking");
+  }
+
+  #[test]
+  fn grants_cannot_substitute_declared_paths_or_target_kinds() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("file");
+    let other = root.path().join("other");
+    fs::write(&file, "requested").unwrap();
+    fs::write(&other, "not requested").unwrap();
+    let requests: Requests = serde_json::from_value(serde_json::json!({"filesystem": [{
+      "name": "data", "path": file, "target": "file", "access": "readwrite"
+    }]})).unwrap();
+    let mut grants = Grants::default();
+    grants.filesystem.insert("data".into(), FileSystemGrant::select(&file, Access::ReadWrite, Target::File).unwrap());
+    grants.validate(&requests).unwrap();
+    grants.filesystem.insert("data".into(), FileSystemGrant::select(&file, Access::Read, Target::File).unwrap());
+    assert!(grants.validate(&requests).is_err(), "a named permission cannot change its requested access");
+    grants.filesystem.insert("data".into(), FileSystemGrant::select(&other, Access::Read, Target::File).unwrap());
+    assert!(grants.validate(&requests).is_err());
+    grants.filesystem.insert("data".into(), FileSystemGrant::select(root.path(), Access::Read, Target::Directory).unwrap());
+    assert!(grants.validate(&requests).is_err());
+    let mut grant = FileSystemGrant::select(&file, Access::Read, Target::File).unwrap();
+    grant.target = Target::Directory;
+    grants.filesystem.insert("data".into(), grant);
+    assert!(grants.validate(&requests).is_err());
+  }
+
+  #[test]
+  fn media_permissions_bind_one_declared_service() {
+    let requests: Requests = serde_json::from_value(serde_json::json!({"media": {
+      "service": "org.mpris.MediaPlayer2.fixture", "required": true
+    }})).unwrap();
+    validate_requests(&requests).unwrap();
+    assert_eq!(Grants::default().required_gap(&requests), ["media"]);
+    Grants { media: Some("org.mpris.MediaPlayer2.fixture".into()), ..Grants::default() }.validate(&requests).unwrap();
+    assert!(Grants { media: Some("org.mpris.MediaPlayer2.other".into()), ..Grants::default() }.validate(&requests).is_err());
+    for value in [serde_json::json!(true), serde_json::json!({}), serde_json::json!({"required": true})] {
+      assert!(serde_json::from_value::<Requests>(serde_json::json!({"media":value})).is_err());
+    }
+    for service in ["*", "org.mpris.MediaPlayer2.*", "org.freedesktop.Notifications"] {
+      let requests: Requests = serde_json::from_value(serde_json::json!({"media":{"service":service}})).unwrap();
+      assert!(validate_requests(&requests).is_err());
+    }
+  }
+
   #[test]
   fn worker_view_exposes_slots_without_host_authority_metadata() {
     let root = tempfile::tempdir().unwrap();
@@ -918,17 +1042,17 @@ mod tests {
   #[test]
   fn requests_never_become_implicit_grants() {
     let requests = Requests {
-      filesystem: vec![FileSystemRequest::optional("music")],
+      filesystem: vec![FileSystemRequest::optional("music", "/data/music")],
       http: BTreeMap::new(),
       exec: BTreeMap::new(),
       network: Request {
         asked: true,
         required: true,
       },
-      media: Request {
-        asked: true,
+      media: Some(MediaRequest {
+        service: "org.mpris.MediaPlayer2.firefox.instance1".into(),
         required: true,
-      },
+      }),
       notifications: Request {
         asked: true,
         required: true,
@@ -1094,6 +1218,8 @@ mod tests {
     let requests = Requests {
       filesystem: vec![FileSystemRequest {
         name: "shared".into(),
+        path: root.path().join("data").to_str().unwrap().into(),
+        target: Target::Directory,
         access: Access::ReadWrite,
         required: false,
       }],
@@ -1134,7 +1260,7 @@ mod tests {
     fs::create_dir(root.path().join("data")).unwrap();
     let requests = Requests {
       filesystem: (0..MAX_GRANTED_DIRS + 1)
-        .map(|i| FileSystemRequest::optional(format!("dir{i:03}")))
+        .map(|i| FileSystemRequest::optional(format!("dir{i:03}"), root.path().join("data").to_str().unwrap()))
         .collect(),
       ..Default::default()
     };
@@ -1163,7 +1289,7 @@ mod tests {
     assert!(serde_json::from_str::<Requests>(r#"{"filesystem":[{"name":"x","junk":1}]}"#).is_err());
     assert!(serde_json::from_str::<Requests>(r#"{"filesystem":[{"required":true}]}"#).is_err());
     let requests = serde_json::from_str::<Requests>(
-      r#"{"filesystem":[{"name":"notes","required":true}, {"name":"music"}]}"#,
+      r#"{"filesystem":[{"name":"notes","path":"/data/notes","required":true}, {"name":"music","path":"/data/music"}]}"#,
     )
     .unwrap();
     assert_eq!(requests.filesystem.len(), 2);
@@ -1179,19 +1305,19 @@ mod tests {
   fn directory_required_and_optional_are_both_blocking() {
     // An optional directory the user declined does not block startup.
     let requests = Requests {
-      filesystem: vec![FileSystemRequest::optional("notes")],
+      filesystem: vec![FileSystemRequest::optional("notes", "/data/notes")],
       ..Default::default()
     };
     assert!(Grants::default().required_gap(&requests).is_empty());
     // A required directory the user declined blocks activation by name.
     let requests = Requests {
-      filesystem: vec![FileSystemRequest::required("notes")],
+      filesystem: vec![FileSystemRequest::required("notes", "/data/notes")],
       ..Default::default()
     };
     assert_eq!(Grants::default().required_gap(&requests), vec!["notes"]);
     // A required writable directory is only satisfied by a writable grant.
     let requests = Requests {
-      filesystem: vec![FileSystemRequest::write("notes", true)],
+      filesystem: vec![FileSystemRequest::write("notes", "/data/notes", true)],
       ..Default::default()
     };
     assert!(

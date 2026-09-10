@@ -24,12 +24,19 @@ QtObject {
   property var installedPlugins: ({})
   property int registryRevision: 0
   property bool scanning: false
+  property bool rescanPending: false
   property var isolatedIdentities: ({})
   property bool isolationAvailable: false
   property string lastEnableError: ""
 
   signal pluginsChanged()
   signal scanFinished()
+  onScanFinished: {
+    if (rescanPending) {
+      rescanPending = false
+      Qt.callLater(rescan)
+    }
+  }
   signal pluginLoadFailed(string id, string error)
   signal localPluginChanged(string id)
 
@@ -783,7 +790,10 @@ QtObject {
   }
 
   function rescan() {
-    if (scanning) return
+    if (scanning) {
+      rescanPending = true
+      return
+    }
     scanning = true
     // $0 = first-party dir, $1 = third-party dir. Some bash versions need the explicit -- separator.
     // First-party plugins may be grouped one level deeper, e.g. panels/audio
