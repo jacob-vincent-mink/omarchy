@@ -1,40 +1,36 @@
 # Ward threat model
 
-A security assessment of **Ward**, the Rust runtime that runs Quickshell
-plugins in a sandboxed worker ([`native/ward`](../../native/ward)). Ward gives
-a reviewer one approval, one supervisor, and one sandboxed worker; a plugin
-runs under its admitted grants and nothing below a trust boundary can widen its
-own authority.
+Current assessment of the Rust plugin isolation runtime in [native/ward](../../native/ward), including the September 10 PR review fixes and the local `security/ward-fix` integration. This is a control inventory and evidence ledger, not a completed security audit or release sign-off.
 
 ## Deliverables
 
-| File | What it shows |
+| File | Purpose |
 | --- | --- |
-| [`01-layers.svg`](01-layers.svg) | The L0 / L1 / L2 trust layers: trusted host, supervisor/kernel boundary, untrusted sandbox. |
-| [`02-dataflow.svg`](02-dataflow.svg) | approval → admission → spawn → request → output, with the invariants that make each hop safe. |
-| [`03-trust-boundaries.svg`](03-trust-boundaries.svg) | the eight trust boundaries as gates, each fail-closed. |
-| [`04-stride-and-trust.md`](04-stride-and-trust.md) | the STRIDE and trust assessment, boundary by boundary, with the concrete controls. |
-| [`pen-test/`](pen-test/) | the white-box and black-box pen-test and its findings. |
+| [01-layers.svg](01-layers.svg) | Trusted host, supervised controller and untrusted worker, with residual parser/driver exposure |
+| [02-dataflow.svg](02-dataflow.svg) | Identity, review, admission, broker effects and fail-closed revocation |
+| [03-trust-boundaries.svg](03-trust-boundaries.svg) | Nine boundaries, controls and remaining acceptance work |
+| [04-stride-and-trust.md](04-stride-and-trust.md) | Current threats, controls, limitations and evidence |
+| [review-regressions.md](review-regressions.md) | Review findings and executed regression coverage from both branches |
+| [pen-test/findings.md](pen-test/findings.md) | Original 21 cases, with validator coverage distinguished from end-to-end enforcement |
 
-## The eight trust boundaries
+## The nine trust boundaries
 
-| Boundary | Between | Enforced by |
+| Boundary | Between | Main control |
 | --- | --- | --- |
-| TB-1 | Host ⇄ Store (approval) | ed25519-signed, revision-bound records |
-| TB-2 | Store ⇄ Controller (admission) | fail-closed grants validation; the admitted snapshot governs the run |
-| TB-3 | Controller ⇄ Supervisor (spawn) | cgroup limits; controller-owned descriptors only |
-| TB-4 | Supervisor ⇄ Worker (sandbox) | namespaces + caps + Landlock + seccomp; fds closed before re-open |
-| TB-5 | Worker ⇄ Broker (requests) | peer-credential UID + cgroup; rate limits; per-request re-check |
-| TB-6 | Worker ⇄ Compositor (input) | the host projects key/pointer/scroll; the worker has no input path |
-| TB-7 | Worker ⇄ Media proxy (MPRIS) | a fixed allow-list; no ownership, no calls |
-| TB-8 | Worker ⇄ Host (effects) | positive-only argv, exact http scope, exact settings keys, text policy |
+| TB-0 | Downloaded checkout → host loader | Monotonic host-owned isolation identity; no trusted QML fallback |
+| TB-1 | Reviewer → approval store | Explicit exact-revision selection; protected authority paths; signed records |
+| TB-2 | Store → active controller | Live epoch/unit checks; durable denial before stop and signing |
+| TB-3 | Host → controller/supervisor | Authenticated controller connection, bounded queues and cgroup ownership |
+| TB-4 | Controller → worker | Descriptor mounts, namespaces, Landlock, seccomp and resource ceilings |
+| TB-5 | Worker → effect broker | Peer UID/cgroup authentication, typed records, budgets and live rechecks |
+| TB-6 | Private Wayland → host presentation/input | Host-owned clips and focus; validated per-output buffers and epochs |
+| TB-7 | Worker → media/audio/network services | Separately selected proxies and bounded service-specific contracts |
+| TB-8 | Broker → host effects | Selected argv leaves, sealed DATA inputs, scoped HTTP and exact setting keys |
 
-## Bottom line
+First-party and explicitly trusted local in-process plugins are outside Ward's worker boundary. A downloaded manifest cannot choose that trust category. The approving account remains the desktop account: full same-account compromise is outside this isolation model, but exposing that account's signing keys through a worker grant is a security defect, not an accepted exception.
 
-The September 10 PR review found security-critical gaps in installation identity, filesystem authority selection, revocation and host input ownership, plus exec path and integration-test gaps. See the [review regression ledger](review-regressions.md) for fixes and their actual evidence. The earlier 21 validator-focused cases are not exhaustive adversarial coverage and do not establish that all integration suites pass.
+## Current conclusion
 
-An approved host CLI retains its own authority; argv matching cannot prove semantic safety. The approving account is also the desktop account, but this accepted limitation does not permit a filesystem grant to expose signing keys to a sandboxed worker. Graphics drivers, the private Wayland parser and installed/physical desktop behavior remain distinct audit and acceptance surfaces. Ward is not yet merge-ready on the strength of this threat model.
+The review's installation-identity, authority-path, revocation, host-input and DATA-path defects have targeted fixes and regression evidence. The partial input fix from `security/ward-fix` is integrated with explicit host authorization and independent visual/pointer roaming modes; its original closed-after-ownership bypass is not retained.
 
-See [`04-stride-and-trust.md`](04-stride-and-trust.md) for the full assessment
-and [`pen-test/findings.md`](pen-test/findings.md) for the case-by-case
-results.
+Do not infer low residual risk everywhere. Approved CLIs retain host authority; writable grants persist real changes; network/media/audio grants have their stated effects. The kernel, render-node driver, private Smithay Wayland parser, Qt importer and host dependencies remain trusted attack surfaces. Default packaging, clean installed-VM/physical-display acceptance and startup-failure lifecycle handling remain release work. See the [review ledger](review-regressions.md) for exact test scope and outstanding items.

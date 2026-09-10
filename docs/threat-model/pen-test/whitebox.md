@@ -70,7 +70,6 @@ grant is an error, not a widening.
 
 ## Conclusion
 
-Every white-box case is contained by the named control. The only Medium
-residual is the intentional TB-8 one: a granted host command keeps its full CLI
-authority, so argv matching is not semantic safety. The boundary there is the
-reviewer's selection plus revocation, not the matcher.
+These cases exercise selected validation entry points. Presentation cases include sender-side rejection, not only decoder execution; the newer raw-buffer-byte test in `presentation.rs` directly exercises receiver validation. Store approval, host input admission and real worker behavior have separate tests in the [review ledger](../review-regressions.md).
+
+Approved CLI semantics, kernel/DRM exposure and private Wayland/Qt parsing are separate residual risks. This pass does not establish containment at every boundary or a single medium-risk exception.
