@@ -17,6 +17,7 @@ use std::{
 mod streams;
 
 pub enum Update {
+  Blocked(crate::security::BlockedAction),
   Observation(bool),
   Ready,
   Presentation(Event),
@@ -367,6 +368,7 @@ fn dispatch(
           Control::PanelSwitch { forward } if ready => {
             emit(updates, Update::PanelSwitch { forward })?;
           }
+          Control::Blocked(action) if ready => emit(updates, Update::Blocked(action))?,
           _ => return Err(io::Error::other("unexpected controller control record")),
         }
       } else {

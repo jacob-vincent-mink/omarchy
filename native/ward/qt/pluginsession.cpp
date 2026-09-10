@@ -129,6 +129,7 @@ void PluginSession::poll() {
         case omarchy::EventKind::Ready: m_ready = true; emit stateChanged(); break;
         case omarchy::EventKind::Observation: m_desktopGeometry = event.desktop_geometry; emit stateChanged(); break;
         case omarchy::EventKind::TopologyReady: break;
+        case omarchy::EventKind::Blocked: emit operationBlocked(event.blocked_action); break;
         case omarchy::EventKind::PanelState:
           m_panelOpen = event.panel_open;
           m_panelSerial = event.panel_serial;

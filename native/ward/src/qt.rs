@@ -20,6 +20,7 @@ mod ffi {
     WidgetSize,
     PanelSwitch,
     Failed,
+    Blocked,
   }
   struct NativeRegion {
     operation: u32,
@@ -49,6 +50,7 @@ mod ffi {
     panel_open: bool,
     desktop_geometry: bool,
     switch_forward: bool,
+    blocked_action: u32,
     buffer: Box<NativeBuffer>,
     regions: Vec<NativeRegion>,
     error: String,
@@ -189,6 +191,7 @@ fn next(session: &Session) -> io::Result<ffi::NativeEvent> {
     panel_open: false,
     desktop_geometry: false,
     switch_forward: false,
+    blocked_action: 0,
     buffer: Box::new(NativeBuffer(None)),
     regions: Vec::new(),
     error: String::new(),
@@ -204,6 +207,10 @@ fn next(session: &Session) -> io::Result<ffi::NativeEvent> {
   match update {
     None => (),
     Some(Update::Ready) => event.kind = ffi::EventKind::Ready,
+    Some(Update::Blocked(action)) => {
+      event.kind = ffi::EventKind::Blocked;
+      event.blocked_action = action as u32;
+    }
     Some(Update::Observation(selected)) => {
       event.kind = ffi::EventKind::Observation;
       event.desktop_geometry = selected;

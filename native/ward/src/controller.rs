@@ -18,6 +18,7 @@ use std::{
 // another box for each context update.
 #[allow(clippy::large_enum_variant)]
 pub enum Control {
+  Blocked(crate::security::BlockedAction),
   Hello,
   Ping(u64),
   Pong(u64),
@@ -251,6 +252,7 @@ impl Control {
       Self::Ping(serial) => (2, *serial),
       Self::Pong(serial) => (3, *serial),
       Self::Stop => (4, 0),
+      Self::Blocked(action) => (23, *action as u64),
       Self::Presented(serial) => (6, *serial),
       Self::TopologyReady(epoch) if *epoch != 0 => (14, u64::from(*epoch)),
       Self::TopologyReady(_) => return Err(invalid("invalid topology acknowledgement")),
@@ -365,6 +367,7 @@ impl Control {
       (2, 1..) => Ok(Self::Ping(serial)),
       (3, 1..) => Ok(Self::Pong(serial)),
       (4, 0) => Ok(Self::Stop),
+      (23, value) => crate::security::BlockedAction::decode(value).map(Self::Blocked),
       (6, 1..) => Ok(Self::Presented(serial)),
       (14, 1..=0xffff_ffff) => Ok(Self::TopologyReady(serial as u32)),
       (10, value) if value >> 32 <= 1 => Ok(Self::PanelState {
@@ -818,6 +821,9 @@ impl RunningGraphics {
     }
     if let Some(requests) = &mut self.requests {
       requests.dispatch(approval)?;
+      if let Some(action) = requests.security.take() {
+        Control::Blocked(action).send(channel)?;
+      }
       if let Some(state) = requests.panel_state.take() {
         state.send(channel)?;
       }
@@ -874,6 +880,24 @@ fn invalid(message: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn blocked_events_are_exact_descriptor_free_operation_codes() {
+    let (sender, receiver) = Channel::pair().unwrap();
+    for code in 1..=5 {
+      let event = Control::Blocked(crate::security::BlockedAction::decode(code).unwrap());
+      event.send(&sender).unwrap();
+      let packet = receiver.receive().unwrap();
+      assert_eq!(packet.bytes.len(), 16);
+      assert!(packet.fds.is_empty());
+      assert_eq!(Control::decode(packet).unwrap(), event);
+    }
+    let mut bytes = b"OPH\x01\x17\0\0\0\0\0\0\0\0\0\0\0".to_vec();
+    for code in [0u64, 6, u64::MAX] {
+      bytes[8..].copy_from_slice(&code.to_le_bytes());
+      assert!(Control::decode(Packet { bytes: bytes.clone(), fds: vec![] }).is_err());
+    }
+  }
 
   #[test]
   fn panel_switch_carries_only_one_direction() {

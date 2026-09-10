@@ -32,6 +32,7 @@ QtObject {
     || Quickshell.env("OMARCHY_PATH") + "/lib/omarchy-ward"
   signal changed()
   signal activated(string pluginId)
+  signal blocked(string pluginId, int action)
 
   function status(id) {
     var instance = instances[id]
@@ -87,6 +88,9 @@ QtObject {
       if (instances[id] !== instance) return
       changed()
       if (instance.state === "running") activated(id)
+    })
+    instance.operationBlocked.connect(function(action) {
+      if (instances[id] === instance) root.blocked(id, action)
     })
     var coordinate = function() {
       if (instances[id] !== instance) return

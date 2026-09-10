@@ -178,6 +178,7 @@ pub struct Broker {
   pub(crate) widget_size: Option<Control>,
   pub(crate) view_sizes: std::collections::BTreeMap<u32, Control>,
   pub(crate) panel_switch: Option<Control>,
+  pub(crate) security: crate::security::Events,
   listener: Listener,
   socket: File,
   directory: PathBuf,
@@ -257,6 +258,7 @@ impl Broker {
       widget_size: None,
       view_sizes: std::collections::BTreeMap::new(),
       panel_switch: None,
+      security: crate::security::Events::new(now),
       listener,
       socket,
       directory,
@@ -332,6 +334,7 @@ impl Broker {
               })
             }
             Err(error) => {
+              self.security.rejected(Kind::Exec, &error, now);
               let _ = reply(&channel, Status::from_error(&error));
             }
           }
@@ -471,6 +474,7 @@ impl Broker {
             })
           }
           Err(error) => {
+            self.security.rejected(kind, &error, now);
             let _ = reply(&client, Status::from_error(&error));
           }
         }
@@ -524,6 +528,7 @@ impl Broker {
           })
         }
         Err(error) => {
+          self.security.rejected(kind, &error, now);
           let _ = reply(&client, Status::from_error(&error));
         }
       }
@@ -618,6 +623,13 @@ fn invalid(message: &str) -> io::Error {
 mod tests {
   use super::*;
   use std::os::fd::AsFd;
+
+  #[test]
+  fn worker_cannot_forge_host_blocked_action_events() {
+    let (sender, receiver) = Channel::pair().unwrap();
+    Control::Blocked(crate::security::BlockedAction::Exec).send(&sender).unwrap();
+    assert!(Request::decode(receiver.receive().unwrap()).is_err());
+  }
 
   #[test]
   fn panel_metadata_cannot_select_a_host_effect() {

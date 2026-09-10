@@ -30,6 +30,9 @@ ShellRoot {
     writeConfig: next => shell.persistShellConfig(next)
   }
   readonly property var sandboxPresentationConfig: sandboxActivation.previewConfig
+  property PluginSecurityFeedback pluginSecurityFeedback: PluginSecurityFeedback {
+    manager: shell.sandboxedPlugins
+  }
 
   property string home: Quickshell.env("HOME")
 

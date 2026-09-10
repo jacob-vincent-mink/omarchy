@@ -44,6 +44,7 @@ signals:
   void stateChanged();
   void panelChanged();
   void widgetSizesChanged();
+  void operationBlocked(uint action);
 private:
   void poll();
   void prepare(const QString &topology);

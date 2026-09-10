@@ -4,7 +4,7 @@ Ward runs plugin QML outside the desktop shell and admits host access through ex
 
 ## Scope and trust
 
-The intended boundary is third-party code distributed through the Omarchy plugin registry. Omarchy's first-party plugins remain trusted and in-process; users retain the trusted in-process installation path for their own code. Once an installation is isolated, a downloaded or edited manifest cannot make it trusted. The host records monotonic identity outside the checkout at installation and native review/approval, before first activation; existing native record names also identify older approvals without requiring a working native executable. CLI and shell discovery consult these identities before loading third-party QML and fail closed if identity discovery fails. Missing or malformed checkouts remain listed for revocation. Revocation/removal retains isolation identity and reviewed snapshots. Registry provenance and mandatory registry-install routing remain unfinished.
+The intended boundary is third-party code distributed through the Omarchy plugin registry. New direct Git/local-folder installs default to Ward; explicit YOLO and trusted-local choices retain a separate in-process path. Omarchy's first-party and existing legacy trusted plugins are not reclassified. Host-owned installation records outside the checkout bind identity, source, commit and execution mode; absent/corrupt records and changed sources block managed code from loading. Once an installation is isolated, a downloaded or edited manifest cannot make it trusted. The host records monotonic identity at installation and native review/approval, before first activation; existing native record names also identify older approvals without requiring a working native executable. CLI and shell discovery consult these identities and fail closed if identity discovery fails. Missing or malformed checkouts remain listed for cleanup. Revocation/removal retains installation/isolation identity and reviewed snapshots. Registry-specific ingress and publisher authentication remain unfinished.
 
 ![Ward architecture: review authorizes a per-plugin controller; the existing shell exchanges bounded input and rendered pixels with a sandboxed worker through that controller.](images/ward-architecture.svg)
 
@@ -61,6 +61,14 @@ Resources take different paths; not every grant is a broker RPC:
 - Host exec is an explicit exception: a selected argument-tree leaf admits a complete invocation of a reviewed executable. Verification seals matching executable bytes before launch; child cgroups supervise jobs and descendants. The CLI retains its host account, filesystem, network, libraries and configuration authority. Argument matching is not a semantic safety proof. Plugin-lifetime foreground jobs require separate review; ordinary requests have deadlines and all jobs retain concurrency/output bounds.
 
 For approved host commands, `$OMARCHY_PLUGIN_PATH` identifies a temporary copy of reviewed assets and `$OMARCHY_PLUGIN_DATA` identifies the same directory mounted as worker home. These host paths are not additional worker mounts. See the [path reference](sandboxed-plugin-authoring.md#two-resources-not-four-unrelated-directories).
+
+## Host security feedback
+
+Ward reports a typed `BlockedAction` only when its broker rejects a notification, settings, URL, HTTP or exec request with a known policy-denied status. The authenticated controller channel carries a fixed action code, not worker text, paths or argv. Worker control-message decoding rejects this event type. `Session::Update::Blocked` and Qt's `PluginSession.operationBlocked(uint)` expose it to the trusted host; the host binds it to the current session identity. Both controller and host must be built from the matching revision.
+
+Worker helpers parse the redacted worker grant view, not the full persisted host approval record. Exec lifetime and endpoint availability are adaptation hints; the broker independently checks live admission and the approved command tree. Host filesystem paths/inodes and executable identity/tree fields remain absent from that worker view.
+
+Omarchy's `PluginSecurityFeedback` owns the notification wording and delivery. It needs no worker notification grant and does not accept a worker's self-reported denial as evidence. Ward coalesces pending events and permits two per 30 seconds per session; Omarchy also bounds notifications across sessions to two per 30 seconds with one delivery in flight. This is bounded feedback, not a complete audit log. Failed/unavailable operations, unmounted broker endpoints, raw kernel denials and audio/proxy refusals are not covered. A blocked operation does not automatically terminate the plugin.
 
 ## Current limits and source map
 

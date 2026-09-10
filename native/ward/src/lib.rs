@@ -29,6 +29,7 @@ pub mod requests;
 pub mod revision;
 pub mod runtime;
 pub mod sandbox;
+pub mod security;
 pub mod session;
 pub mod settings;
 pub mod store;

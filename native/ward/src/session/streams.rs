@@ -208,6 +208,7 @@ pub(super) fn dispatch(
           Control::PanelSwitch { forward } if ready => {
             emit(updates, Update::PanelSwitch { forward })?
           }
+          Control::Blocked(action) if ready => emit(updates, Update::Blocked(action))?,
           _ => return Err(io::Error::other("unexpected controller control record")),
         }
       }

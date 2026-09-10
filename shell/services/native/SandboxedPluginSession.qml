@@ -43,6 +43,7 @@ QtObject {
   readonly property string state: error ? "error" : session.ready && (!screenRows.length || screenRows.some(row => row.surface.presented)) ? "running" : "starting"
   signal statusChanged()
   signal panelSwitchRequested(int direction)
+  signal operationBlocked(int action)
   onStateChanged: {
     if (state === "running") startupComplete = true
     statusChanged()
@@ -59,7 +60,10 @@ QtObject {
   }
   onOverlayOutputsChanged: { for (const row of screenRows) row.surface.updateMask() }
 
-  property PluginSession session: PluginSession { id: session }
+  property PluginSession session: PluginSession {
+    id: session
+    onOperationBlocked: action => root.operationBlocked(action)
+  }
   property Timer startupDeadline: Timer {
     interval: 8000
     running: !root.startupComplete && root.state === "starting"

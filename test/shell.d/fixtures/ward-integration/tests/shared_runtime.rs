@@ -71,6 +71,7 @@ fn missing_or_invalid_shared_runtime_fails_without_presenting() {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
       match session.poll().unwrap() {
+        Some(Update::Blocked(_)) => panic!("invalid runtime issued a broker request"),
         Some(Update::Observation(selected)) => assert!(!selected, "unrequested observation was exposed"),
         Some(Update::Failed(error)) => {
           assert!(!error.is_empty());
