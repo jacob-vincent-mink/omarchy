@@ -53,7 +53,7 @@ fn worker_child() {
     assert!(std::env::var_os("NOTIFY_SOCKET").is_none());
     assert!(std::env::var_os("OMARCHY_WORKER_TEST_ROOT").is_none());
     assert_eq!(fs::read_to_string("/plugin/marker").unwrap(), "approved");
-    assert_eq!(std::env::var("OMARCHY_PATH").unwrap(), "/runtime");
+    assert!(std::env::var_os("OMARCHY_PATH").is_none());
     assert_eq!(std::env::var("OMARCHY_PLUGIN_CONTEXT").unwrap(), "1");
     for directory in ["/runtime", "/context"] {
       assert_eq!(
@@ -307,6 +307,9 @@ fn controller_child() {
     vec![],
   )
   .unwrap();
+  // Bubblewrap consumes each mount descriptor. Even when two resources use
+  // the same directory, they must receive distinct inherited descriptors.
+  let context = runtime.try_clone().unwrap();
   let mut child = worker::spawn(
     &bootstrap,
     &bundle,
@@ -327,7 +330,7 @@ fn controller_child() {
     worker::Resources {
       requests: Some(&requests),
       runtime: Some(&runtime),
-      context: Some(&runtime),
+      context: Some(&context),
       grants_json: grants_json.as_ref(),
       ..Default::default()
     },
