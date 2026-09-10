@@ -35,7 +35,9 @@ QtObject {
   readonly property var activePlacement: placements.find(row => row.id === activeViewId) || null
   readonly property var barOwner: activePlacement ? activePlacement.owner : null
   readonly property bool focusHeld: activeRow ? activeRow.surface.focusHeld : false
-  readonly property bool opened: panelAuthorized && !error && (panelCommand && panelCommand.serial !== session.panelSerial ? panelCommand.open : session.panelOpen)
+  readonly property bool reportedOpen: !error && (panelCommand && panelCommand.serial !== session.panelSerial ? panelCommand.open : session.panelOpen)
+  readonly property bool opened: panelAuthorized && reportedOpen
+  onReportedOpenChanged: { if (!reportedOpen) panelAuthorized = false }
   readonly property string error: localError || session.error
   readonly property string state: error ? "error" : session.ready && (!screenRows.length || screenRows.some(row => row.surface.presented)) ? "running" : "starting"
   signal statusChanged()
@@ -48,7 +50,6 @@ QtObject {
       if (root.opened && root.activeRow) root.activeRow.surface.primeFocus(false)
     })
     else {
-      panelAuthorized = false
       for (const row of screenRows) row.surface.clearFocus()
     }
   }

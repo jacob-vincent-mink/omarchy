@@ -111,7 +111,9 @@ ShellRoot {{
   IpcHandler {{
     target: "shell"
     function ping(): string {{ return "ok" }}
-    function enablePlugin(id: string, placement: string): string {{ return plugins.enable(id) }}
+    // This legacy custom surface has no shared bar slot. The fixture host
+    // explicitly selects pointer roaming; defaults must remain closed/slot-only.
+    function enablePlugin(id: string, placement: string): string {{ return plugins.enable(id, {{sandboxPresentation: {{overlayMode: "pointer"}}}}) }}
     function pluginStatus(id: string): string {{ return JSON.stringify(plugins.status(id)) }}
     function setPluginEnabled(id: string, enabled: string): string {{ plugins.disable(id); return "ok" }}
     function summon(id: string, payload: string): string {{ reviewer.open(payload); return "ok" }}

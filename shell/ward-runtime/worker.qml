@@ -256,6 +256,7 @@ ShellRoot {
         anchors.centerIn: parent
         width: parent.width - 2 * Style.spacing.popupPadding
         text: root.requestError
+        textFormat: Text.PlainText
         color: Color.popups.text
         font.family: Style.font.family
         font.pixelSize: Style.font.body

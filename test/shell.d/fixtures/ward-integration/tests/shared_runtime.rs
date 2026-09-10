@@ -71,6 +71,7 @@ fn missing_or_invalid_shared_runtime_fails_without_presenting() {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
       match session.poll().unwrap() {
+        Some(Update::Observation(selected)) => assert!(!selected, "unrequested observation was exposed"),
         Some(Update::Failed(error)) => {
           assert!(!error.is_empty());
           break;
@@ -386,7 +387,7 @@ Item {
   let host_context = root.path().join("host-context.json");
   let context = |width, font_size, foreground| {
     serde_json::json!({
-      "settings": {"id": "test.shared", "sandbox": true, "width": width, "fontSize": font_size,
+      "settings": {"id": "test.shared", "sandbox": true, "sandboxPresentation": {"overlayMode": "visual"}, "width": width, "fontSize": font_size,
         "nested": {"text": "x".repeat(8192)}, "hidden": "host-only"},
       "foreground": foreground, "fontSize": font_size, "enabled": true,
       "untouched": {"otherPlugin": "preserved"},

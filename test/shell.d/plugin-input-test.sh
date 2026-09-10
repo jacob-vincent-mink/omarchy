@@ -35,11 +35,16 @@ for (const mode of ['visual', 'pointer']) {
 const sessionSource = fs.readFileSync(path.join(root, 'shell/services/native/SandboxedPluginSession.qml'), 'utf8')
 const opened = sessionSource.match(/readonly property bool opened: (.*)/)[1]
 const sessionScope = vm.createContext({panelAuthorized: false, error: '', panelCommand: null, session: {panelOpen: true}})
+vm.runInContext('reportedOpen = ' + sessionSource.match(/readonly property bool reportedOpen: (.*)/)[1], sessionScope)
 assertEqual(vm.runInContext(opened, sessionScope), false, 'unsolicited worker panel-open state grants no authority')
 sessionScope.panelAuthorized = true
 assertEqual(vm.runInContext(opened, sessionScope), true, 'host activation admits worker panel state')
 sessionScope.panelAuthorized = false
 assertEqual(vm.runInContext(opened, sessionScope), false, 'old worker-open state cannot revive a dismissed panel')
+sessionScope.panelAuthorized = true
+sessionScope.reportedOpen = false
+vm.runInContext(sessionSource.match(/onReportedOpenChanged: \{ (.*) \}/)[1], sessionScope)
+assertEqual(sessionScope.panelAuthorized, false, 'worker closure withdraws authorization without mutating the opened binding')
 const claimScope = vm.createContext({
   PluginInput: scope, screenRows: [{id: 1, screen: {width: 800, height: 500}}],
   placements: [{id: 1, output: 1, bar: {position: 'top', visible: true, size: 26, x: 100, y: 0, width: 40, height: 26}}],
