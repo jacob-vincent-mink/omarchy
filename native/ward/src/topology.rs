@@ -44,7 +44,7 @@ impl Output {
     // Round once at the output boundary, without floating-point ambiguity.
     let width = (u64::from(self.width) * u64::from(self.scale_fixed) + 60) / 120;
     let height = (u64::from(self.height) * u64::from(self.scale_fixed) + 60) / 120;
-    if width * height > MAX_OUTPUT_PIXELS {
+    if width > 8192 || height > 8192 || width * height > MAX_OUTPUT_PIXELS {
       return Err(invalid("output allocation exceeds physical pixel budget"));
     }
     Ok((width as u32, height as u32))
@@ -397,6 +397,25 @@ mod tests {
 
   #[test]
   fn count_identity_version_and_pixel_limits_are_enforced() {
+    for (width, height, scale_fixed) in [
+      (4096, 1, 480),
+      (1, 4096, 480),
+      (4096, 1, 240),
+      (1, 4096, 240),
+    ] {
+      let allocation = Output {
+        width,
+        height,
+        scale_fixed,
+        ..output(1)
+      };
+      let viewport = crate::presentation::Viewport {
+        width,
+        height,
+        scale_fixed,
+      };
+      assert_eq!(allocation.pixels().is_ok(), viewport.pixels().is_ok());
+    }
     assert!(topology(vec![output(0)]).validate().is_err());
     assert!(topology(vec![output(1), output(1)]).validate().is_err());
     assert!(topology((1..=9).map(output).collect()).validate().is_err());

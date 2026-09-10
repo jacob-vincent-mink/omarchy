@@ -487,6 +487,53 @@ mod tests {
     frames.frame(2, 3, 0).unwrap();
   }
   #[test]
+  fn adversarial_buffer_bytes_reach_the_receiver_without_sender_validation() {
+    let base = || {
+      let mut bytes = b"OPH\x01".to_vec();
+      put32(&mut bytes, 16);
+      bytes.extend_from_slice(&1u64.to_le_bytes());
+      for value in [0, 64, 64, ARGB8888, 256, 0, 0, 0] {
+        put32(&mut bytes, value);
+      }
+      bytes
+    };
+    let decode = |bytes: Vec<u8>, count: usize| {
+      Event::decode(Packet {
+        bytes,
+        fds: (0..count)
+          .map(|_| std::fs::File::open("/dev/null").unwrap().into())
+          .collect(),
+      })
+    };
+    assert!(decode(base(), 1).is_ok());
+    for (offset, value) in [
+      (8, 0),
+      (16, 2),
+      (20, 0),
+      (20, 8193),
+      (24, u32::MAX),
+      (28, 0),
+      (32, 255),
+      (32, u32::MAX),
+      (36, 1),
+      (40, 1),
+    ] {
+      let mut bytes = base();
+      bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+      assert!(decode(bytes, 1).is_err(), "offset {offset}, value {value}");
+    }
+    for count in [0, 2] {
+      assert!(decode(base(), count).is_err());
+    }
+    for length in 0..48 {
+      assert!(decode(base()[..length].to_vec(), 1).is_err());
+    }
+    let mut extra = base();
+    extra.push(0);
+    assert!(decode(extra, 1).is_err());
+  }
+
+  #[test]
   fn malformed_presentation_bytes_do_not_panic_or_allocate_from_lengths() {
     for length in 0..=4096 {
       let mut bytes = vec![255; length];

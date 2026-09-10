@@ -3,9 +3,9 @@
 //!
 //! A real Wayland client connects to the in-process private compositor and
 //! binds every `wl_output` global. The compositor surfaces one 600x450 (at
-//! render scale 1.5) canvas as side-by-side outputs; the client's 100x100
-//! logical toplevel is centred in the canvas and thus spans the boundary of a
-//! two-output wall. We verify together:
+//! render scale 1.5) canvas as overlapping outputs; the first output covers
+//! the canvas so owner-output centering stays fixed while the second output
+//! moves across the client's 100x100 logical toplevel. We verify together:
 //!   * the wall advertises the expected number of `wl_output` globals, each
 //!     with the physical size rounded from its logical sub-rect at the scale;
 //!   * `wl_surface.enter` is delivered for exactly the outputs whose logical
@@ -103,9 +103,9 @@ fn output_wall_enter_leave_reassign_remove_and_logical_input() {
   };
   let mut outer = Desktop::new_scaled(root.path(), viewport, RENDER_SCALE);
 
-  // Wall A: two side-by-side outputs sharing one 600x450 composite canvas, the
-  // boundary at logical x=200. The centered 100x100 surface (x in [150, 250))
-  // straddles that boundary, so it must be entered on BOTH outputs.
+  // The window is centered on its owner output, not the composite canvas.
+  // Keep that output canvas-sized and overlap a second output at x=200 to
+  // exercise enter/leave independently of owner-driven window repositioning.
   outer
     .graphics
     .configure_outputs(
@@ -113,7 +113,7 @@ fn output_wall_enter_leave_reassign_remove_and_logical_input() {
         OutputSpec {
           x: 0,
           y: 0,
-          width: 200,
+          width: VIEWPORT_W,
           height: 300,
           scale_fixed: SCALE_FIXED,
         },
@@ -137,7 +137,7 @@ fn output_wall_enter_leave_reassign_remove_and_logical_input() {
     assert_eq!(
       outer.graphics.output_mode(index),
       Some((
-        (200.0f64 * RENDER_SCALE).round() as i32,
+        ((if index == 0 { VIEWPORT_W } else { 200 }) as f64 * RENDER_SCALE).round() as i32,
         (300.0f64 * RENDER_SCALE).round() as i32,
       )),
       "each output mode must be its logical rect rounded at the render scale"
@@ -260,7 +260,7 @@ fn output_wall_enter_leave_reassign_remove_and_logical_input() {
           OutputSpec {
             x: 0,
             y: 0,
-            width: seam as u32,
+            width: VIEWPORT_W,
             height: 300,
             scale_fixed: SCALE_FIXED,
           },
