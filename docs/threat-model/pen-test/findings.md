@@ -2,8 +2,7 @@
 
 Every pen-test case, the boundary it attacks, the control that contains it, and
 the result. White-box cases are in `native/ward/tests/pen_test.rs`; black-box
-cases are in `native/ward/tests/pen_test_blackbox.rs`. All 21 pass against the
-real code, with the full existing suite green.
+cases are in `native/ward/tests/pen_test_blackbox.rs`. This is the original case ledger, not evidence of exhaustive coverage or a green integration suite. The [September 10 review corrections](../review-regressions.md) supersede the earlier security conclusions.
 
 | # | Pass | Case | Boundary | Attack | Control | Result |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -21,9 +20,9 @@ real code, with the full existing suite green.
 | 12 | white | context | TB-6 | oversized, non-finite/zero bar, bad position, panel serial 0 / payload-when-closed, unknown field | bounded, finite, strict | Contained |
 | 13 | white | presentation record | TB-6 | generation 0, bad dimensions/scale, missing magic, bad slot/serial, mask over cap | strict slot/generation | Contained |
 | 14 | white | presentation buffer | TB-6 | over pixel cap, odd/short stride, missing fd | dimension + stride bounds | Contained |
-| 15 | black | self-approve file | TB-1/TB-2 | manifest requests `/etc/passwd` | a manifest only requests; the grant points at the reviewer's dir | Contained |
+| 15 | black | self-approve file | TB-1/TB-2 | manifest requests `/etc/passwd` | grant construction/schema validation only; does not exercise store approval or a real worker | Validator only |
 | 16 | black | exec arg smuggle | TB-8 | a second argument to a reviewed command | extra argument rejected (free-text slot is by design) | Contained* |
-| 17 | black | http origin | TB-8 | other host/port/scheme/credentials/path/query | exact origin/method/path/query match; AddressPolicy pins the address | Contained |
+| 17 | black | http origin | TB-8 | malformed scope definitions | `Scope::validate` only; request matching has separate module tests | Validator only |
 | 18 | black | settings write | TB-8 | write a read-only or host-structure key | writes bounded to approved keys | Contained |
 | 19 | black | notification markup | TB-8 | markup, a command-looking title, control/RTL | escaped + prefixed + text policy | Contained |
 | 20 | black | context | TB-6 | oversized / unknown field / non-finite coordinate | the plugin only reads the host-published context | Contained |
@@ -36,15 +35,4 @@ selection and revocation are the boundary, not the matcher
 
 ## Summary
 
-- **No high- or critical-severity vulnerability.** Every request a plugin can
-  make is fail-closed: malformed or oversized records are rejected, a gap is a
-  gap, an unrequested grant is an error, and a capability whose socket is not
-  admitted cannot be connected.
-- **One Medium residual, by design** (case 16, TB-8): a granted host command
-  retains its full CLI authority. This is the single intentional residual.
-- **One accepted limitation**: the approving account is the same session
-  account; a session compromise is a desktop compromise. Ward bounds the
-  plugin, not the session.
-
-Because no vulnerability was found, there is no patch to apply; the 21 cases
-ship as regression guards so the boundary stays contained.
+Security-critical fixes and additional end-to-end tests are required by the subsequent PR review. Retain these narrow guards, but do not infer that untested attacks are contained. Cases 13/14 include sender-side validation as well as a few decoder checks; adversarial receiver bytes need their own evidence. Approved CLI semantics, graphics driver/parser exposure and same-account trust remain distinct residuals, not a single medium-risk exception.

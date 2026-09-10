@@ -31,18 +31,9 @@ own authority.
 
 ## Bottom line
 
-- The runtime is consistently **fail-closed**: a malformed or oversized record is
-  rejected, not truncated; a gap is a gap; an unrequested grant is an error, not
-  a widening; a capability whose socket is not admitted cannot be connected.
-- The **pen-test** (21 cases, white-box and black-box) contains every attack
-  against the boundaries a plugin can reach. All pass against the real code,
-  with the full existing suite green.
-- **One Medium residual, by design** (TB-8): a granted host command retains its
-  full CLI authority, so argv matching is not semantic safety. The boundary
-  there is the reviewer's selection plus revocation, not the matcher.
-- **One accepted limitation**: the approving account is the same session
-  account; a session compromise is a desktop compromise. Ward bounds the
-  plugin, not the session.
+The September 10 PR review found security-critical gaps in installation identity, filesystem authority selection, revocation and host input ownership, plus exec path and integration-test gaps. See the [review regression ledger](review-regressions.md) for fixes and their actual evidence. The earlier 21 validator-focused cases are not exhaustive adversarial coverage and do not establish that all integration suites pass.
+
+An approved host CLI retains its own authority; argv matching cannot prove semantic safety. The approving account is also the desktop account, but this accepted limitation does not permit a filesystem grant to expose signing keys to a sandboxed worker. Graphics drivers, the private Wayland parser and installed/physical desktop behavior remain distinct audit and acceptance surfaces. Ward is not yet merge-ready on the strength of this threat model.
 
 See [`04-stride-and-trust.md`](04-stride-and-trust.md) for the full assessment
 and [`pen-test/findings.md`](pen-test/findings.md) for the case-by-case

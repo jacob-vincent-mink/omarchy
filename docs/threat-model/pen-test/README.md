@@ -55,21 +55,8 @@ which the black-box report references rather than duplicates.
 
 ## Result
 
-All 21 pen-test cases pass (14 white-box, 7 black-box), against the real code,
-with the full existing suite green (including the cgroup/sandbox/isolation
-integration tests that spawn real supervised workers).
+The original 21 cases are useful validator regressions, not a complete penetration test. The September 10 review identified critical coverage gaps and a failing real-worker fixture, superseding the earlier claim that the full integration suite was green. Track current findings and executed regressions in the [review ledger](../review-regressions.md); report skipped opt-in suites separately from passing tests.
 
-- **No high- or critical-severity vulnerability was found.** The runtime is
-  consistently fail-closed: malformed or oversized records are rejected, not
-  truncated; a gap is a gap, never a permission; an unrequested grant is an
-  error, not a widening.
-- **One Medium residual, by design**, at TB-8: a *granted host command retains
-  its full CLI authority*, so argv matching is not semantic safety. This is the
-  single intentional residual in [`../04-stride-and-trust.md`](../04-stride-and-trust.md);
-  the boundary there is the reviewer's selection plus revocation (which cannot
-  undo a completed effect), not the matcher.
-- **One documented, accepted limitation**: the approving account is the same
-  session account, so a session compromise is a desktop compromise; Ward bounds
-  the *plugin*, not the session.
+In particular, constructing a filesystem grant is not exercising `Store::approve` or a worker mount; validating an HTTP scope is not checking a hostile request against that scope; and rejecting a packet in the sender does not test a receiver's decoder. Each result must identify the boundary actually reached.
 
 See [`findings.md`](findings.md) for the case-by-case table.

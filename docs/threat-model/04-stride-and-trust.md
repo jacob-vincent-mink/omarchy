@@ -1,5 +1,7 @@
 # Ward threat model — STRIDE and trust assessment
 
+Assessment correction: the September 10 PR review invalidated the blanket low-risk conclusions below. These tables are the historical control inventory, not current security sign-off. The [review regression ledger](review-regressions.md) supersedes their residual ratings for installation identity, signing-key exposure, revocation, host input admission and exec path confinement; additional audit gaps remain open.
+
 This document is the analytical core of the Ward threat model. It accompanies the
 diagrams in this directory:
 
@@ -130,7 +132,7 @@ potential.
 | Content-addressing pins the revision | **Enforced** | Revisions reject symlinks/hardlinks/special files and require `nlink == 1`; the bundle is pinned by digest, not by path. |
 | The worker cannot widen its own grant | **Enforced at every boundary** | The admitted snapshot governs the run; `grants.json` is read-only and derived from the record; `context` is filtered through the admitted grants. |
 
-## Residual-risk summary
+## Historical residual-risk summary (superseded)
 
 | Boundary | Highest residual | Reason it is acceptable |
 | --- | --- | --- |
@@ -143,5 +145,4 @@ potential.
 | TB-7 | Low | Fixed MPRIS allow-list; no ownership/calls. |
 | TB-8 | **Medium (by design)** | A granted host command retains full CLI authority; the reviewer's selection and revocation are the boundary. This is the single intentional residual. |
 
-The pen-test findings in [`pen-test/`](pen-test/) exercise each boundary and confirm
-the controls; the only Medium residual is the intentional, documented one at TB-8.
+The original pen-test cases cover selected validator paths, not every boundary or reachable attack. Do not use these historical ratings as a release decision; use the current regression ledger and explicitly recorded end-to-end results.

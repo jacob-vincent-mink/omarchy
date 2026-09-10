@@ -1,0 +1,16 @@
+# PR review corrections and regression work
+
+The September 10 review of PR #10974 identified gaps outside the earlier validator-focused test ledger. The previous blanket claims of complete coverage, a fully green integration suite and uniformly low residual risk are superseded by this ledger. Passing a manifest validator is not evidence that store approval, host input admission or a real sandboxed worker enforces the same boundary.
+
+| Priority | Boundary and attack | Status and regression evidence |
+| --- | --- | --- |
+| Blocker | Checkout/config classification: approve before first enable, remove `sandbox`, then load QML in-process; missing/broken checkouts disappear from management | Host-owned monotonic identity added at install and native review/approval, consulted by CLI and shell even without a runtime. `plugin-review-test.sh` exercises real CLI/native approval before activation, manifest removal/corruption, runtime absence and missing-checkout removal. The offscreen Quickshell registry fixture checks trusted URL denial, changed manifest ID and discovery failure. |
+| Blocker | Filesystem selection exposes approval store, signing keys, host config or runtime authority; signing failure prevents revocation from stopping work | Open; requires canonical authority-overlap checks, durable denial and stop/recovery failure tests. Same-account compromise being out of scope does not justify handing its signing key to a sandboxed worker. |
+| Blocker | Closed private surfaces request screen-sized pointer regions or keyboard focus outside host-owned slots | Open; distinguish rendering permission, pointer admission and focus. Geometry observation does not authorize input. Explicit roaming interaction policy must remain separate from own-panel activation. |
+| High | Exec token-root prefixes match sibling paths; mutable DATA symlinks redirect host commands outside the selected tree | Open; lexical root matching requires component boundaries. Filesystem confinement needs pinned/descriptor-backed consumption, not canonicalize-then-pass-the-original-path. Broad approved CLI authority remains a separately disclosed residual. |
+| Release gate | Missing native payload and failed graphics activation leave confusing lifecycle state | Open; discovery now reports unavailable approval as unknown, not disabled. Revocation must not falsely claim success when management is unavailable. Default packaging and installed-VM/physical graphics acceptance remain unfinished. |
+| Test gap | Generic worker fixture expects adapter-specific `OMARCHY_PATH`; two mounts reuse one consumed descriptor | Open; repair the fixture contract and use independent descriptors, then rerun opt-in worker suites with prerequisites and skips reported separately. |
+
+Additional review work remains for worker-facing grant minimization, observation polling, Qt mouse-grab release, invalid session peers, consistent topology/buffer bounds, real decoder adversarial bytes and accurate case-level documentation. GPU render-node driver exposure and the private Smithay Wayland parser are residual attack surfaces, not covered by a claim that plugins receive only safe pixels.
+
+The separate security-review worktree may identify additional issues. This ledger records implemented fixes and their actual evidence, not a completed audit or merge-readiness assertion.
