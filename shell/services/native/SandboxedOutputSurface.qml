@@ -14,9 +14,12 @@ PanelWindow {
   readonly property var bars: owner.placements.filter(view => view.output === outputId).map(view => view.bar)
   readonly property bool ownsPanel: owner.activeOutputId === outputId
   readonly property bool opened: ownsPanel && owner.opened
-  readonly property bool panelsAllowed: !owner.opened || ownsPanel || owner.overlayOutputs === "all"
+  // Closed plugins keep only their slots. Roaming presentation and pointer
+  // authority are explicit host choices, neither of which grants keyboard focus.
+  readonly property var policy: PluginInput.outputPolicy(owner.opened, ownsPanel,
+    owner.overlayOutputId === outputId, owner.overlayMode, owner.overlayOutputs)
   readonly property bool presented: view.presented
-  readonly property var presentationRegions: panelsAllowed ? [{x: 0, y: 0, width: width, height: height}]
+  readonly property var presentationRegions: policy.render ? [{x: 0, y: 0, width: width, height: height}]
     : PluginInput.barSlots(bars, width, height)
   property bool focusPrimed: false
   property bool programmaticFocus: false
@@ -26,7 +29,7 @@ PanelWindow {
   onBarsChanged: Qt.callLater(updateMask)
   onPanelFocusChanged: Qt.callLater(updateMask)
   onProgrammaticFocusChanged: Qt.callLater(updateMask)
-  onPanelsAllowedChanged: Qt.callLater(updateMask)
+  onPolicyChanged: Qt.callLater(updateMask)
   screen: targetScreen
   anchors { top: true; bottom: true; left: true; right: true }
   color: "transparent"
@@ -42,7 +45,7 @@ PanelWindow {
   property Region inputMask: Region {}
   property Component regionComponent: Component { Region {} }
   property var regions: []
-  function inputRectangles(source) { return PluginInput.barMasks(source, bars, width, height, panelsAllowed) }
+  function inputRectangles(source) { return PluginInput.barMasks(source, bars, width, height, policy.pointer) }
   function updateMask() {
     const previous = regions
     const source = programmaticFocus || panelFocus ? [{x: 0, y: 0, width: width, height: height}] : view.inputRegions
@@ -53,6 +56,7 @@ PanelWindow {
     for (const region of previous) region.destroy()
   }
   function primeFocus(programmatic) {
+    if (!policy.keyboard) return
     programmaticFocus = programmatic === true
     focusHeld = true
     if (!view.Window.active) { focusPrimed = true; focusPrimeTimer.restart() }
@@ -80,8 +84,13 @@ PanelWindow {
     session: root.owner.nativeSession
     outputId: root.outputId
     renderRegions: root.presentationRegions
+    hostInputRegions: PluginInput.barMasks([{x: 0, y: 0, width: root.width, height: root.height}],
+      root.bars, root.width, root.height, root.policy.pointer)
     onStateChanged: Qt.callLater(root.updateMask)
-    onFocusRequested: point => { root.owner.claimOutput(root.outputId, point); root.primeFocus(false) }
+    onFocusRequested: point => {
+      root.owner.claimOutput(root.outputId, point)
+      if (root.policy.keyboard) root.primeFocus(false)
+    }
     onPanelSwitchRequested: direction => {
       if (root.opened && root.focusHeld) root.owner.panelSwitchRequested(direction)
     }

@@ -191,6 +191,29 @@ const omarchy::Session *PluginView::connection() const {
   if (m_hostSession) return m_hostSession->connection();
   return m_session ? &**m_session : nullptr;
 }
+void PluginView::setHostInputRegions(const QVariantList &regions) {
+  if (m_hasHostInputRegions && m_hostInputRegions == regions) return;
+  if (regions.size() > 128) { fail("Too many host input regions"); return; }
+  QRegion mask;
+  for (const auto &value : regions) {
+    const auto rect = value.toMap();
+    const double x = rect.value("x").toDouble(), y = rect.value("y").toDouble();
+    const double w = rect.value("width").toDouble(), h = rect.value("height").toDouble();
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(w) || !std::isfinite(h)
+        || x < 0 || y < 0 || w < 0 || h < 0 || x + w > 4096 || y + h > 4096) {
+      fail("Invalid host input region"); return;
+    }
+    if (w > 0 && h > 0) mask += QRectF(x, y, w, h).toAlignedRect();
+  }
+  if (m_hasHostInputRegions && !(m_hostInputMask - mask).isEmpty()) {
+    input(5, 0);
+    ungrabMouse();
+  }
+  m_hasHostInputRegions = true;
+  m_hostInputRegions = regions;
+  m_hostInputMask = mask;
+  emit hostInputRegionsChanged();
+}
 void PluginView::prepare(uint epoch, const QJsonObject &allocation) {
   m_requestedEpoch = epoch;
   m_requestedViewport = QSize(allocation.value("width").toInt(), allocation.value("height").toInt());
@@ -355,6 +378,7 @@ void PluginView::acknowledge(quint64 serial, quint64 generation) {
 bool PluginView::contains(const QPointF &point) const {
   return m_ready && !m_resizing && width() > 0 && height() > 0 && std::isfinite(point.x()) && std::isfinite(point.y())
     && boundingRect().contains(point)
+    && (!m_hasHostInputRegions || m_hostInputMask.contains(QPoint(point.x() * m_viewport.width() / width(), point.y() * m_viewport.height() / height())))
     && (m_hasRenderRegions ? m_mask.intersected(m_renderMask) : m_mask).contains(QPoint(point.x() * m_viewport.width() / width(), point.y() * m_viewport.height() / height()));
 }
 QVariantList PluginView::inputRegions() const {
@@ -367,6 +391,13 @@ void PluginView::input(uint32_t kind, uint32_t code, QPointF point) {
   const auto session = connection();
   if (!m_ready || m_resizing || !session || width() <= 0 || height() <= 0) return;
   if (!std::isfinite(point.x()) || !std::isfinite(point.y())) return;
+  if (kind <= 2 && m_hasHostInputRegions) {
+    const bool permitted = m_hostInputMask.contains(QPoint(point.x() * m_viewport.width() / width(), point.y() * m_viewport.height() / height()));
+    if (!permitted) {
+      if (kind != 1) return;
+      point = m_lastPointer; // Release the gesture without observing a new unauthorized point.
+    } else m_lastPointer = point;
+  }
   // Mouse grabs can deliver releases outside the item. Keep private coordinates bounded.
   const auto x = qBound(0.0, point.x() * m_viewport.width() / width(), double(m_viewport.width() - 1));
   const auto y = qBound(0.0, point.y() * m_viewport.height() / height(), double(m_viewport.height() - 1));
@@ -377,9 +408,11 @@ void PluginView::input(uint32_t kind, uint32_t code, QPointF point) {
   catch (const rust::Error &error) { fail(QString::fromUtf8(error.what())); }
 }
 void PluginView::mousePressEvent(QMouseEvent *event) {
+  if (!contains(event->position())) { event->ignore(); return; }
   m_panelSwitchDirection = 0;
   emit focusRequested(QPointF(event->position().x() * m_viewport.width() / width(), event->position().y() * m_viewport.height() / height()));
-  forceActiveFocus();
+  // The trusted embedding host decides whether this pointer gesture may
+  // acquire keyboard focus (roaming pointer permission does not imply it).
   input(0, buttonCode(event->button()), event->position());
   event->accept();
 }
@@ -436,7 +469,7 @@ void PluginView::keyPressEvent(QKeyEvent *event) {
   key(event, true);
 }
 void PluginView::keyReleaseEvent(QKeyEvent *event) { key(event, false); }
-void PluginView::dismiss() { m_panelSwitchDirection = 0; input(5, 0); setFocus(false); }
+void PluginView::dismiss() { m_panelSwitchDirection = 0; input(5, 0); ungrabMouse(); setFocus(false); }
 void PluginView::focusOutEvent(QFocusEvent *event) { m_panelSwitchDirection = 0; input(5, 0); QQuickItem::focusOutEvent(event); }
 
 QSGNode *PluginView::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {

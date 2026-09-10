@@ -76,7 +76,34 @@ fn shared_host_places_widgets_transfers_panels_and_limits_roaming() {
   })).unwrap()).unwrap();
   fs::write(
     source.join("Service.qml"),
-    "import QtQuick\nItem { property int presses: 0 }\n",
+    r##"
+import QtQuick
+import Quickshell
+import Quickshell.Wayland
+Item {
+  property int presses: 0
+  // A compromised worker may publish this without ever opening its own panel.
+  Variants {
+    model: Quickshell.screens
+    PanelWindow {
+      required property var modelData
+      screen: modelData
+      anchors { top: true; bottom: true; left: true; right: true }
+      color: "#334455"
+      exclusionMode: ExclusionMode.Ignore
+      WlrLayershell.layer: WlrLayer.Bottom
+      WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+      Rectangle {
+        id: witness
+        x: 280; y: 150; width: 10; height: 10; color: "#bb1122"
+        focus: true
+        Keys.onPressed: color = "#ff0000"
+      }
+      MouseArea { anchors.fill: parent; onClicked: witness.color = "#11bb22" }
+    }
+  }
+}
+"##,
   )
   .unwrap();
   fs::write(source.join("Widget.qml"), r##"
@@ -152,6 +179,9 @@ import Quickshell.Io
 import Quickshell.Wayland
 import "Services"
 ShellRoot {
+  id: hostRoot
+  property int witnessClicks: 0
+  property int witnessKeys: 0
   FileView {
     path: Quickshell.env("TEST_STATE")
     atomicWrites: true
@@ -162,6 +192,15 @@ ShellRoot {
       ready: instance && instance.screenRows.every(row => row.surface.contentItem.children.some(child => "resizing" in child && child.ready && !child.resizing)),
       command: instance ? instance.panelCommand : null,
       panelOpen: instance && instance.nativeSession.panelOpen,
+      opened: instance && instance.opened,
+      authorized: instance && instance.panelAuthorized,
+      focusHeld: instance && instance.focusHeld,
+      witnessClicks: hostRoot.witnessClicks,
+      witnessKeys: hostRoot.witnessKeys,
+      surfaceFocus: instance ? instance.screenRows.map(row => ({
+        output: row.id, policy: row.surface.policy, held: row.surface.focusHeld,
+        active: row.surface.contentItem.children.some(child => child.activeFocus)
+      })) : [],
       panelSerial: instance ? instance.nativeSession.panelSerial : 0,
       panelSettled: instance && (!instance.panelCommand || instance.panelCommand.serial === instance.nativeSession.panelSerial)
     })
@@ -182,6 +221,20 @@ ShellRoot {
       plugins.sync([], [entry])
       if (entry.fixtureAction === "summon") plugins.show("test.outputs", "")
       if (entry.fixtureAction === "restart") plugins.enable("test.outputs", entry)
+    }
+  }
+  Variants {
+    model: Quickshell.screens
+    PanelWindow {
+      required property var modelData
+      screen: modelData
+      anchors { top: true; bottom: true; left: true; right: true }
+      color: "#112233"
+      exclusionMode: ExclusionMode.Ignore
+      WlrLayershell.layer: WlrLayer.Bottom
+      WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
+      Item { anchors.fill: parent; focus: true; Keys.onPressed: hostRoot.witnessKeys++ }
+      MouseArea { anchors.fill: parent; onClicked: hostRoot.witnessClicks++ }
     }
   }
   Variants {
@@ -274,6 +327,27 @@ ShellRoot {
       std::thread::sleep(Duration::from_millis(10));
     }
   };
+  let key = |display: &mut Desktop| {
+    for kind in [3, 4] {
+      display.graphics.input(kind, 38, 0, 0, start.elapsed().as_millis() as u32).unwrap();
+      display.step(start.elapsed().as_millis() as u32);
+    }
+  };
+  let witness = |display: &mut Desktop, clicks: u64, keys: u64| {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+      display.step(start.elapsed().as_millis() as u32);
+      let state: serde_json::Value = fs::read(root.path().join("state.json")).ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
+      if state["witnessClicks"] == clicks && state["witnessKeys"] == keys { break; }
+      assert!(Instant::now() < deadline, "host input witness: {state}");
+      std::thread::sleep(Duration::from_millis(5));
+    }
+  };
+  // Full-output worker input and exclusive focus requests have no host authority.
+  click(&mut display, 285, 155);
+  key(&mut display);
+  witness(&mut display, 1, 1);
   click(&mut display, 50, 13);
   wait(&mut display, start, &log, "first-owner", |frame| {
     frame.count([0x22, 0x88, 0xee]) == 4160
@@ -297,7 +371,7 @@ ShellRoot {
   });
   fs::write(
     &settings,
-    r#"{"id":"test.outputs","sandbox":true,"sandboxPresentation":{"overlayOutputs":"all"}}"#,
+    r#"{"id":"test.outputs","sandbox":true,"sandboxPresentation":{"overlayMode":"visual","overlayOutputs":"all"}}"#,
   )
   .unwrap();
   wait(&mut display, start, &log, "roaming-approved", |frame| {
@@ -345,6 +419,13 @@ ShellRoot {
     );
     std::thread::sleep(Duration::from_millis(5));
   }
+  // The underlying witness also contributes a full-output mask. Drain the
+  // host's deferred Region polish/Wayland commit after readiness is published.
+  let settled = Instant::now() + Duration::from_millis(150);
+  while Instant::now() < settled {
+    display.step(start.elapsed().as_millis() as u32);
+    std::thread::sleep(Duration::from_millis(5));
+  }
   click(&mut display, 50, 13);
   wait(&mut display, start, &log, "surviving-view", |frame| {
     frame.count([0x22, 0x88, 0xee]) == 2080 && frame.count([0x44, 0xee, 0x22]) == 6000
@@ -360,6 +441,28 @@ ShellRoot {
       && frame.count([0xcc, 0x44, 0xdd]) == 0
       && frame.count([0x22, 0x88, 0xee]) == 2080
   });
+  click(&mut display, 285, 155);
+  key(&mut display);
+  witness(&mut display, 2, 2);
+  fs::write(&settings, r#"{"id":"test.outputs","sandbox":true,"sandboxPresentation":{"overlayMode":"visual","overlayOutputs":"all"}}"#).unwrap();
+  wait(&mut display, start, &log, "closed-visual", |frame| pixel(frame, 285, 155, [0xbb, 0x11, 0x22]));
+  click(&mut display, 285, 155);
+  key(&mut display);
+  witness(&mut display, 3, 3);
+  fs::write(&settings, r#"{"id":"test.outputs","sandbox":true,"sandboxPresentation":{"overlayMode":"pointer","overlayOutputs":"all"}}"#).unwrap();
+  // Pixels are identical between visual and pointer mode; wait for the host mask.
+  let deadline = Instant::now() + Duration::from_secs(3);
+  loop {
+    display.step(start.elapsed().as_millis() as u32);
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(root.path().join("state.json")).unwrap()).unwrap();
+    if state["surfaceFocus"][0]["policy"]["pointer"] == true { break; }
+    assert!(Instant::now() < deadline, "pointer policy did not arrive");
+    std::thread::sleep(Duration::from_millis(5));
+  }
+  click(&mut display, 285, 155);
+  wait(&mut display, start, &log, "closed-pointer", |frame| pixel(frame, 285, 155, [0x11, 0xbb, 0x22]));
+  key(&mut display);
+  witness(&mut display, 3, 4);
   fs::write(
     &settings,
     r#"{"id":"test.outputs","sandbox":true,"fixtureAction":"summon"}"#,

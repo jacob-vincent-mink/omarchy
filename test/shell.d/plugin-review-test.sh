@@ -47,7 +47,7 @@ try {
   const vm = require('vm')
   vm.createContext(scope)
   vm.runInContext(method('saveSandboxSettings', '\n    }'), scope)
-  for (const value of ['[]', 'null', '{"sandbox":false}', '{"id":"other"}', '{"__proto__":{}}', '{"constructor":{}}', '{"prototype":{}}']) {
+  for (const value of ['[]', 'null', '{"sandbox":false}', '{"sandboxPresentation":{"overlayMode":"pointer"}}', '{"id":"other"}', '{"__proto__":{}}', '{"constructor":{}}', '{"prototype":{}}']) {
     assertEqual(scope.saveSandboxSettings('acme.review', value), 'invalid settings', 'host rejects structural or non-object settings: ' + value)
   }
   assertEqual(scope.saveSandboxSettings('other', '{}'), 'plugin is not active', 'host rejects entries without the sandbox marker')

@@ -1723,7 +1723,7 @@ ShellRoot {
         if (settingsJson.length > 65536) return "settings are too large"
         var settings = JSON.parse(settingsJson)
         if (!Util.isPlainObject(settings)
-          || ["id", "sandbox", "__proto__", "constructor", "prototype"].some(function(key) { return Object.prototype.hasOwnProperty.call(settings, key) }))
+          || ["id", "sandbox", "sandboxPresentation", "__proto__", "constructor", "prototype"].some(function(key) { return Object.prototype.hasOwnProperty.call(settings, key) }))
           return "invalid settings"
         // Only the marked native entry, never a legacy command/QML widget.
         var copy = JSON.parse(JSON.stringify(shell.shellConfig))

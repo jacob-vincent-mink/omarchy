@@ -46,6 +46,11 @@ QtObject {
     return settings
   }
 
+  function overlayMode(entry) {
+    var mode = entry && entry.sandboxPresentation && entry.sandboxPresentation.overlayMode
+    return mode === "visual" || mode === "pointer" ? mode : "none"
+  }
+
   function coordinate(instance) {
     const owner = instance.barOwner || instance
     // Worker state alone cannot acquire host popup ownership.
@@ -67,7 +72,8 @@ QtObject {
     if (Object.keys(instances).length >= 16) return "too many active sandbox plugins"
     var instance = component.createObject(root, {
       pluginId: id, store: store, controller: controller, settings: ownSettings(entry), geometrySource: geometrySource,
-      overlayOutputs: entry && entry.sandboxPresentation && entry.sandboxPresentation.overlayOutputs === "all" ? "all" : "owner"
+      overlayOutputs: entry && entry.sandboxPresentation && entry.sandboxPresentation.overlayOutputs === "all" ? "all" : "owner",
+      overlayMode: overlayMode(entry)
     })
     if (!instance) return "could not create native plugin host: " + component.errorString()
     var next = Object.assign({}, instances)
@@ -155,6 +161,7 @@ QtObject {
         } else {
           instances[entry.id].settings = ownSettings(entry)
           instances[entry.id].overlayOutputs = entry.sandboxPresentation && entry.sandboxPresentation.overlayOutputs === "all" ? "all" : "owner"
+          instances[entry.id].overlayMode = overlayMode(entry)
         }
       }
     }

@@ -17,6 +17,7 @@ class PluginView : public QQuickItem {
   Q_PROPERTY(PluginSession *session READ session WRITE setSession NOTIFY sessionChanged)
   Q_PROPERTY(uint outputId READ outputId WRITE setOutputId NOTIFY sessionChanged)
   Q_PROPERTY(QVariantList renderRegions READ renderRegions WRITE setRenderRegions NOTIFY renderRegionsChanged)
+  Q_PROPERTY(QVariantList hostInputRegions READ hostInputRegions WRITE setHostInputRegions NOTIFY hostInputRegionsChanged)
   Q_PROPERTY(bool ready READ ready NOTIFY stateChanged)
   Q_PROPERTY(bool resizing READ resizing NOTIFY stateChanged)
   Q_PROPERTY(bool presented READ presented NOTIFY stateChanged)
@@ -34,6 +35,8 @@ public:
   void setOutputId(uint output);
   QVariantList renderRegions() const { return m_renderRegions; }
   void setRenderRegions(const QVariantList &regions);
+  QVariantList hostInputRegions() const { return m_hostInputRegions; }
+  void setHostInputRegions(const QVariantList &regions);
   bool ready() const { return m_ready; }
   bool resizing() const { return m_resizing; }
   bool presented() const { return m_presented; }
@@ -54,6 +57,7 @@ public:
 signals:
   void sessionChanged();
   void renderRegionsChanged();
+  void hostInputRegionsChanged();
   void stateChanged();
   void panelChanged();
   void widgetSizeChanged();
@@ -95,6 +99,10 @@ private:
   int m_requestedScale = 1;
   QRegion m_mask;
   QRegion m_renderMask;
+  QRegion m_hostInputMask;
+  QVariantList m_hostInputRegions;
+  QPointF m_lastPointer;
+  bool m_hasHostInputRegions = false;
   QVariantList m_renderRegions;
   bool m_hasRenderRegions = false;
   QString m_error;

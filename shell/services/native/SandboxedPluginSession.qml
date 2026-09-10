@@ -16,6 +16,7 @@ QtObject {
   property var settings: ({})
   property var geometrySource: null
   property string overlayOutputs: "owner"
+  property string overlayMode: "none"
   property var screenRows: []
   property var placements: []
   property int nextOutputId: 0
@@ -27,21 +28,37 @@ QtObject {
   property string localError: ""
   property string sentTopology: ""
   property bool started: false
+  property bool panelAuthorized: false
   readonly property var nativeSession: session
   readonly property var activeRow: screenRows.find(row => row.id === activeOutputId) || null
+  readonly property int overlayOutputId: activeRow ? activeOutputId : screenRows.length ? screenRows[0].id : 0
   readonly property var activePlacement: placements.find(row => row.id === activeViewId) || null
   readonly property var barOwner: activePlacement ? activePlacement.owner : null
   readonly property bool focusHeld: activeRow ? activeRow.surface.focusHeld : false
-  readonly property bool opened: !error && (panelCommand && panelCommand.serial !== session.panelSerial ? panelCommand.open : session.panelOpen)
+  readonly property bool opened: panelAuthorized && !error && (panelCommand && panelCommand.serial !== session.panelSerial ? panelCommand.open : session.panelOpen)
   readonly property string error: localError || session.error
   readonly property string state: error ? "error" : session.ready && (!screenRows.length || screenRows.some(row => row.surface.presented)) ? "running" : "starting"
   signal statusChanged()
   signal panelSwitchRequested(int direction)
   onStateChanged: statusChanged()
-  onOpenedChanged: { if (!opened) for (const row of screenRows) row.surface.clearFocus() }
+  onOpenedChanged: {
+    panelGestureTimer.stop()
+    if (opened && activeRow) Qt.callLater(() => {
+      // Let the output's host input policy observe the new authorization first.
+      if (root.opened && root.activeRow) root.activeRow.surface.primeFocus(false)
+    })
+    else {
+      panelAuthorized = false
+      for (const row of screenRows) row.surface.clearFocus()
+    }
+  }
   onOverlayOutputsChanged: { for (const row of screenRows) row.surface.updateMask() }
 
   property PluginSession session: PluginSession { id: session }
+  property Timer panelGestureTimer: Timer {
+    interval: 1000
+    onTriggered: { if (!root.opened) root.panelAuthorized = false }
+  }
   property var surfaceComponent: Qt.createComponent("SandboxedOutputSurface.qml")
   property Connections outputsChanged: Connections {
     target: Quickshell
@@ -146,18 +163,22 @@ QtObject {
   }
   function claimOutput(outputId, point) {
     const output = screenRows.find(row => row.id === outputId)
-    if (!output) return
+    if (!output) return false
     const candidates = placements.filter(view => view.output === outputId)
     let view = candidates.find(view => {
       const slot = PluginInput.barSlots([view.bar], output.screen.width, output.screen.height)[0]
       return slot && point && point.x >= slot.x && point.y >= slot.y && point.x < slot.x + slot.width && point.y < slot.y + slot.height
-    }) || candidates.find(view => view.id === activeViewId) || candidates[0]
-    if (!view) return
+    })
+    // A roaming pointer press has no fallback placement or keyboard authority.
+    if (!view) return false
     if (activeOutputId && activeOutputId !== outputId) {
       for (const row of screenRows) if (row.id !== outputId) row.surface.clearFocus()
     }
     activeOutputId = outputId
     activeViewId = view.id
+    panelAuthorized = true
+    if (!opened) panelGestureTimer.restart()
+    return true
   }
   function setPanel(open, payload, owner) {
     if (error) return false
@@ -181,8 +202,15 @@ QtObject {
       activeOutputId = output.id
       activeViewId = view.id
     }
+    panelGestureTimer.stop()
+    panelAuthorized = open === true
     panelCommand = {serial: (panelCommand ? panelCommand.serial : 0) % 2147483647 + 1, open: open, payload: text, view: activeViewId, output: activeOutputId}
-    if (open && activeRow) activeRow.surface.primeFocus(true)
+    if (open && activeRow) {
+      const command = panelCommand
+      Qt.callLater(() => {
+        if (root.opened && root.panelCommand === command && root.activeRow) root.activeRow.surface.primeFocus(true)
+      })
+    }
     else for (const row of screenRows) row.surface.clearFocus()
     return true
   }

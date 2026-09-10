@@ -131,6 +131,7 @@ ShellRoot {
     implicitWidth: 800; implicitHeight: 480; color: "#171c25"
     PluginView {
       id: view; width: 800; height: 480
+      onFocusRequested: forceActiveFocus()
       Component.onCompleted: start(Quickshell.env("TEST_STORE"), "test.qt", Quickshell.env("TEST_CONTROLLER"), 800, 480)
       onStateChanged: console.log("VIEW_STATE", ready, error)
       onActiveFocusChanged: console.log("VIEW_FOCUS", activeFocus)
