@@ -234,6 +234,18 @@ fn job_controller_child() {
     String::from_utf8_lossy(&output.stderr)
   );
   assert_eq!(output.stdout, b"reviewed asset\nsaved data\n");
+  drop(read);
+  // The real host job must reject a mutable DATA alias before any process or
+  // cgroup is created, for both token and environment-expanded spellings.
+  let secret = root.join("data-host-secret");
+  fs::write(&secret, "host-only secret").unwrap();
+  std::os::unix::fs::symlink(&secret, data.path().join("escape")).unwrap();
+  for argument in ["$OMARCHY_PLUGIN_DATA/escape".to_owned(), data.path().join("escape").to_str().unwrap().to_owned()] {
+    let argv = vec![argument];
+    let groups = job_groups();
+    assert!(Job::start(&cat, &policy(&argv), &["fixture".into()].into(), &argv, &environment, &paths, Lifetime::Request).is_err());
+    assert_eq!(job_groups(), groups);
+  }
 
   let extra = fs::File::create(root.join("host-secret-fixture")).unwrap();
   assert_eq!(

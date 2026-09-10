@@ -141,12 +141,14 @@ impl Request {
       .map_err(|_| Status::Denied.error())?;
     let executable = grant.executable.clone();
     let started = Instant::now();
+    let argv = self.argv.clone();
+    let paths = paths.to_vec();
     Ok(Preparation {
       request: self,
       started,
       task: std::thread::Builder::new()
         .name("ward-exec-verify".into())
-        .spawn(move || executable.prepare(started))?,
+        .spawn(move || Ok((executable.prepare(started)?, crate::exec_files::Arguments::prepare(&argv, &paths, started)?)))?,
     })
   }
 }
@@ -156,7 +158,7 @@ impl Request {
 pub(crate) struct Preparation {
   request: Request,
   pub(crate) started: Instant,
-  task: std::thread::JoinHandle<io::Result<crate::host_job::PreparedExecutable>>,
+  task: std::thread::JoinHandle<io::Result<(crate::host_job::PreparedExecutable, crate::exec_files::Arguments)>>,
 }
 
 impl Preparation {
@@ -173,7 +175,7 @@ impl Preparation {
     if !self.is_finished() {
       return Err(Status::Busy.error());
     }
-    let prepared = self.task.join().map_err(|_| Status::Failed.error())??;
+    let (prepared, arguments) = self.task.join().map_err(|_| Status::Failed.error())??;
     let grant = grants
       .get(&self.request.name)
       .ok_or_else(|| Status::Denied.error())?;
@@ -184,6 +186,7 @@ impl Preparation {
     prepared.check(&grant.executable)?;
     Job::start_prepared(
       prepared,
+      arguments,
       &grant.tree,
       &grant.selected,
       &self.request.argv,

@@ -360,8 +360,11 @@ impl Job {
     paths: &[crate::exec_policy::PluginDir],
     lifetime: Lifetime,
   ) -> io::Result<Self> {
+    tree.check_with(paths, selected, argv)?;
+    let started = Instant::now();
     Self::start_prepared(
-      executable.clone().prepare(Instant::now())?,
+      executable.clone().prepare(started)?,
+      crate::exec_files::Arguments::prepare(argv, paths, started)?,
       tree,
       selected,
       argv,
@@ -373,6 +376,7 @@ impl Job {
 
   pub(crate) fn start_prepared(
     prepared: PreparedExecutable,
+    arguments: crate::exec_files::Arguments,
     tree: &Tree,
     selected: &BTreeSet<String>,
     argv: &[String],
@@ -385,13 +389,9 @@ impl Job {
       file,
       started,
     } = prepared;
-    // Resolve the invocation itself, not just the copy used by the matcher.
-    // Host commands cannot open a literal "$OMARCHY_PLUGIN_PATH/..." filename.
-    let argv = argv
-      .iter()
-      .map(|arg| crate::exec_policy::resolve_plugin_path(arg, paths))
-      .collect::<io::Result<Vec<_>>>()?;
-    tree.check_with(paths, selected, &argv)?;
+    tree.check_with(paths, selected, argv)?;
+    arguments.check(argv, paths)?;
+    let input_fds: Vec<_> = arguments.files.iter().map(AsRawFd::as_raw_fd).collect();
     supervisor::verify_controller_limits(supervisor::Limits::default())?;
     if started.elapsed() >= TIMEOUT {
       return Err(invalid("host executable preparation timed out"));
@@ -422,7 +422,7 @@ impl Job {
       .current_dir("/")
       .env_clear()
       .envs(&environment.0)
-      .args(argv)
+      .args(&arguments.argv)
       .stdin(Stdio::null())
       .stdout(Stdio::piped())
       .stderr(Stdio::piped());
@@ -438,6 +438,11 @@ impl Job {
           return Err(io::Error::other(
             "host job descriptor or parent is unavailable",
           ));
+        }
+        for input in &input_fds {
+          if *input < 3 || libc::fcntl(*input, libc::F_SETFD, 0) != 0 {
+            return Err(io::Error::other("host input descriptor is unavailable"));
+          }
         }
         Ok(())
       });

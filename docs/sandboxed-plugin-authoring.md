@@ -59,7 +59,7 @@ Host command:  $OMARCHY_PLUGIN_DATA/save.json
                <host state home>/omarchy/plugins/<id>/save.json
 ```
 
-Write it using `$HOME` inside the sandbox. Only if a host command needs that file do you pass the corresponding DATA path through an approved exec request. There is no copy, synchronization or extra staging step between HOME and DATA. Authors must not construct the machine-specific host storage path themselves.
+Write it using `$HOME` inside the sandbox. Only if a host command needs that file do you pass the corresponding DATA path through an approved exec request. HOME and DATA identify the same persistent directory; authors must not construct the machine-specific host storage path themselves. At exec preparation, the broker snapshots selected DATA input files into sealed descriptors so a later worker rename or symlink cannot redirect the command's read.
 
 These paths are not audio-specific. Any approved host command can receive a shipped file through PATH or a saved/generated file through DATA, provided its selected exec leaf admits that argument. For example, an image tool could read a generated image through DATA; a player could read a shipped sound through PATH. The distinction is the file's owner and lifetime, not which command reads it.
 
@@ -122,7 +122,9 @@ The single quotes deliberately prevent Bash expansion. In a QML `Process.command
 
 Token-relative `.`/`..`, empty components and traversal are rejected. This lexical check is not a host-filesystem sandbox or a promise about symlinks created in writable data. An approved CLI retains its own account, configuration, filesystem and network authority; constrain arguments accordingly. Prefer exact shipped filenames to open-ended text prefixes. Host asset staging is an implementation detail, not a stable path to cache across launches.
 
-A text prefix naming the bare PATH or DATA root matches that directory and its descendants, not a sibling whose name begins with the same bytes. Ordinary filename prefixes beneath the root retain text-prefix semantics. This component-boundary check does not resolve the separate mutable-file/symlink confinement problem.
+A text prefix naming the bare PATH or DATA root matches that directory and its descendants, not a sibling whose name begins with the same bytes. Ordinary filename prefixes beneath the root retain text-prefix semantics.
+
+DATA arguments are regular read-only file inputs: the broker opens beneath the selected root without symlinks, hardlinks or nested mounts, copies at most 64 MiB total per request, seals the copies and passes inherited `/proc/self/fd/N` names to the command. Both token and absolute DATA spellings receive this treatment. Directories, special files, output destinations and tools requiring a filename extension or sibling-relative files are not supported by this contract. PATH remains the immutable reviewed bundle. Copying a concurrently edited file may capture mixed plugin-authored bytes, but cannot change the pinned source into another file; the command must still treat those bytes as untrusted input. This does not sandbox the approved command's own configuration, dependencies or semantics.
 
 ## Sandbox manifest schema
 
