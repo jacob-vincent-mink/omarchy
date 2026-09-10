@@ -342,7 +342,7 @@ fn job_controller_child() {
         .contains("output exceeds")
     );
   }
-  for mode in ["cancel", "drop", "exit", "timeout", "plugin"] {
+  for mode in ["cancel", "drop", "exit", "request", "plugin"] {
     let socket = root.join(format!("{mode}.socket"));
     let gate = root.join(format!("{mode}.exit"));
     let listener = UnixListener::bind(&socket).unwrap();
@@ -379,17 +379,13 @@ fn job_controller_child() {
         fs::write(&gate, "exit").unwrap();
         assert_eq!(finish(&mut job).unwrap().status.code(), Some(17));
       }
-      "timeout" => assert_eq!(
-        finish(&mut job).unwrap_err().kind(),
-        io::ErrorKind::TimedOut
-      ),
-      "plugin" => {
+      "request" | "plugin" => {
         let until = Instant::now() + Duration::from_secs(11);
         while Instant::now() < until {
           watchdog().unwrap();
           assert!(
             job.poll().unwrap().is_none(),
-            "plugin-lifetime job ended early"
+            "host job ended at the former execution deadline"
           );
           std::thread::sleep(Duration::from_millis(10));
         }

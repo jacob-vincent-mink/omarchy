@@ -4,7 +4,7 @@ use crate::{
   channel::{Channel, Packet},
   exec_policy::{Tree, validate_argv},
   grants::{invalid, validate_id},
-  host_job::{Environment, Executable, Job, Lifetime, MAX_OUTPUT, TIMEOUT},
+  host_job::{Environment, Executable, Job, Lifetime, MAX_OUTPUT},
   operation::Status,
   payload,
 };
@@ -192,7 +192,6 @@ impl Preparation {
       &self.request.argv,
       env,
       paths,
-      grant.lifetime,
     )
   }
 }
@@ -245,25 +244,11 @@ fn decode_response(mut packet: Packet) -> io::Result<Output> {
 }
 
 pub fn receive(channel: &Channel) -> io::Result<Output> {
-  receive_for(channel, Lifetime::Request)
-}
-
-fn receive_for(channel: &Channel, lifetime: Lifetime) -> io::Result<Output> {
-  let deadline = Instant::now() + TIMEOUT + Duration::from_secs(2);
   loop {
     match channel.receive() {
       Ok(packet) => return decode_response(packet),
-      Err(e)
-        if e.kind() == io::ErrorKind::WouldBlock
-          && (!lifetime.is_request() || Instant::now() < deadline) =>
-      {
-        std::thread::sleep(Duration::from_millis(5));
-      }
       Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-        return Err(io::Error::new(
-          io::ErrorKind::TimedOut,
-          "host execution reply timed out",
-        ));
+        std::thread::sleep(Duration::from_millis(5));
       }
       Err(_) => return Err(Status::Unavailable.error()),
     }
@@ -275,11 +260,6 @@ fn receive_for(channel: &Channel, lifetime: Lifetime) -> io::Result<Output> {
 pub fn request(name: String, argv: Vec<String>) -> io::Result<Output> {
   let request = Request { name, argv };
   request.validate().map_err(|_| Status::Invalid.error())?;
-  let lifetime = crate::operation::grants()?
-    .exec
-    .get(&request.name)
-    .map(|grant| grant.lifetime)
-    .unwrap_or_default();
   let deadline = Instant::now() + Duration::from_secs(120);
   let backoff = Duration::from_millis(500 + u64::from(std::process::id() % 251));
   let output = loop {
@@ -293,7 +273,7 @@ pub fn request(name: String, argv: Vec<String>) -> io::Result<Output> {
       Err(e) => return Err(e),
     };
     request.send(&channel)?;
-    match receive_for(&channel, lifetime) {
+    match receive(&channel) {
       Ok(output) => break output,
       // These replies explicitly mean no job started. Never retry a failed
       // job or lost reply: it could duplicate an already accepted mutation.

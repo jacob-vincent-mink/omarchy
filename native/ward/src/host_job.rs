@@ -24,11 +24,13 @@ use std::{
 
 const MAX_EXECUTABLE: u64 = 64 * 1024 * 1024;
 pub const MAX_OUTPUT: usize = 2 * 1024 * 1024; // Independently for stdout and stderr.
-pub const TIMEOUT: Duration = Duration::from_secs(10);
+pub const PREPARATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Lifetime {
+  // Retained for existing manifest/grant serialization. Neither value limits
+  // execution time; every job is owned by its caller and controller.
   #[default]
   Request,
   Plugin,
@@ -247,7 +249,6 @@ unsafe fn guard(
   kill: i32,
   events: i32,
   path: &CString,
-  lifetime: Lifetime,
 ) -> io::Result<()> {
   unsafe {
     if libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) != 0 {
@@ -276,15 +277,7 @@ unsafe fn guard(
       revents: 0,
     });
     if target_fd >= 0 {
-      libc::poll(
-        watched.as_mut_ptr(),
-        2,
-        if lifetime.is_request() {
-          TIMEOUT.as_millis() as i32
-        } else {
-          -1
-        },
-      );
+      libc::poll(watched.as_mut_ptr(), 2, -1);
     }
     let completed = libc::waitpid(target, &mut status, libc::WNOHANG) == target;
     if !completed {
@@ -345,8 +338,6 @@ pub struct Job {
   out_eof: bool,
   err_eof: bool,
   status: Option<ExitStatus>,
-  started: Instant,
-  lifetime: Lifetime,
   finished: bool,
 }
 
@@ -358,7 +349,7 @@ impl Job {
     argv: &[String],
     environment: &Environment,
     paths: &[crate::exec_policy::PluginDir],
-    lifetime: Lifetime,
+    _lifetime: Lifetime,
   ) -> io::Result<Self> {
     tree.check_with(paths, selected, argv)?;
     let started = Instant::now();
@@ -370,7 +361,6 @@ impl Job {
       argv,
       environment,
       paths,
-      lifetime,
     )
   }
 
@@ -382,7 +372,6 @@ impl Job {
     argv: &[String],
     environment: &Environment,
     paths: &[crate::exec_policy::PluginDir],
-    lifetime: Lifetime,
   ) -> io::Result<Self> {
     let PreparedExecutable {
       executable,
@@ -393,7 +382,7 @@ impl Job {
     arguments.check(argv, paths)?;
     let input_fds: Vec<_> = arguments.files.iter().map(AsRawFd::as_raw_fd).collect();
     supervisor::verify_controller_limits(supervisor::Limits::default())?;
-    if started.elapsed() >= TIMEOUT {
+    if started.elapsed() >= PREPARATION_TIMEOUT {
       return Err(invalid("host executable preparation timed out"));
     }
     let fd = file.as_raw_fd();
@@ -428,7 +417,7 @@ impl Job {
       .stderr(Stdio::piped());
     unsafe {
       command.pre_exec(move || {
-        guard(owner_fd, kill_fd, events_fd, &group_path, lifetime)?;
+        guard(owner_fd, kill_fd, events_fd, &group_path)?;
         if libc::write(member_fd, b"0".as_ptr().cast(), 1) != 1
           // Preserve the spawn error pipe until exec, but inherit only the
           // explicitly selected payload descriptor through that exec.
@@ -460,8 +449,6 @@ impl Job {
       out_eof: false,
       err_eof: false,
       status: None,
-      started,
-      lifetime,
       finished: false,
     };
     for fd in [job.stdout.as_raw_fd(), job.stderr.as_raw_fd()] {
@@ -486,12 +473,6 @@ impl Job {
   }
 
   fn poll_inner(&mut self) -> io::Result<Option<Output>> {
-    if self.lifetime.is_request() && self.started.elapsed() >= TIMEOUT {
-      return Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        "host job timed out",
-      ));
-    }
     self.status = self.child.try_wait()?;
     self.out_eof |= drain(&mut self.stdout, &mut self.out)?;
     self.err_eof |= drain(&mut self.stderr, &mut self.err)?;

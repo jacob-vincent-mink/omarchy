@@ -119,13 +119,7 @@ pub(crate) struct WorkerGrants {
   #[serde(default)]
   http: BTreeMap<String, serde::de::IgnoredAny>,
   #[serde(default)]
-  pub exec: BTreeMap<String, WorkerExec>,
-}
-
-#[derive(Deserialize)]
-pub(crate) struct WorkerExec {
-  #[serde(default)]
-  pub lifetime: crate::host_job::Lifetime,
+  pub exec: BTreeMap<String, serde::de::IgnoredAny>,
 }
 
 /// The read-only admission snapshot explains intentionally absent sockets.
@@ -174,7 +168,6 @@ mod tests {
   fn helpers_read_redacted_worker_grants_without_host_authority_fields() {
     use crate::{
       grants::{Access, FileSystemGrant, Grants, Target},
-      host_job::Lifetime,
     };
     let directory = tempfile::tempdir().unwrap();
     let mut grants = Grants::default();
@@ -195,7 +188,7 @@ mod tests {
     assert!(serde_json::from_value::<Grants>(view.clone()).is_err());
     let worker: WorkerGrants = serde_json::from_value(view).unwrap();
     assert!(worker.notifications);
-    assert_eq!(worker.exec["tool"].lifetime, Lifetime::Plugin);
+    assert!(worker.exec.contains_key("tool"));
     assert!(!worker.open_urls);
     assert!(worker.http.is_empty());
     let denied: WorkerGrants = serde_json::from_value(Grants::default().worker_view()).unwrap();

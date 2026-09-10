@@ -2,7 +2,7 @@
 use crate::{
   exec_policy::{PLUGIN_DATA, PluginDir, resolve_plugin_path},
   grants::invalid,
-  host_job::TIMEOUT,
+  host_job::PREPARATION_TIMEOUT,
   payload,
 };
 use std::{
@@ -75,7 +75,7 @@ impl Arguments {
         let mut file = payload::create()?;
         let mut buffer = [0u8; 65536];
         loop {
-          if started.elapsed() >= TIMEOUT {
+          if started.elapsed() >= PREPARATION_TIMEOUT {
             return Err(invalid("DATA input preparation timed out"));
           }
           let count = source.read(&mut buffer)?;

@@ -3,7 +3,6 @@ use omarchy_ward::{
   controller::Approval,
   exec::{Ask, Grant, Request, receive},
   grants::{Access, FileSystemGrant, Grants, Target},
-  operation::Status,
   requests::Broker,
   revision::Revision,
   store::Store,
@@ -89,18 +88,18 @@ fn exec_worker_child() {
     ))
     .unwrap();
     assert_eq!(output.status.code(), Some(7));
-  } else if mode == "long" || mode == "abandon" {
+  } else if matches!(mode.as_str(), "request-long" | "long" | "abandon" | "abandon-request") {
     let mut cli = Command::new("/grants/cli")
       .args(["--json", "--exec", "fixture"])
       .args(&hold)
       .stdout(std::process::Stdio::piped())
       .spawn()
       .unwrap();
-    if mode == "long" {
+    if mode == "long" || mode == "request-long" {
       thread::sleep(Duration::from_secs(13));
       assert!(
         cli.try_wait().unwrap().is_none(),
-        "long-running forwarder ended at the bounded deadline"
+        "host command forwarder ended at the former execution deadline"
       );
       display.write_all(b"GATE").unwrap();
       let output = cli.wait_with_output().unwrap();
@@ -174,13 +173,9 @@ fn exec_worker_child() {
       std::io::ErrorKind::WouldBlock
     );
   } else {
-    let started = Instant::now();
-    assert_eq!(
-      Status::from_error(&receive(&send("/run/plugin/exec", hold)).unwrap_err()),
-      Status::TimedOut
-    );
-    assert!(started.elapsed() < Duration::from_secs(12));
-    assert_ne!(mode, "revoke", "revocation left the worker alive");
+    assert!(mode.starts_with("revoke"));
+    let _ = receive(&send("/run/plugin/exec", hold));
+    panic!("revocation left the worker alive");
   }
   display.write_all(b"PASS").unwrap();
 }
@@ -314,10 +309,11 @@ fn selected_exec_crosses_only_the_broker_and_revocation_stops_owned_jobs() {
     "denied",
     "allowed",
     "failed",
-    "timeout",
+    "request-long",
     "revoke",
     "long",
     "abandon",
+    "abandon-request",
     "revoke-long",
     "prepare",
     "prepare-abandon",

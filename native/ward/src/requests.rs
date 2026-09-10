@@ -305,7 +305,7 @@ impl Broker {
         channel,
       }) = slot
       {
-        if preparation.started.elapsed() >= crate::host_job::TIMEOUT
+        if preparation.started.elapsed() >= crate::host_job::PREPARATION_TIMEOUT
           && let Some(channel) = channel.take()
         {
           let _ = reply(&channel, Status::TimedOut);
