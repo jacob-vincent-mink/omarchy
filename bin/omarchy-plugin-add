@@ -102,7 +102,7 @@ while (( $# > 0 )); do
     ;;
   -h | --help)
     echo "Usage: omarchy plugin add [git-url] [--yolo|--trusted-local] [--inspect|--stage] [--commit <sha>] [--json] [--enable] [--yes]"
-    echo "Defaults to Ward isolation. --yolo explicitly trusts unsandboxed in-process code."
+    echo "Defaults to Ward isolation. --yolo grants sandbox-native code all declared access; legacy code runs trusted in-process."
     echo "--trusted-local accepts only an existing local Git folder. --yes never selects YOLO."
     echo "--inspect clones and validates without installing or running code."
     echo "--stage retains a unique Ward checkout for permission review; requires --json."
@@ -145,7 +145,7 @@ if (( review_stage )); then
 fi
 
 if [[ $mode != "ward" ]]; then
-  echo "WARNING: $mode runs arbitrary code inside your desktop shell, with your files, accounts and network. Ward provides no containment." >&2
+  echo "WARNING: $mode grants every declared supported permission to sandbox-native plugins. Plugins without a sandbox declaration run arbitrary unsandboxed code with your files, accounts and network." >&2
 fi
 if (( ! ASSUME_YES && ! inspect && ! review_stage )); then
   echo "Source: $url · Mode: $mode" >&2
@@ -186,10 +186,10 @@ if (( ! inspect )) && [[ -e $target || -L $target ]]; then
 fi
 
 declares_ward=$(jq 'has("sandbox")' "$stage/manifest.json")
-if [[ $mode == "ward" && $declares_ward != "true" ]]; then
-  fail "this plugin is not Ward-compatible; choose --yolo explicitly for trusted in-process execution, or --trusted-local for your own local code"
-elif [[ $mode != "ward" ]]; then
-  [[ $declares_ward != "true" ]] || fail "a sandbox declaration cannot be overridden by $mode"
+if [[ $mode != "ward" && $declares_ward == "true" ]]; then
+  mode="ward-yolo"
+fi
+if [[ $mode == "yolo" || $mode == "trusted-local" ]]; then
   identities=$(omarchy-plugin-isolation retained)
   if jq -e --arg id "$id" 'index($id) != null' <<<"$identities" >/dev/null; then
     fail "'$id' has retained Ward identity; use a different identity for deliberately trusted code"
@@ -217,13 +217,17 @@ if (( review_stage )); then
   exit 0
 fi
 
-if [[ $mode == "ward" ]]; then
+if [[ $mode == "ward" || $mode == "ward-yolo" ]]; then
   omarchy-plugin-isolation mark "$id"
 fi
 # Publish host provenance before the checkout can be observed by the shell.
 omarchy-plugin-installation record "$id" "$mode" "$source_kind" "$url" "$commit"
 mv -T "$stage" "$target"
 stage=""
+if [[ $mode == "ward-yolo" ]]; then
+  review=$(omarchy-plugin-review "$id" --json)
+  omarchy-plugin-approve "$id" --revision "$(jq -r '.revision' <<<"$review")" --all-declared --yes >&2
+fi
 if (( json )); then
   jq '.installed = true' <<<"$report"
 else

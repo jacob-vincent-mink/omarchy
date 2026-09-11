@@ -86,8 +86,8 @@ ShellRoot {
     if (loaded || !manifest || !context || !grants) return
     loaded = true
     var entries = manifest.entryPoints
-    if (entries.service) serviceLoader.source = entryUrl(entries.service)
-    if (entries.overlay) overlayLoader.source = entryUrl(entries.overlay)
+    if (entries.service) serviceLoader.setSource(entryUrl(entries.service), {runtime: shellApi.runtime.scope(serviceLoader)})
+    if (entries.overlay) overlayLoader.setSource(entryUrl(entries.overlay), {runtime: shellApi.runtime.scope(overlayLoader)})
     syncViews()
     Qt.callLater(applyPanel)
     Qt.callLater(reportPanelState)
@@ -169,7 +169,11 @@ ShellRoot {
 
   PluginShellApi {
     id: shellApi
-    readonly property var desktopGeometry: root.context ? root.context.geometry : null
+    runtime: PluginRuntime {
+      pluginId: shellApi.pluginId
+      admitted: root.grants
+    }
+    _desktopGeometry: root.context ? root.context.geometry : null
     pluginId: root.manifest ? root.manifest.id : ""
     _serviceLookup: id => id === pluginId ? serviceLoader.item : null
     _summon: (id, payload) => {

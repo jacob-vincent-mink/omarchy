@@ -51,6 +51,7 @@ fi
     | ($manifestPath | startswith($bundled)) as $firstParty
     | ($sourceDir | split("/") | last) as $directoryId
     | (first($installations[] | select(.id == $directoryId)) // {}) as $installation
+    | ($installation.mode == "yolo" or $installation.mode == "trusted-local") as $trusted
     | select($firstParty or ($manifest.id | startswith("omarchy.") | not))
     | {
         id: ($manifest.id // ""),
@@ -63,9 +64,9 @@ fi
         sourceDir: $sourceDir,
         entryPoints: ($manifest.entryPoints // {}),
         sandbox: ($manifest.sandbox // null),
-        sandboxed: (($manifest | has("sandbox")) or ($identities | index($manifest.id) != null or index($directoryId) != null)),
-        wardIdentity: (($manifest | has("sandbox")) or ($retained | index($manifest.id) != null or index($directoryId) != null)),
-        executionMode: (if $firstParty then "first-party" else $installation.mode // (if ($manifest | has("sandbox")) then "ward" else "legacy-trusted" end) end),
+        sandboxed: (($firstParty | not) and (($trusted | not) or ($identities | index($manifest.id) != null or index($directoryId) != null))),
+        wardIdentity: (($firstParty | not) and (($installation.mode == "ward" or $installation.mode == "ward-yolo") or (($manifest | has("sandbox")) and ($trusted | not)) or ($retained | index($manifest.id) != null or index($directoryId) != null))),
+        executionMode: (if $firstParty then "first-party" else $installation.mode // "ward" end),
         installation: (if $firstParty then null else $installation end),
         error: (if $firstParty then null else $installation.error // null end),
         barWidget: ($manifest.barWidget // null),

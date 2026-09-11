@@ -178,11 +178,14 @@ fn shared_runtime(settings_granted: bool) {
   let root = desktop::runtime();
   let source = root.path().join("source");
   fs::create_dir(&source).unwrap();
+  let command = serde_json::json!({"executable":"/usr/bin/printf", "tree": {
+    "next":[{"arg":{"kind":"exact","value":"portable"},"then":{"end":"read"}}]
+  }});
   fs::write(source.join("manifest.json"), serde_json::to_vec(&serde_json::json!({
     "schemaVersion": 1, "id": "test.shared", "name": "Shared runtime", "version": "1",
     "kinds": ["bar-widget", "service", "overlay"],
     "entryPoints": {"barWidget": "Widget #.qml", "service": "Service.qml", "overlay": "Overlay.qml"},
-    "barWidget": {"defaultSection": "right"}, "sandbox": {"version": 1, "requests": {"desktopGeometry": true, "settings": {"read": ["width", "fontSize", "nested"], "write": ["width", "fontSize", "nested"]}}}
+    "barWidget": {"defaultSection": "right"}, "sandbox": {"version": 1, "requests": {"exec":{"probe":command}, "desktopGeometry": true, "settings": {"read": ["width", "fontSize", "nested"], "write": ["width", "fontSize", "nested"]}}}
   })).unwrap()).unwrap();
   fs::write(
     source.join("Service.qml"),
@@ -192,11 +195,13 @@ import Quickshell.Io
 import qs.Ward
 Item {
   id: service
+  required property var runtime
   property var shell: null
   property var manifest: null
   property int presses: 0
   property bool jsonResult: false
-  property bool geometryGranted: false
+  readonly property bool geometryGranted: runtime.grants.desktopGeometry === true
+  property bool portable: false
   property bool readOnlyContext: false
   property int geometryChanges: 0
   Connections { target: Desktop; function onChanged() { service.geometryChanges++ } }
@@ -205,19 +210,17 @@ Item {
     running: true
     onExited: function(code) { service.readOnlyContext = code === 0 }
   }
-  FileView {
-    path: "/run/plugin/grants.json"
-    onLoaded: service.geometryGranted = JSON.parse(text()).desktopGeometry
-  }
-  Process {
-    command: ["/bootstrap", "--json", "--exec", "unselected"]
-    running: true
-    stdout: StdioCollector {
-      onStreamFinished: {
-        const result = JSON.parse(text)
-        service.jsonResult = result.version === 1 && result.status === "denied"
-      }
-    }
+  Component.onCompleted: {
+    runtime.exec("probe", ["portable"], {onFinished: result => {
+      const selected = runtime.grants.exec.probe !== undefined
+      service.portable = (selected ? result.status === "completed" && result.exitCode === 0 && result.stdout === "portable" : result.status === "denied")
+        && runtime.dataPath === "/home/plugin" && runtime.statePath === "/home/plugin/.local/state"
+        && runtime.runtimePath === "/run/plugin" && runtime.bundlePath === "/plugin"
+        && runtime.filesystemPath("missing") === ""
+    }})
+    runtime.exec("unselected", [], {onFinished: result => {
+      service.jsonResult = result.version === 1 && result.status === "denied"
+    }})
   }
 }
 "#,
@@ -264,7 +267,7 @@ BarWidget {
       && geometry.windows[0].rect.x === settings.fontSize * 5 - 20
       && geometry.windows[0].rect.y === -12.5 && geometry.windows[0].title === undefined
     : geometry === null)
-  readonly property bool scoped: own && own.jsonResult && own.readOnlyContext
+  readonly property bool scoped: own && own.jsonResult && own.readOnlyContext && own.portable
     && (!own.geometryGranted || settings.fontSize === 12 || own.geometryChanges > 0)
     && bar.shell.serviceFor("other.plugin") === null
     && bar.shell.summon("other.plugin", "") === false
@@ -338,6 +341,11 @@ Item {
     .approve(
       &revision.digest,
       Grants {
+        exec: if settings_granted {
+          [("probe".into(), omarchy_ward::exec::Grant::select(
+            &serde_json::from_value(command).unwrap(), ["read".into()].into()
+          ).unwrap())].into()
+        } else { Default::default() },
         desktop_geometry: settings_granted,
         settings: omarchy_ward::settings::Grant {
           read: ["width".into(), "fontSize".into(), "nested".into()].into(),

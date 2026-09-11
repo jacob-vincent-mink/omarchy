@@ -4,6 +4,8 @@ import Quickshell
 import Quickshell.Io
 
 import qs.Commons
+import qs.Ui
+import qs.Ward as Ward
 
 import "plugins/bar"
 import "services"
@@ -21,6 +23,8 @@ ShellRoot {
   property AppLibrary appLibrary: AppLibrary { }
   property SandboxedPlugins sandboxedPlugins: SandboxedPlugins {
     bar: shell.bar
+    trustedGeometry: Object.values(shell.pluginRegistry.installedPlugins).some(manifest =>
+      !manifest.__isFirstParty && shell.pluginRegistry.isEnabled(manifest.id))
     onChanged: shell.pluginRegistry.pluginsChanged()
   }
   property SandboxedPluginActivation sandboxActivation: SandboxedPluginActivation {
@@ -167,6 +171,7 @@ ShellRoot {
   }
 
   Component.onCompleted: {
+    Ward.Desktop.source = sandboxedPlugins.geometrySource
     console.log("omarchy-shell paths",
       "omarchyPath=" + shell.omarchyPath,
       "shellDir=" + Quickshell.shellDir,
@@ -271,11 +276,13 @@ ShellRoot {
     onActiveChanged: if (!active && shell.activeBarId !== shell.defaultBarId) shell.bar = null
   }
 
-  Loader {
+  PluginLoader {
     id: pluginBarLoader
 
     active: !shell.pluginReloading && shell.activeBarId !== shell.defaultBarId && shell.activeBarSourceUrl !== ""
-    source: shell.activeBarId !== shell.defaultBarId ? shell.activeBarSourceUrl : ""
+    entryUrl: shell.activeBarId !== shell.defaultBarId ? shell.activeBarSourceUrl : ""
+    prepare: () => shell.activeBarManifest && !shell.activeBarManifest.__isFirstParty
+      ? {runtime: shell.pluginShellFor(shell.activeBarManifest).runtime} : ({})
     asynchronous: true
     onLoaded: shell.configureBar(item, shell.activeBarManifest)
     onActiveChanged: if (!active) shell.bar = null
@@ -310,6 +317,11 @@ ShellRoot {
   Component {
     id: pluginShellApiComponent
     PluginShellApi { }
+  }
+
+  Component {
+    id: pluginRuntimeComponent
+    PluginRuntime { }
   }
 
   Component {
@@ -589,6 +601,9 @@ ShellRoot {
   function revokePluginShellApi(cacheKey) {
     var key = String(cacheKey || "")
     if (!key) return
+    // Stop bound plugin processes before destroying the runtime's QObject.
+    var api = _pluginShellApis[key]
+    if (api) api.runtime = null
     _pluginAppLibraryApis = shell.cacheWithoutKey(_pluginAppLibraryApis, key, true)
     _pluginFirstPartyServiceApis = shell.cacheWithoutPrefix(_pluginFirstPartyServiceApis, key + "::")
     _pluginBarEntryShellApis = shell.cacheWithoutPrefix(_pluginBarEntryShellApis, key + ":")
@@ -603,7 +618,10 @@ ShellRoot {
     var cached = _pluginShellApis[cacheKey]
     var descriptor = _pluginShellApiDescriptors[cacheKey]
     if (cached && descriptor && descriptor.pluginId === key
-        && descriptor.profile === profile) return cached
+        && descriptor.profile === profile) {
+      cached.runtime.bundlePath = String(manifest.__sourceDir || "")
+      return cached
+    }
     if (cached || descriptor) shell.revokePluginShellApi(cacheKey)
 
     function currentManifest() {
@@ -629,6 +647,7 @@ ShellRoot {
 
     var api = pluginShellApiComponent.createObject(null, {
       pluginId: key,
+      _desktopGeometry: Qt.binding(() => shell.sandboxedPlugins.geometrySource.snapshot),
       appLibrary: shell.manifestHasKind(manifest, "menu")
         ? shell.pluginAppLibraryFor(cacheKey, key) : null,
       bar: shell.pluginBarStateFor(cacheKey, key),
@@ -680,6 +699,11 @@ ShellRoot {
     if (!api) return null
 
     var next = ({})
+    api.runtime = pluginRuntimeComponent.createObject(api, {
+      pluginId: key,
+      isolated: false,
+      bundlePath: String(manifest.__sourceDir || "")
+    })
     for (var id in _pluginShellApis) next[id] = _pluginShellApis[id]
     next[cacheKey] = api
     _pluginShellApis = next
@@ -946,7 +970,8 @@ ShellRoot {
       // Authentication services and third-party services have no visual
       // parent. Parenting either to serviceHost would let a plugin's object
       // traversal walk between the host and credential-bearing QML.
-      var inst = comp.createObject(manifest.__isFirstParty && !authenticationService ? serviceHost : null)
+      var initial = manifest.__isFirstParty ? {} : {runtime: shell.pluginShellFor(manifest).runtime}
+      var inst = comp.createObject(manifest.__isFirstParty && !authenticationService ? serviceHost : null, initial)
       if (!inst) {
         console.warn("service plugin createObject returned null for", key)
         return
@@ -1398,8 +1423,10 @@ ShellRoot {
       readonly property bool keepLoaded: manifest && manifest.keepLoaded === true
       readonly property string sourceUrl: shell.pluginRegistry.entryPointUrl(manifest, entryKind)
 
-      property Loader panelLoader: Loader {
-        source: panelEntry.sourceUrl
+      property Loader panelLoader: PluginLoader {
+        entryUrl: panelEntry.sourceUrl
+        prepare: () => panelEntry.manifest && !panelEntry.manifest.__isFirstParty
+          ? {runtime: shell.pluginShellFor(panelEntry.manifest).runtime} : ({})
         active: panelEntry.sourceUrl !== "" && (panelEntry.keepLoaded || shell.openPanelIds[panelEntry.pluginId] === true)
         asynchronous: true
         onLoaded: {
@@ -1478,6 +1505,7 @@ ShellRoot {
         schema: meta.schema || [],
         pluginId: manifest.id,
         sourceDir: sandboxed ? "" : manifest.__sourceDir || "",
+        runtimeUrl: !sandboxed && !manifest.__isFirstParty ? url : "",
         source: "plugin",
         firstParty: !!manifest.__isFirstParty
       }
@@ -1761,6 +1789,26 @@ ShellRoot {
         return "ok"
       } catch (e) {
         return "invalid settings: " + e
+      }
+    }
+
+    function saveTrustedPluginSettings(id: string, settingsJson: string): string {
+      if (shell.pluginRegistry.isSandboxed(id) || !shell.pluginRegistry.isEnabled(id)) return "plugin is not active"
+      try {
+        if (settingsJson.length > 65536) return "settings are too large"
+        var settings = JSON.parse(settingsJson)
+        if (!Util.isPlainObject(settings)
+          || ["id", "sandbox", "sandboxPresentation", "__proto__", "constructor", "prototype"].some(key => Object.prototype.hasOwnProperty.call(settings, key)))
+          return "invalid settings"
+        var next = JSON.parse(JSON.stringify(shell.shellConfig))
+        var location = shell.pluginRegistry.findEntryLocation(next, id)
+        if (!location.found || (location.kind !== "plugin" && location.kind !== "bar")) return "plugin entry is unavailable"
+        var entries = location.kind === "plugin" ? next.plugins : next.bar.layout[location.section]
+        entries[location.index] = Object.assign({}, entries[location.index], settings)
+        if (JSON.stringify(next) !== JSON.stringify(shell.shellConfig)) shell.persistShellConfig(next)
+        return "ok"
+      } catch (error) {
+        return "invalid settings: " + error
       }
     }
 

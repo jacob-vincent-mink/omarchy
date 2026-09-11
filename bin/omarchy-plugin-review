@@ -23,8 +23,8 @@ plugin=$(omarchy-plugin-catalog | jq -ce --arg id "$id" 'map(select(.id == $id))
   echo "omarchy-plugin-review: plugin '$id' is not installed; use omarchy plugin add first" >&2
   exit 1
 }
-jq -e '.sandbox != null' <<<"$plugin" >/dev/null || {
-  echo "omarchy-plugin-review: '$id' has no sandbox entry point; it uses the existing trusted in-process workflow" >&2
+jq -e '.sandboxed' <<<"$plugin" >/dev/null || {
+  echo "omarchy-plugin-review: '$id' is explicitly trusted in-process code" >&2
   exit 1
 }
 source_dir=$(jq -r '.sourceDir' <<<"$plugin")

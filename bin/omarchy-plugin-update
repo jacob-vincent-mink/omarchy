@@ -41,9 +41,10 @@ update_one() {
   local id="$1"
   local dir="$PLUGINS_DIR/$id"
   local sandboxed=false
-  local installation installation_error origin candidate next_id mode
+  local installation installation_error origin candidate next_id mode catalog
   installation=$(omarchy-plugin-installation list | jq -c --arg id "$id" 'first(.[] | select(.id == $id)) // null') || return 1
   installation_error=$(jq -r '.error // empty' <<<"$installation")
+  mode=$(jq -r '.mode // "legacy-trusted"' <<<"$installation")
   if [[ -n $installation_error ]]; then
     echo "omarchy-plugin-update: $installation_error" >&2
     return 1
@@ -54,8 +55,8 @@ update_one() {
     echo "omarchy-plugin-update: commit or stash local changes in $dir before updating" >&2
     return 1
   fi
-  if omarchy-plugin-isolation | jq -e --arg id "$id" 'index($id) != null' >/dev/null \
-    || jq -e 'has("sandbox")' "$dir/manifest.json" >/dev/null; then
+  catalog=$(omarchy-plugin-catalog) || return 1
+  if jq -e --arg id "$id" 'any(.[]; .id == $id and .sandboxed)' <<<"$catalog" >/dev/null; then
     sandboxed=true
   fi
 
@@ -69,19 +70,13 @@ update_one() {
     return 0
   fi
 
-  if [[ $sandboxed == "true" ]] && ! git -C "$dir" show FETCH_HEAD:manifest.json | jq -e 'has("sandbox")' >/dev/null; then
-    echo "omarchy-plugin-update: refusing to turn sandbox plugin '$id' into in-process code" >&2
+  if [[ $sandboxed != "true" ]] && git -C "$dir" show FETCH_HEAD:manifest.json | jq -e 'has("sandbox")' >/dev/null; then
+    echo "omarchy-plugin-update: sandbox-native code requires an explicit worker installation" >&2
     return 1
   fi
   next_id=$(git -C "$dir" show FETCH_HEAD:manifest.json | jq -r '.id') || return 1
   if [[ $next_id != "$id" ]]; then
     echo "omarchy-plugin-update: refusing an update that changes plugin identity" >&2
-    return 1
-  fi
-  mode=$(jq -r '.mode // "legacy-trusted"' <<<"$installation")
-  if [[ $mode != "ward" && $mode != "legacy-trusted" ]] \
-    && git -C "$dir" show FETCH_HEAD:manifest.json | jq -e 'has("sandbox")' >/dev/null; then
-    echo "omarchy-plugin-update: trusted installation now declares Ward; reinstall in Ward mode" >&2
     return 1
   fi
   # Validate candidate bytes before touching the live checkout. Never reset a
@@ -123,7 +118,7 @@ update_one() {
   fi
 
   echo "Updated $id."
-  if jq -e 'has("sandbox")' "$dir/manifest.json" >/dev/null; then
+  if [[ $sandboxed == "true" ]]; then
     echo "Checkout only; any approved revision and its grants are unchanged."
     echo "Review the update with: omarchy plugin review $id"
   else

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # omarchy:summary=Approve a Ward plugin revision and its selected permissions
-# omarchy:args=<id> --revision <sha256> [--read <name>] [--write <name>] [--read-setting <key>] [--write-setting <key>] [--http <scope>] [--exec <name:leaf>] [--allow-media] [--allow-network] [--allow-network-proxy] [--allow-notifications] [--allow-open-urls] [--allow-storage] [--allow-desktop-geometry] [--allow-audio-playback] [--allow-microphone] [--allow-audio-capture] [--yes]
+# omarchy:args=<id> --revision <sha256> [--all-declared] [--read <name>] [--write <name>] [--read-setting <key>] [--write-setting <key>] [--http <scope>] [--exec <name:leaf>] [--allow-media] [--allow-network] [--allow-network-proxy] [--allow-notifications] [--allow-open-urls] [--allow-storage] [--allow-desktop-geometry] [--allow-audio-playback] [--allow-microphone] [--allow-audio-capture] [--yes]
 # omarchy:examples=omarchy plugin approve acme.weather --revision <sha256> --allow-network
 
 set -euo pipefail
@@ -10,6 +10,7 @@ fail() { echo "omarchy-plugin-approve: $*" >&2; exit 1; }
 if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
   echo "Usage: omarchy plugin approve <id> --revision <sha256> [--read <name>] [--write <name>] [--read-setting <key>] [--write-setting <key>] [--http <scope>] [--exec <name:leaf>] [--allow-media] [--allow-network] [--allow-network-proxy] [--allow-notifications] [--allow-open-urls] [--allow-storage] [--allow-desktop-geometry] [--allow-audio-playback] [--allow-microphone] [--allow-audio-capture] [--yes]"
   echo "All permissions default to denied. Approval does not start the plugin."
+  echo "--all-declared selects every permission in this exact revision, including all command leaves. Ward still enforces their declared scope. Unsupported or conflicting requests fail approval."
   echo "--read and --write select a named file or folder declared by the plugin, not a replacement path."
   echo "--write allows reading and changing the declared files. Revoking permission cannot undo completed changes."
   echo "--allow-media selects the exact media player declared by the plugin."
@@ -32,6 +33,10 @@ selections='{"read":[],"write":[],"network":false,"http":[],"media":false,"notif
 assume_yes=0
 while (( $# > 0 )); do
   case "$1" in
+    --all-declared)
+      selections=$(jq -c '.allDeclared = true' <<<"$selections")
+      shift
+      ;;
     --revision)
       [[ -n ${2:-} && -z $revision ]] || fail "--revision requires one reviewed digest"
       revision="$2"

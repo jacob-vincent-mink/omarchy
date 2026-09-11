@@ -1725,6 +1725,7 @@ Item {
     readonly property string customType: root.customModuleType(entry)
     readonly property var registryMetadata: root.barWidgetRegistry.metadataFor(root.canonicalWidgetId(moduleName))
     readonly property bool firstParty: registryMetadata && registryMetadata.firstParty === true
+    readonly property string runtimeUrl: registryMetadata ? String(registryMetadata.runtimeUrl || "") : ""
     readonly property string pluginApiId: registered ? root.canonicalWidgetId(moduleName) : "bar-entry:" + moduleName
     // Re-evaluate when the registry mutates (Component reference changes,
     // plugin enabled/disabled, etc.). Reading the `widgets` property creates
@@ -1739,7 +1740,7 @@ Item {
     readonly property bool commandCustom: customType === "command"
     readonly property bool registered: registryComponent !== null
     readonly property var activeItem: {
-      if (registered) return registryLoader.item
+      if (registered) return runtimeUrl ? runtimeLoader.item : registryLoader.item
       if (qmlCustom) return qmlLoader.item
       return componentLoader.item
     }
@@ -1794,7 +1795,7 @@ Item {
 
     Loader {
       id: registryLoader
-      active: slot.registered
+      active: slot.registered && !slot.runtimeUrl
       sourceComponent: slot.registered ? slot.registryComponent : null
       anchors.fill: parent
       opacity: slot.dragSource ? 0.22 : 1.0
@@ -1802,6 +1803,19 @@ Item {
         slot.injectProps()
         Qt.callLater(slot.injectProps)
       }
+    }
+
+    PluginLoader {
+      id: runtimeLoader
+      active: slot.registered && !!slot.runtimeUrl
+      entryUrl: slot.runtimeUrl
+      prepare: () => {
+        const api = root.pluginBarApiFor(slot.pluginApiId, slot.moduleName, true)
+        return {runtime: api.shell.runtime, bar: api, settings: slot.moduleSettings}
+      }
+      anchors.fill: parent
+      opacity: slot.dragSource ? 0.22 : 1.0
+      onLoaded: slot.injectProps()
     }
 
     Loader {

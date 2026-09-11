@@ -47,6 +47,8 @@ enum Request {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Selections {
+  #[serde(rename = "allDeclared")]
+  all_declared: bool,
   read: BTreeSet<String>,
   write: BTreeSet<String>,
   network: bool,
@@ -67,6 +69,29 @@ struct Selections {
   storage: bool,
   #[serde(rename = "desktopGeometry")]
   desktop_geometry: bool,
+}
+
+impl Selections {
+  fn all_declared(requests: &crate::grants::Requests) -> io::Result<Self> {
+    Ok(Self {
+      read: requests.filesystem.iter().filter(|ask| !ask.access.writable()).map(|ask| ask.name.clone()).collect(),
+      write: requests.filesystem.iter().filter(|ask| ask.access.writable()).map(|ask| ask.name.clone()).collect(),
+      network: requests.network.asked(),
+      network_proxy: requests.network_proxy.asked(),
+      http: requests.http.keys().cloned().collect(),
+      exec: requests.exec.iter().map(|(name, ask)| Ok((name.clone(), ask.tree.leaves()?))).collect::<io::Result<_>>()?,
+      media: requests.media.is_some(),
+      notifications: requests.notifications.asked(),
+      audio_playback: requests.audio_playback.asked(),
+      microphone: requests.microphone.asked(),
+      audio_capture: requests.audio_capture.asked(),
+      settings: requests.settings.access(),
+      open_urls: requests.open_urls.asked(),
+      storage: requests.storage.asked(),
+      desktop_geometry: requests.desktop_geometry.asked(),
+      ..Self::default()
+    })
+  }
 }
 
 pub fn run(root: &Path) -> io::Result<()> {
@@ -169,6 +194,11 @@ fn execute(root: &Path, bytes: &[u8]) -> io::Result<Value> {
         return Err(invalid("reviewed revision belongs to a different plugin"));
       }
       let manifest = Manifest::read(&store.revisions().join(&revision))?;
+      // This is an explicit trusted administrative selection, never a flag
+      // read from downloaded metadata. Normal pinning/admission still apply.
+      let selections = if selections.all_declared {
+        Selections::all_declared(&manifest.sandbox.requests)?
+      } else { selections };
       let mut grants = Grants {
         network: selections.network,
         network_proxy: selections.network_proxy,
@@ -273,6 +303,79 @@ fn review_revision(revisions: &Path, revision: &str) -> io::Result<Value> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn all_declared_selects_exact_revision_requests_without_bypassing_admission() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("store");
+    let source = temp.path().join("source");
+    let data = temp.path().join("data");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&data).unwrap();
+    fs::write(source.join("Widget.qml"), "import QtQuick\nItem {}").unwrap();
+    let mut manifest = json!({
+      "schemaVersion": 1, "id": "test.all", "name": "All", "version": "1",
+      "kinds": ["bar-widget"], "entryPoints": {"barWidget": "Widget.qml"},
+      "sandbox": {"version": 1, "requests": {
+        "storage": true, "network": false, "networkProxy": true,
+        "notifications": true, "audioPlayback": true, "microphone": true,
+        "audioCapture": true, "desktopGeometry": true, "openUrls": true,
+        "settings": {"read": ["shown"], "write": ["volume"]},
+        "filesystem": [{"name": "data", "path": data, "access": "readwrite"}],
+        "exec": {"probe": {"executable": "/usr/bin/true", "tree": {"next": [
+          {"arg": {"kind": "exact", "value": "one"}, "then": {"end": "one"}},
+          {"arg": {"kind": "exact", "value": "two"}, "then": {"end": "two"}}
+        ]}}}
+      }}
+    });
+    let publish = |manifest: &Value| {
+      fs::write(source.join("manifest.json"), serde_json::to_vec(manifest).unwrap()).unwrap();
+      execute(&root, &serde_json::to_vec(&json!({"operation": "import", "path": source})).unwrap()).unwrap()
+    };
+    let approve = |review: &Value| execute(&root, &serde_json::to_vec(&json!({
+      "operation": "approve", "id": "test.all", "revision": review["revision"],
+      "selections": {"allDeclared": true}
+    })).unwrap());
+    let review = publish(&manifest);
+    let selected = approve(&review).unwrap();
+    assert_eq!(selected["grants"]["exec"]["probe"]["selected"], json!(["one", "two"]));
+    assert_eq!(selected["grants"]["filesystem"]["data"]["path"], json!(data));
+    assert_eq!(selected["grants"]["filesystem"]["data"]["access"], "readwrite");
+    assert_eq!(selected["grants"]["settings"], json!({"read": ["shown"], "write": ["volume"]}));
+    assert_eq!(selected["grants"]["network"], false);
+    for name in ["storage", "networkProxy", "notifications", "audioPlayback", "microphone", "audioCapture", "desktopGeometry", "openUrls"] {
+      assert_eq!(selected["grants"][name], true, "missing {name}");
+    }
+    let grants: Grants = serde_json::from_value(selected["grants"].clone()).unwrap();
+    let request = &Manifest::read(&source).unwrap().sandbox.requests.exec["probe"];
+    assert!(grants.exec["probe"].validate(request).is_ok());
+
+    manifest["sandbox"]["requests"]["network"] = json!(true);
+    assert!(approve(&publish(&manifest)).is_err(), "YOLO admitted conflicting network capabilities");
+    manifest["sandbox"]["requests"]["network"] = json!(false);
+    manifest["sandbox"]["requests"]["exec"]["probe"]["executable"] = json!(temp.path().join("missing"));
+    assert!(approve(&publish(&manifest)).is_err(), "YOLO admitted a missing executable");
+    assert_eq!(approve(&review).unwrap()["grants"], selected["grants"], "checkout edits changed an approved revision");
+  }
+
+  #[test]
+  fn undeclared_plugins_review_with_no_implicit_authority() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("store");
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("Widget.qml"), "import QtQuick\nItem {}").unwrap();
+    fs::write(source.join("manifest.json"), serde_json::to_vec(&json!({
+      "schemaVersion": 1, "id": "test.undeclared", "name": "Undeclared", "version": "1",
+      "kinds": ["bar-widget"], "entryPoints": {"barWidget": "Widget.qml"}
+    })).unwrap()).unwrap();
+    let call = |request: Value| execute(&root, &serde_json::to_vec(&request).unwrap()).unwrap();
+    let review = call(json!({"operation": "import", "path": source}));
+    let approved = call(json!({"operation": "approve", "id": "test.undeclared",
+      "revision": review["revision"], "selections": {"allDeclared": true}}));
+    assert_eq!(approved["grants"], json!(Grants::default()));
+    assert!(root.join("identities/test.undeclared").exists());
+  }
 
   #[test]
   fn staged_preview_leaves_no_store_identity_or_snapshot() {

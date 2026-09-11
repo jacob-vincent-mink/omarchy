@@ -102,7 +102,7 @@ Item {
               Toggle {
                 objectName: "plugin-yolo"
                 width: parent.width
-                label: "YOLO · run without a sandbox"
+                label: "YOLO · trust all requested access"
                 checked: manager.yolo
                 onClicked: manager.yolo = !manager.yolo
               }
@@ -112,9 +112,9 @@ Item {
               visible: root.confirmYolo
               width: parent.width
               spacing: Style.spacing.rowGap
-              Label { width: parent.width; text: "Do you trust this plugin to execute unsandboxed?"; font.bold: true }
+              Label { width: parent.width; text: "Do you trust this plugin with YOLO access?"; font.bold: true }
               Label { width: parent.width; text: manager.source; wrapMode: Text.WrapAnywhere }
-              Label { width: parent.width; text: "When enabled, it can access your files, accounts and network."; color: Color.urgent }
+              Label { width: parent.width; text: "Sandbox-native plugins get every declared supported permission. Plugins without a sandbox declaration run unsandboxed, with access to your files, accounts and network."; wrapMode: Text.Wrap; color: Color.urgent }
             }
 
             Column {
@@ -162,9 +162,9 @@ Item {
           Button { visible: !root.confirmYolo; text: manager.adding ? "Back" : "Add plugin"; focusable: true; implicitHeight: 40; enabled: !manager.busy; onClicked: { manager.setAdding(!manager.adding) } }
           Button { visible: manager.adding && !root.confirmYolo; text: manager.yolo ? "Clone in YOLO mode" : "Clone & review"; objectName: "plugin-add"; selected: true; focusable: true; implicitHeight: 40; enabled: !manager.busy && !!manager.source.trim(); opacity: enabled ? 1 : 0.4; onClicked: { if (manager.yolo) root.confirmYolo = true; else manager.add() } }
           Button { visible: root.confirmYolo; text: "No"; objectName: "plugin-trust-cancel"; focusable: true; implicitHeight: 40; enabled: !manager.busy; onClicked: { root.confirmYolo = false; manager.trustConfirmed = false } }
-          Button { visible: root.confirmYolo; text: "Yes, clone unsandboxed"; objectName: "plugin-trust-confirm"; selected: true; focusable: true; implicitHeight: 40; enabled: !manager.busy; onClicked: { manager.trustConfirmed = true; root.confirmYolo = false; manager.add() } }
+          Button { visible: root.confirmYolo; text: "Trust & clone"; objectName: "plugin-trust-confirm"; selected: true; focusable: true; implicitHeight: 40; enabled: !manager.busy; onClicked: { manager.trustConfirmed = true; root.confirmYolo = false; manager.add() } }
           Button { visible: !manager.adding && !!manager.selected?.sandboxed; text: "Review permissions"; focusable: true; implicitHeight: 40; enabled: !manager.busy; onClicked: root.review(manager.selectedId) }
-          Button { visible: !manager.adding && !!manager.selected && !manager.selected.sandboxed && !manager.selected.enabled; text: "Enable plugin"; focusable: true; implicitHeight: 40; enabled: !manager.busy && !!manager.selected && !manager.selected.error; onClicked: manager.action("enable") }
+          Button { visible: !manager.adding && !!manager.selected && (!manager.selected.sandboxed || !!manager.selected.approved) && !manager.selected.enabled; text: "Enable plugin"; focusable: true; implicitHeight: 40; enabled: !manager.busy && !!manager.selected && !manager.selected.error; onClicked: manager.action("enable") }
           Button { objectName: "plugin-disable"; visible: !manager.adding && (!!manager.selected?.enabled || !!manager.selected?.approved); text: manager.selected?.sandboxed ? "Disable & revoke permissions" : "Disable"; focusable: true; implicitHeight: 40; enabled: !manager.busy; onClicked: manager.action("disable") }
           Button { objectName: "plugin-remove"; visible: !manager.adding && !!manager.selected; text: manager.confirmRemove ? "Remove plugin" : "Remove"; focusable: true; implicitHeight: 40; enabled: !manager.busy; onClicked: manager.action("remove") }
         }

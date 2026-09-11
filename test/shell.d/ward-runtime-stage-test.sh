@@ -10,7 +10,7 @@ OMARCHY_PATH="$ROOT" "$ROOT/bin/omarchy-ward-stage-runtime" "$runtime_dir"
 [[ $(jq -r '.entryPoint' "$runtime_dir/runtime.json") == "worker" ]] || fail "runtime selects its worker bootstrap"
 [[ -x $runtime_dir/worker && -x $runtime_dir/bin/omarchy-ward-exec ]] || fail "runtime entry and aliases are executable"
 [[ -x $runtime_dir/bin/omarchy-ward-play ]] || fail "runtime stages its sandbox-local audio decoder"
-for asset in worker.qml WidgetView.qml Ward/Desktop.qml Commons/Color.qml Ui/Panel.qml Services/PluginShellApi.qml; do
+for asset in worker.qml WidgetView.qml Ward/Desktop.qml Commons/Color.qml Ui/Panel.qml Services/PluginShellApi.qml Services/PluginRuntime.qml Services/PluginJob.qml; do
   [[ -f $runtime_dir/shell/$asset ]] || fail "runtime contains $asset"
 done
 [[ ! -e $runtime_dir/.git && ! -e $runtime_dir/shell/services && ! -e $runtime_dir/config ]] || fail "runtime excludes the host checkout and service tree"

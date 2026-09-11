@@ -10,8 +10,9 @@ QtObject {
   property var lastErrors: ({})
   property var component: null
   property var bar: null
+  property bool trustedGeometry: false
   property QtObject geometrySource: PluginDesktopGeometry {
-    active: Object.values(root.instances).some(instance => !instance.error && instance.nativeSession.ready && instance.nativeSession.desktopGeometry)
+    active: root.trustedGeometry || Object.values(root.instances).some(instance => !instance.error && instance.nativeSession.ready && instance.nativeSession.desktopGeometry)
   }
   property Connections workspaceChanges: Connections {
     target: Hyprland

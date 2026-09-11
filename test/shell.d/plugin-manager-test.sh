@@ -151,14 +151,21 @@ assertEqual(c.error + c.notice, '', 'Add clears stale feedback')
 assertEqual(c.add(), false, 'a fresh form cannot install an old revision')
 assertEqual(c.modeLabel('ward'), 'Ward · sandboxed', 'Ward mode states isolation')
 assertEqual(c.modeLabel('yolo'), 'YOLO · unsandboxed', 'YOLO mode plainly states its missing sandbox')
+assertEqual(c.modeLabel('ward-yolo'), 'YOLO · declared permissions in Ward', 'sandbox-native YOLO retains its worker boundary')
 assertEqual(c.modeLabel('blocked'), 'Blocked · installation needs attention', 'blocked provenance is not presented as trusted')
 
 const panel = fs.readFileSync(path.join(root, 'shell/plugins/panels/plugins/Panel.qml'), 'utf8')
+const enableVisibility = panel.match(/Button \{ visible: ([^;]+); text: "Enable plugin"/)[1]
+const showEnable = selected => vm.runInNewContext(enableVisibility, {manager: {adding: false, selected}})
+assertEqual(showEnable({sandboxed: true, approved: true, enabled: false}), true, 'an approved Ward YOLO clone can be enabled without another permission review')
+assertEqual(showEnable({sandboxed: true, approved: false, enabled: false}), false, 'an unapproved Ward plugin still needs permission review')
+assertEqual(showEnable({sandboxed: false, enabled: false}), true, 'legacy YOLO retains its enable action')
+assertEqual(showEnable({sandboxed: true, approved: true, enabled: true}), false, 'a running Ward plugin has no duplicate enable action')
 assert(!panel.includes('plugin-validate') && !panel.includes('manager.inspect()'), 'manager exposes no separate validation control')
 assert(panel.includes('"Clone & review"'), 'Ward action names the clone-to-review workflow')
 assert(panel.includes('enabled: !manager.busy && !!manager.source.trim()'), 'clone action needs a source, not a previous check')
 assert(panel.includes('if (manager.yolo) root.confirmYolo = true; else manager.add()'), 'YOLO clone opens a separate confirmation before running any command')
-assert(panel.includes('Do you trust this plugin to execute unsandboxed?'), 'YOLO confirmation explicitly asks about unsandboxed execution')
+assert(panel.includes('Do you trust this plugin with YOLO access?') && panel.includes('Plugins without a sandbox declaration run unsandboxed'), 'YOLO confirmation discloses both execution classes')
 assert(panel.includes('manager.trustConfirmed = true; root.confirmYolo = false; manager.add()'), 'only the final confirmation permits a YOLO clone')
 
 JS

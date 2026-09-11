@@ -40,7 +40,7 @@ fn failed_and_never_presenting_startups_preserve_config_and_allow_retry() {
   fs::create_dir_all(source.join("shell/plugins")).unwrap();
   fs::create_dir_all(source.join("config/omarchy")).unwrap();
   fs::copy(repo.join("shell/shell.qml"), source.join("shell/shell.qml")).unwrap();
-  for name in ["Commons", "Ui", "services", "plugins/bar"] {
+  for name in ["Commons", "Ui", "Ward", "Plugin", "plugin-runtime", "services", "plugins/bar"] {
     std::os::unix::fs::symlink(
       repo.join("shell").join(name),
       source.join("shell").join(name),

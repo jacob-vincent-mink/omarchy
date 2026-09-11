@@ -8,9 +8,10 @@ const fs = require('fs')
 const vm = require('vm')
 const scope = vm.createContext({})
 const manager = fs.readFileSync(path.join(root, 'shell/services/SandboxedPlugins.qml'), 'utf8')
-const observerActive = manager.match(/active: (Object\.values\(root\.instances\)\.some\([^\n]+)\n/)[1]
-function observes(instances) { return vm.runInNewContext(observerActive, {root: {instances}}) }
+const observerActive = manager.match(/active: (root\.trustedGeometry \|\| Object\.values\(root\.instances\)\.some\([^\n]+)\n/)[1]
+function observes(instances, trustedGeometry = false) { return vm.runInNewContext(observerActive, {root: {instances, trustedGeometry}}) }
 assert(!observes({}), 'no worker means no desktop polling')
+assert(observes({}, true), 'trusted plugins reuse the same desktop observer')
 assert(!observes({one: {error: '', nativeSession: {ready: true, desktopGeometry: false}}}), 'ungranted worker does not enable polling')
 assert(observes({one: {error: '', nativeSession: {ready: true, desktopGeometry: true}}}), 'admitted running observation enables polling')
 assert(!observes({one: {error: 'revoked', nativeSession: {ready: false, desktopGeometry: true}}}), 'failed or revoked worker cannot keep polling alive')

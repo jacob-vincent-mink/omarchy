@@ -40,7 +40,7 @@ fn native_slots_share_real_and_replacement_bars_without_loading_plugin_qml() {
   fs::create_dir_all(source.join("shell/plugins")).unwrap();
   fs::create_dir_all(source.join("config/omarchy")).unwrap();
   fs::copy(repo.join("shell/shell.qml"), source.join("shell/shell.qml")).unwrap();
-  for name in ["Commons", "Ui", "services", "plugins/bar"] {
+  for name in ["Commons", "Ui", "Ward", "Plugin", "plugin-runtime", "services", "plugins/bar"] {
     std::os::unix::fs::symlink(
       repo.join("shell").join(name),
       source.join("shell").join(name),
@@ -171,6 +171,13 @@ Panel {{
   }
   let host_qml = source.join("shell/shell.qml");
   let env = operator::environment(root.path(), &source, &host_qml, &module);
+  // These synthetic local plugins deliberately exercise the explicit trusted
+  // route. Missing provenance now selects the restrictive legacy worker.
+  for id in ["test.anchor", "test.bar"] {
+    operator::run(&env, "git", &["-C", plugins.join(id).to_str().unwrap(), "init", "-q"]);
+    operator::run(&env, "git", &["-C", plugins.join(id).to_str().unwrap(), "remote", "add", "origin", plugins.join(id).to_str().unwrap()]);
+    operator::run(&env, "omarchy-plugin-installation", &["record", id, "trusted-local", "local", plugins.join(id).to_str().unwrap(), &"a".repeat(40)]);
+  }
   let log = root.path().join("host.log");
   let mut display = Desktop::new(
     root.path(),
@@ -477,7 +484,7 @@ Panel {{
     );
     std::thread::sleep(Duration::from_millis(5));
   }
-  operator.join().unwrap();
+  assert!(operator.join().is_ok(), "bar operator failed: {}", fs::read_to_string(&log).unwrap());
   let config: serde_json::Value = serde_json::from_slice(&fs::read(config).unwrap()).unwrap();
   assert_eq!(config["bar"]["id"], "test.bar");
   assert_eq!(

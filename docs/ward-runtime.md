@@ -22,6 +22,8 @@ The directory descriptor pins directory identity against replacement of its orig
 
 ## Omarchy adapter
 
+The adapter stages `PluginRuntime`, `PluginJob`, the owned local-job runner and request/audio/HTTP helpers for the [shared runtime](portable-plugin-runtime.md). Required runtime injection precedes entry initialization. Local jobs stay in the worker; named `runtime.exec` calls and script `/bootstrap` operations reach the native broker. Sandbox-native YOLO uses this same adapter and broker with all declared permissions selected. No executable-basename interception or public `Plugin.Process` wrapper is provided.
+
 `omarchy-ward-stage-runtime <new-absolute-directory>` stages only the worker loader, `WidgetView`, `qs.Ward`, shared Commons/Ui, `PluginShellApi`, the sandbox-local helper aliases and the small bootstrap. It refuses existing destinations and writes `runtime.json` last, so a partial staging failure has no selectable manifest. It does not publish an installation, approve a plugin, change config or restart the shell.
 
 The Omarchy bootstrap sets `OMARCHY_PATH=/runtime` inside the already restricted worker, then starts the packaged loader. This preserves the plugin-facing compatibility contract without mounting the desktop source checkout or the host service tree. The host adapter selects `OMARCHY_WARD_RUNTIME` when explicitly configured for development; otherwise it selects `$OMARCHY_PATH/lib/ward-runtime`. Controller selection remains separately configured by `OMARCHY_WARD_HOST` or `$OMARCHY_PATH/lib/omarchy-ward`. The runtime need not be next to the controller, and there is no adjacent-directory fallback.

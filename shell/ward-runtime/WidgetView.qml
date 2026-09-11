@@ -46,7 +46,11 @@ QtObject {
   }
 
   property PluginShellApi shell: PluginShellApi {
-    readonly property var desktopGeometry: root.runtime.api.desktopGeometry
+    runtime: PluginRuntime {
+      pluginId: root.runtime.api.pluginId
+      admitted: root.runtime.grants
+    }
+    _desktopGeometry: root.runtime.api.desktopGeometry
     pluginId: root.runtime.api.pluginId
     _serviceLookup: id => root.runtime.api.serviceFor(id)
     _summon: (id, payload) => {
@@ -120,6 +124,7 @@ QtObject {
       }
       onStatusChanged: root.runtime.checkLoader(this)
       Component.onCompleted: if (root.runtime.manifest.entryPoints.barWidget) setSource(root.runtime.entryUrl(root.runtime.manifest.entryPoints.barWidget), {
+        runtime: root.shell.runtime.scope(widgetLoader),
         bar: barApi, settings: JSON.parse(JSON.stringify(root.runtime.context.settings))
       })
     }

@@ -12,6 +12,7 @@ Item {
   readonly property var window: QsWindow.window
   property int viewId: 0
   property var registeredInstance: null
+  property bool retired: false
   readonly property bool hosted: instance && window && instance.outputFor(window.screen) !== null
   readonly property bool opened: instance && instance.opened && instance.activeViewId === viewId
   function open() { return manager.show(moduleName, "", root) }
@@ -53,6 +54,7 @@ Item {
   }
   onPlacementChanged: Qt.callLater(publish)
   function publish() {
+    if (retired) return
     if (registeredInstance && registeredInstance !== instance) {
       registeredInstance.removePlacement(root)
       registeredInstance = null
@@ -67,6 +69,7 @@ Item {
   onHostedChanged: Qt.callLater(publish)
   Component.onCompleted: Qt.callLater(publish)
   Component.onDestruction: {
+    retired = true
     if (registeredInstance) registeredInstance.removePlacement(root)
   }
 }

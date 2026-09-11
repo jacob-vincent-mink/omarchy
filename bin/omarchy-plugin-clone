@@ -143,6 +143,9 @@ cleanup() {
 trap cleanup EXIT
 copy_plugin "$source_dir" "$source_manifest" "$stage"
 update_manifest "$stage" "$source_id" "$new_id" "$display_name"
+# This user-invoked copy of trusted built-in code is an explicit local trust
+# decision. Downloaded clonedFrom metadata cannot manufacture this record.
+omarchy-plugin-installation record "$new_id" trusted-local builtin "$source_id" ""
 mv "$stage" "$target_dir"
 stage=""
 

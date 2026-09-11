@@ -19,7 +19,7 @@ with tempfile.TemporaryDirectory() as temporary:
   stubs.mkdir()
   git = shutil.which("git")
   env = dict(os.environ, HOME=str(home), XDG_STATE_HOME=str(home / "state"),
-    OMARCHY_PATH=str(root), OMARCHY_WARD_STORE=str(home / "ward"),
+    OMARCHY_PATH=str(root), OMARCHY_WARD_STORE=str(home / "ward"), OMARCHY_WARD_HOST=str(temp / "missing-native"),
     PATH=f"{stubs}:{root / 'bin'}:{os.environ['PATH']}", GIT_CONFIG_GLOBAL="/dev/null")
   (stubs / "omarchy-shell").write_text('#!/bin/bash\nif [[ $* == *listPlugins* ]]; then echo "[]"; else echo ok; fi\n')
   (stubs / "omarchy-shell").chmod(0o755)
@@ -62,10 +62,13 @@ fi
 
   plugins = home / ".config/omarchy/plugins"
   source = fixture("test.yolo")
-  assert "--yolo explicitly" in run("omarchy-plugin-add", "https://demo.invalid/yolo", "--yes", ok=False)
+  added = json.loads(run("omarchy-plugin-add", "https://demo.invalid/yolo", "--yes", "--json"))
+  assert added["mode"] == "ward" and catalog()["test.yolo"]["sandboxed"]
+  assert "test.yolo" in json.loads(run("omarchy-plugin-isolation", "retained"))
+  run("omarchy-plugin-remove", "test.yolo", "--yes")
   assert not (plugins / "test.yolo").exists()
   assert records() == []
-  print("ok - remote non-sandbox installs never infer YOLO from --yes or metadata")
+  print("ok - remote non-sandbox installs default to a worker without inferring YOLO from --yes")
   inspected = json.loads(run("omarchy-plugin-add", "https://demo.invalid/yolo", "--yolo", "--inspect", "--json"))
   assert inspected["mode"] == "yolo" and not inspected["installed"]
   assert records() == [] and not (plugins / "test.yolo").exists()
@@ -116,8 +119,51 @@ fi
   assert catalog()["test.yolo"]["executionMode"] == "yolo"
   print("ok - damaged YOLO can be disabled, removed and explicitly reinstalled without native Ward")
 
+  source = fixture("test.portable", sandbox=True)
+  inspected = json.loads(run("omarchy-plugin-add", str(source), "--yolo", "--inspect", "--json"))
+  assert inspected["mode"] == "ward-yolo" and not inspected["installed"]
+  assert "native must not be needed" in run("omarchy-plugin-add", str(source), "--yolo", "--yes", "--json", ok=False)
+  assert catalog()["test.portable"]["sandboxed"] and catalog()["test.portable"]["executionMode"] == "ward-yolo"
+  print("ok - missing native support never turns sandbox-native YOLO into in-process code")
+  # This transport stub verifies CLI orchestration; native exact-revision and
+  # all-declared admission have separate Rust and graphical integration tests.
+  (stubs / "omarchy-ward-runtime").write_text("""#!/usr/bin/python3
+import json,sys
+request = json.load(sys.stdin)
+if request["operation"] == "import":
+  print(json.dumps({"id": "test.portable", "revision": "a" * 64}))
+elif request["operation"] == "approve":
+  assert request["id"] == "test.portable" and request["revision"] == "a" * 64
+  assert request["selections"]["allDeclared"] is True
+  print("{}")
+elif request["operation"] == "list":
+  print('[{"id":"test.portable","approved":true,"error":null}]')
+else:
+  print("null")
+""")
+  run("omarchy-plugin-remove", "test.portable", "--yes")
+  added = json.loads(run("omarchy-plugin-add", str(source), "--yolo", "--yes", "--json"))
+  assert added["mode"] == "ward-yolo"
+  assert catalog()["test.portable"]["sandboxed"] and catalog()["test.portable"]["wardIdentity"]
+  assert "test.portable" in json.loads(run("omarchy-plugin-isolation"))
+  run("omarchy-plugin-enable", "test.portable")
+  print("ok - sandbox-native YOLO explicitly approves all declared access and retains worker identity")
+  manifest = json.loads((source / "manifest.json").read_text())
+  manifest["version"] = "2"
+  (source / "manifest.json").write_text(json.dumps(manifest))
+  run(git, "-C", str(source), "add", ".")
+  run(git, "-C", str(source), "-c", "commit.gpgsign=false", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "portable update")
+  run("omarchy-plugin-update", "test.portable", "--yes")
+  assert catalog()["test.portable"]["sandboxed"]
+  assert json.loads((plugins / "test.portable/manifest.json").read_text())["version"] == "2"
+  print("ok - updating a sandbox-native plugin preserves its host-selected worker class")
+  (stubs / "omarchy-plugin-isolation").write_text("#!/bin/bash\nexit 1\n")
+  (stubs / "omarchy-plugin-isolation").chmod(0o755)
+  assert "isolation/provenance state is unavailable" in run("omarchy-plugin-update", "test.portable", "--yes", ok=False)
+  (stubs / "omarchy-plugin-isolation").unlink()
+  print("ok - update refuses unavailable isolation classification before fetching or changing code")
+
   source = fixture("test.ward", sandbox=True)
-  assert "cannot be overridden" in run("omarchy-plugin-add", str(source), "--yolo", "--yes", ok=False)
   added = json.loads(run("omarchy-plugin-add", str(source), "--yes", "--json"))
   assert added["mode"] == "ward"
   assert "test.ward" in json.loads(run("omarchy-plugin-isolation", "retained"))

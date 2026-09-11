@@ -29,10 +29,11 @@ QtObject {
 
   function modeLabel(mode) {
     if (mode === "ward") return "Ward · sandboxed"
+    if (mode === "ward-yolo") return "YOLO · declared permissions in Ward"
     if (mode === "yolo") return "YOLO · unsandboxed"
     if (mode === "trusted-local") return "Trusted local · unsandboxed"
     if (mode === "blocked") return "Blocked · installation needs attention"
-    return "Legacy · unsandboxed"
+    return "Ward · sandboxed"
   }
 
   function load(add) {
@@ -65,7 +66,7 @@ QtObject {
   function add() {
     if (busy) return false
     if (!source.trim()) { error = "Enter a Git URL or local repository path."; return false }
-    if (yolo && !trustConfirmed) { error = "Confirm that you trust this plugin to run without a sandbox."; return false }
+    if (yolo && !trustConfirmed) { error = "Confirm that you trust this plugin with YOLO access."; return false }
     pendingAdd = { source: source.trim(), yolo: yolo }
     inspected = null
     let args = ["omarchy-plugin-add", pendingAdd.source, yolo ? "--inspect" : "--stage", "--json"]
@@ -133,7 +134,7 @@ QtObject {
           return
         }
         if (!result.id || !/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(result.commit || "")
-          || result.installed !== false || result.mode !== (pendingAdd.yolo ? "yolo" : "ward")) throw new Error("Invalid clone result")
+          || result.installed !== false || !(pendingAdd.yolo ? ["yolo", "ward-yolo"] : ["ward"]).includes(result.mode)) throw new Error("Invalid clone result")
         inspected = result
         let args = ["omarchy-plugin-add", pendingAdd.source, "--commit", result.commit, "--json", "--yes"]
         if (pendingAdd.yolo) args.push("--yolo")
@@ -141,7 +142,7 @@ QtObject {
       } else if (kind === "add") {
         const result = JSON.parse(output)
         if (!pendingAdd || !inspected || result.id !== inspected.id || result.commit !== inspected.commit
-          || result.mode !== (pendingAdd.yolo ? "yolo" : "ward") || result.installed !== true) throw new Error("Invalid installation result")
+          || result.mode !== inspected.mode || result.installed !== true) throw new Error("Invalid installation result")
         selectedId = result.id
         adding = false
         inspected = null

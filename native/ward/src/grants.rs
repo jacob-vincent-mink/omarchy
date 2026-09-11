@@ -396,6 +396,7 @@ pub struct Manifest {
   pub version: String,
   pub kinds: Vec<String>,
   pub entry_points: BTreeMap<String, String>,
+  #[serde(default)]
   pub sandbox: SandboxManifest,
 }
 
@@ -405,6 +406,12 @@ pub struct SandboxManifest {
   pub version: u32,
   pub entry_point: Option<String>,
   pub requests: Requests,
+}
+
+impl Default for SandboxManifest {
+  fn default() -> Self {
+    Self { version: 1, entry_point: None, requests: Requests::default() }
+  }
 }
 
 impl Manifest {

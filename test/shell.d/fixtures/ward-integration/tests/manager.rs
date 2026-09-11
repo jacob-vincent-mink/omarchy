@@ -33,7 +33,7 @@ fn graphical_installer_survives_real_shell_rescans_and_hands_off_to_review() {
   let source = root.path().join("omarchy");
   fs::create_dir_all(source.join("shell/plugins/panels")).unwrap();
   fs::create_dir_all(source.join("config/omarchy")).unwrap();
-  for name in ["Commons", "Ui", "services", "plugins/bar"] {
+  for name in ["Commons", "Ui", "Ward", "Plugin", "plugin-runtime", "services", "plugins/bar"] {
     std::os::unix::fs::symlink(
       repo.join("shell").join(name),
       source.join("shell").join(name),

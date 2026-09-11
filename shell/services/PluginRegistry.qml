@@ -126,9 +126,11 @@ QtObject {
 
   function entryPointUrl(manifest, kind) {
     if (!Util.isPlainObject(manifest)) return ""
-    // A declared sandbox entry point must never fall back to in-process QML,
-    // including when the optional native runtime is absent or cannot start.
-    if (manifest.sandbox !== undefined || isSandboxed(manifest.id)) return ""
+    // Host-recorded trust selects the loader, never downloaded metadata or a
+    // failed native startup. A YOLO install may carry a sandbox declaration.
+    var installed = installedPlugins[String(manifest.id)]
+    var explicitlyTrusted = installed && (installed.__executionMode === "yolo" || installed.__executionMode === "trusted-local")
+    if (isSandboxed(manifest.id) || (manifest.sandbox !== undefined && !explicitlyTrusted)) return ""
     var ep = manifest.entryPoints ? manifest.entryPoints[kind] : null
     if (!ep) return ""
     var dir = manifest.__sourceDir || ""
@@ -163,7 +165,8 @@ QtObject {
     if (manifest && !manifest.__isFirstParty
         && isolatedIdentities[String(manifest.__sourceDir || "").split("/").pop()]) return true
     if (!isolationAvailable && !(manifest && manifest.__isFirstParty)) return true
-    if (manifest && manifest.sandbox !== undefined) return true
+    if (manifest && !manifest.__isFirstParty
+        && manifest.__executionMode !== "yolo" && manifest.__executionMode !== "trusted-local") return true
     var config = shellConfigProvider ? shellConfigProvider() : null
     var location = findEntryLocation(config, String(id))
     if (location.kind === "plugin") return config.plugins[location.index].sandbox === true
@@ -729,7 +732,7 @@ QtObject {
       }
       var directoryId = String(thirdParty[tk].__sourceDir).split("/").pop()
       var record = installations[directoryId]
-      thirdParty[tk].__executionMode = record ? record.mode : (thirdParty[tk].sandbox !== undefined || identities[tk] || identities[directoryId] ? "ward" : "legacy-trusted")
+      thirdParty[tk].__executionMode = record ? record.mode : "ward"
       thirdParty[tk].__installationError = record ? String(record.error || "") : ""
       merged[tk] = thirdParty[tk]
     }

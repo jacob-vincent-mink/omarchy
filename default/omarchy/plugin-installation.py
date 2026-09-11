@@ -38,14 +38,15 @@ def read_record(directory):
   if (not isinstance(record, dict)
       or set(record) != {"version", "id", "mode", "sourceKind", "source", "commit"}
       or type(record["version"]) is not int or record["version"] != 1 or record["id"] != directory.name
-      or record["mode"] not in ("ward", "yolo", "trusted-local")
-      or record["sourceKind"] not in ("git", "local")
+      or record["mode"] not in ("ward", "ward-yolo", "yolo", "trusted-local")
+      or record["sourceKind"] not in ("git", "local", "builtin")
       or not isinstance(record["source"], str) or not record["source"]
       or len(record["source"]) > 4096 or any(ord(c) < 32 for c in record["source"])
       or (record["sourceKind"] == "local" and not Path(record["source"]).is_absolute())
-      or (record["mode"] == "trusted-local" and record["sourceKind"] != "local")
+      or (record["mode"] == "trusted-local" and record["sourceKind"] not in ("local", "builtin"))
+      or (record["sourceKind"] == "builtin" and (record["mode"] != "trusted-local" or not record["source"].startswith("omarchy.") or not valid_id(record["source"])))
       or not isinstance(record["commit"], str)
-      or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", record["commit"])):
+      or (record["commit"] != "" if record["sourceKind"] == "builtin" else not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", record["commit"]))):
     raise ValueError("invalid installation record")
   return record
 
@@ -72,12 +73,10 @@ def rows():
         raise ValueError("invalid managed plugin manifest")
       if manifest.get("id") != record["id"]:
         raise ValueError("managed plugin identity changed")
-      if git(checkout, "config", "--local", "--get", "remote.origin.url") != record["source"]:
+      if record["sourceKind"] != "builtin" and git(checkout, "config", "--local", "--get", "remote.origin.url") != record["source"]:
         raise ValueError("plugin source changed; remove and explicitly reinstall to review its trust")
-      if record["mode"] != "ward" and "sandbox" in manifest:
-        raise ValueError("trusted installation now declares Ward; reinstall in Ward mode")
-      if record["mode"] == "ward" and "sandbox" not in manifest:
-        raise ValueError("Ward installation lost its sandbox declaration")
+      if record["mode"] in ("yolo", "trusted-local") and "sandbox" in manifest:
+        raise ValueError("sandbox-native code requires a worker installation; explicitly reinstall")
       result.append(record)
     except (ValueError, OSError, subprocess.SubprocessError) as error:
       result.append({"id": directory.name, "mode": "blocked", "error": str(error)})
@@ -93,7 +92,7 @@ def save(record):
   directory = root / record["id"]
   if directory.is_symlink():
     raise ValueError("invalid installation directory")
-  if record["mode"] != "ward":
+  if record["mode"] not in ("ward", "ward-yolo"):
     retained = json.loads(subprocess.check_output(["omarchy-plugin-isolation", "retained"], text=True))
     if record["id"] in retained:
       raise ValueError("retained Ward identity cannot become trusted in-process code")
@@ -135,11 +134,13 @@ try:
       shutil.rmtree(directory)
   elif operation == "record" and len(args) == 5:
     identity, mode, kind, source, commit = args
-    if mode not in ("ward", "yolo", "trusted-local") or kind not in ("git", "local"):
+    if mode not in ("ward", "ward-yolo", "yolo", "trusted-local") or kind not in ("git", "local", "builtin"):
       raise ValueError("invalid installation mode or source")
     if not source or len(source) > 4096 or any(ord(c) < 32 for c in source):
       raise ValueError("invalid installation source")
-    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
+    if kind == "builtin" and (mode != "trusted-local" or not source.startswith("omarchy.") or not valid_id(source)):
+      raise ValueError("built-in clones require explicit local trust")
+    if (commit != "" if kind == "builtin" else not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit)):
       raise ValueError("invalid installed commit")
     save({"version": 1, "id": identity, "mode": mode, "sourceKind": kind, "source": source, "commit": commit})
   else:

@@ -30,7 +30,7 @@ elif [[ ${1:-} == "forget" && $# == 2 ]]; then
 elif (( $# == 0 )) || [[ ${1:-} == "retained" && $# == 1 ]]; then
   {
     if (( $# == 0 )); then
-      omarchy-plugin-installation list | jq -r '.[] | select(.mode == "ward" or .mode == "blocked") | .id'
+      omarchy-plugin-installation list | jq -r '.[] | select(.mode == "ward" or .mode == "ward-yolo" or .mode == "blocked") | .id'
     fi
     for directory in "$identities" "$store/identities"; do
       if [[ -e $directory || -L $directory ]]; then
