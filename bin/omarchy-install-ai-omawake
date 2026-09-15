@@ -5,7 +5,7 @@
 
 set -e
 
-if gum confirm "Install the Omawake release candidate and run its guided setup?"; then
+if gum confirm "Install Omawake, run guided setup, and enable its user service?"; then
   omarchy-pkg-add omawake-bin
 
   omawake setup

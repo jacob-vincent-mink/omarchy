@@ -68,7 +68,7 @@ assert_installer_sequence() {
   "$ROOT/bin/omarchy-install-ai-$app" >/dev/null
 
   expected=$(cat <<EOF
-gum:confirm Install the ${app^} release candidate and run its guided setup?
+gum:confirm Install ${app^}, run guided setup, and enable its user service?
 add:$package
 $app:setup
 $app:setup check

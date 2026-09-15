@@ -5,7 +5,7 @@
 
 set -e
 
-if gum confirm "Install the Omaspeak release candidate and run its guided setup?"; then
+if gum confirm "Install Omaspeak, run guided setup, and enable its user service?"; then
   omarchy-pkg-add omaspeak-bin
 
   omaspeak setup
